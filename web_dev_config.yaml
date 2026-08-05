@@ -1,0 +1,6 @@
+# web_dev_config.yaml
+server:
+  proxy:
+    - target: "https://lt2srv-sscherrer.isl.iar.kit.edu/"
+      prefix: "/api"
+      

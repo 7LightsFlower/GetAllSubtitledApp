@@ -1,0 +1,46 @@
+name: asr_live_translator
+description: Live ASR transcripts with TTS, latest output only.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  mobile_scanner: ^7.4.0
+  http: ^1.6.0
+  web_socket_channel: ^3.0.3
+  shared_preferences: ^2.5.5
+  wakelock_plus: ^1.2.0          # <-- replace wakelock (deprecated)
+  package_info_plus: ^10.2.1
+  firebase_core: ^4.12.1
+  firebase_auth: ^6.5.6
+  cloud_firestore: ^6.7.1
+  flutter_tts: ^4.2.5
+  audioplayers: ^6.8.1
+  share_plus: ^13.2.1             # <-- upgrade
+  path_provider: ^2.1.6
+  html: ^0.15.6
+  pdf: ^3.13.0
+  printing: ^5.15.0               # <-- upgrade
+  webview_windows: ^0.4.0         # <-- use this instead of webview_flutter
+  flutter_secure_storage: ^10.3.1 # <-- upgrade
+  file_picker: ^3.0.4
+  http_parser: ^4.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/fonts/NotoSans-Regular.ttf
+    - assets/fonts/NotoSansSC-Regular.ttf      # Simplified Chinese
+    - assets/fonts/NotoSansTC-Regular.ttf      # Traditional Chinese
+    - assets/fonts/NotoSansJP-Regular.ttf      # Japanese
+    - assets/fonts/NotoSansKR-Regular.ttf      # Korean
+    - assets/fonts/NotoSansArabic-Regular.ttf  # Arabic / Persian
