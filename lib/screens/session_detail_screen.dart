@@ -121,7 +121,8 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       final prefs = await SharedPreferences.getInstance();
       final token = prefs.getString('auth_token') ?? '';
       final response = await http.get(
-        Uri.parse('$authBaseUrl//video_detail/${widget.videoKey}'),
+        // Fixed: removed double slash
+        Uri.parse('$authBaseUrl/video_detail/${widget.videoKey}'),
         headers: {'Authorization': 'Bearer $token'},
       );
       if (response.statusCode == 200) {
@@ -150,7 +151,10 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => JobConfigurationScreen(videoKey: _detail!.key),
+        builder: (_) => JobConfigurationScreen(
+          videoKey: _detail!.key,
+          videoName: _detail!.name, // Pass the video name
+        ),
       ),
     );
   }
@@ -328,7 +332,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           Center(
             child: ElevatedButton.icon(
               onPressed: _startWork,
-              icon: const Icon(Icons.work), // fixed icon
+              icon: const Icon(Icons.work),
               label: const Text('Work on this session'),
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.blue,

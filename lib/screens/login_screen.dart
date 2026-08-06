@@ -14,8 +14,14 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  final TextEditingController _emailController = TextEditingController();
-  final TextEditingController _passwordController = TextEditingController();
+  
+  final TextEditingController _emailController = TextEditingController(
+    text: isDevelopment ? dummyEmail : '',   // autofill only in dev mode
+  );
+  final TextEditingController _passwordController = TextEditingController(
+    text: isDevelopment ? dummyPassword : '',
+  );
+
   bool _isLoading = false;
   final bool _useInternal = false; // toggle for internal server login
 

@@ -8,8 +8,13 @@ import 'package:asr_live_translator/screens/live_output_screen.dart';
 
 class JobConfigurationScreen extends StatefulWidget {
   final String videoKey;
+  final String videoName;
 
-  const JobConfigurationScreen({super.key, required this.videoKey});
+  const JobConfigurationScreen({
+    super.key,
+    required this.videoKey,
+    required this.videoName,
+  });
 
   @override
   State<JobConfigurationScreen> createState() => _JobConfigurationScreenState();
@@ -17,7 +22,8 @@ class JobConfigurationScreen extends StatefulWidget {
 
 class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   final _formKey = GlobalKey<FormState>();
-  String _sessionName = '';
+  late final TextEditingController _sessionNameController;
+
   final List<String> _inputLanguages = ['en'];
   final List<String> _outputLanguages = ['de'];
   final List<String> _audioLanguages = ['de'];
@@ -49,6 +55,26 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   final List<String> _formatOptions = ['online', 'mixed', 'resending', 'offline'];
   final List<String> _chapteringOptions = ['online_dynamic', 'online_static', 'offline', 'streaming_simple'];
 
+  String _getDefaultSessionName() {
+    final now = DateTime.now();
+    final dateTimeStr =
+        '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} '
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    return '${widget.videoName} – $dateTimeStr';
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _sessionNameController = TextEditingController(text: _getDefaultSessionName());
+  }
+
+  @override
+  void dispose() {
+    _sessionNameController.dispose();
+    super.dispose();
+  }
+
   Future<void> _submitJob() async {
     if (!_formKey.currentState!.validate()) return;
     _formKey.currentState!.save();
@@ -66,7 +92,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           'Authorization': 'Bearer $token',
         },
         body: jsonEncode({
-          'session_name': _sessionName,
+          'session_name': _sessionNameController.text.trim(),
           'input_languages': _inputLanguages,
           'output_languages': _outputLanguages,
           'audio_languages': _audioLanguages,
@@ -110,6 +136,49 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     }
   }
 
+  // Helper to build a dropdown inside a FormField (no deprecated `value`)
+  Widget _buildDropdownField<T>({
+    required String label,
+    required T value,
+    required List<T> options,
+    required ValueChanged<T?> onChanged,
+    String? Function(T?)? validator,
+  }) {
+    return FormField<T>(
+      initialValue: value,
+      validator: validator,
+      builder: (field) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            InputDecorator(
+              decoration: InputDecoration(
+                labelText: label,
+                border: const OutlineInputBorder(),
+                errorText: field.errorText,
+              ),
+              child: DropdownButton<T>(
+                value: field.value,
+                isExpanded: true,
+                underline: const SizedBox(),
+                items: options.map((opt) {
+                  return DropdownMenuItem<T>(
+                    value: opt,
+                    child: Text(opt.toString()),
+                  );
+                }).toList(),
+                onChanged: (newVal) {
+                  field.didChange(newVal);
+                  onChanged(newVal);
+                },
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -127,12 +196,14 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             children: [
               // Session Name
               TextFormField(
+                controller: _sessionNameController,
                 decoration: const InputDecoration(
                   labelText: 'Session Name',
                   border: OutlineInputBorder(),
                 ),
-                onSaved: (val) => _sessionName = val ?? '',
-                validator: (val) => val == null || val.isEmpty ? 'Please enter a name' : null,
+                validator: (val) => val == null || val.trim().isEmpty
+                    ? 'Please enter a name'
+                    : null,
               ),
               const SizedBox(height: 16),
 
@@ -202,35 +273,29 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ),
               const SizedBox(height: 16),
 
-              // Availability
-              DropdownButtonFormField<String>(
-                decoration: const InputDecoration(labelText: 'Availability'),
-                initialValue: _availability,
-                items: _availabilityOptions.map((opt) {
-                  return DropdownMenuItem(value: opt, child: Text(opt));
-                }).toList(),
+              // ─── Availability (custom FormField) ──────────────────────
+              _buildDropdownField<String>(
+                label: 'Availability',
+                value: _availability,
+                options: _availabilityOptions,
                 onChanged: (val) => setState(() => _availability = val!),
               ),
               const SizedBox(height: 16),
 
-              // Format
-              DropdownButtonFormField<String>(
-                decoration: const InputDecoration(labelText: 'Presentation Format'),
-                initialValue: _format,
-                items: _formatOptions.map((opt) {
-                  return DropdownMenuItem(value: opt, child: Text(opt));
-                }).toList(),
+              // ─── Format ───────────────────────────────────────────────
+              _buildDropdownField<String>(
+                label: 'Presentation Format',
+                value: _format,
+                options: _formatOptions,
                 onChanged: (val) => setState(() => _format = val!),
               ),
               const SizedBox(height: 16),
 
-              // Smart Chaptering
-              DropdownButtonFormField<String>(
-                decoration: const InputDecoration(labelText: 'Smart Chaptering'),
-                initialValue: _smartChaptering,
-                items: _chapteringOptions.map((opt) {
-                  return DropdownMenuItem(value: opt, child: Text(opt));
-                }).toList(),
+              // ─── Smart Chaptering ─────────────────────────────────────
+              _buildDropdownField<String>(
+                label: 'Smart Chaptering',
+                value: _smartChaptering,
+                options: _chapteringOptions,
                 onChanged: (val) => setState(() => _smartChaptering = val!),
               ),
               const SizedBox(height: 16),

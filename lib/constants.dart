@@ -25,7 +25,8 @@ const String videoApiBaseUrl = internalServerUrl;   // video processing
 // ─── Internal server credentials (for auto‑login) ─────────────
 /// Replace these with your actual internal server credentials.
 const String internalEmail = 'admin@example.com';    // <-- replace with your real internal credentials
-const String internalPassword = 'YourActualPassword123';         // <-- replace
+const String internalPassword = 'yeX4Lmi4sPaJ';         // <-- replace
+/// const String internalPassword = 'YourActualPassword123';         // <-- replace
 
 // ─── Dummy credentials for testing (not auto‑filled) ─────────
 const String dummyEmail = 'testuser@example.com';

@@ -127,7 +127,8 @@ dummy_project = {
 videos.append(dummy_project)
 
 # ─── Auth endpoints ──────────────────────────────────────────────────────────
-
+# Pre‑register a test user for development
+users['testuser@example.com'] = {'name': 'Test User', 'password': 'YourSecurePassword123'}
 
 @app.route('/register', methods=['POST'])
 def register():
