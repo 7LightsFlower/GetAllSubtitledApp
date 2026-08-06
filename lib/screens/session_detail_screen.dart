@@ -1,23 +1,10 @@
 // session_detail_screen.dart
 import 'dart:convert';
+import 'package:asr_live_translator/constants.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:asr_live_translator/constants.dart'; // for authBaseUrl
-
-// ─── Helper for robust date parsing ────────────────────────────
-DateTime _parseDateTime(String dateStr) {
-  try {
-    return DateTime.parse(dateStr);
-  } catch (_) {
-    final cleaned = dateStr.replaceFirst(RegExp(r'\+00:00(?=Z)'), '');
-    try {
-      return DateTime.parse(cleaned);
-    } catch (_) {
-      return DateTime.now();
-    }
-  }
-}
+import 'package:asr_live_translator/screens/job_configuration_screen.dart';
 
 // ─── Data model ──────────────────────────────────────────────────────────────
 
@@ -61,11 +48,9 @@ class SessionDetail {
       key: json['key'] as String,
       name: json['name'] as String? ?? 'Untitled',
       fileName: json['file_name'] as String? ?? 'video.mp4',
-      uploaded: json['uploaded'] != null
-          ? _parseDateTime(json['uploaded'] as String)
-          : DateTime.now(),
+      uploaded: DateTime.parse(json['uploaded'] as String),
       lastOpened: json['last_opened'] != null
-          ? _parseDateTime(json['last_opened'] as String)
+          ? DateTime.parse(json['last_opened'] as String)
           : null,
       duration: (json['duration'] as num?)?.toDouble() ?? 0.0,
       fps: (json['fps'] as num?)?.toDouble() ?? 0.0,
@@ -135,14 +120,9 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     try {
       final prefs = await SharedPreferences.getInstance();
       final token = prefs.getString('auth_token') ?? '';
-      // ✅ Use full URL with authBaseUrl
-      final url = Uri.parse('$authBaseUrl/video_detail/${widget.videoKey}');
       final response = await http.get(
-        url,
-        headers: {
-          'Content-Type': 'application/json',
-          if (token.isNotEmpty) 'Authorization': 'Bearer $token',
-        },
+        Uri.parse('$authBaseUrl//video_detail/${widget.videoKey}'),
+        headers: {'Authorization': 'Bearer $token'},
       );
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -165,7 +145,15 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     await _fetchDetail();
   }
 
-  // ─── Formatting helpers ────────────────────────────────────────
+  void _startWork() {
+    if (_detail == null) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => JobConfigurationScreen(videoKey: _detail!.key),
+      ),
+    );
+  }
 
   String _formatDuration(double seconds) {
     final int totalSec = seconds.round();
@@ -195,8 +183,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     if (diff.inDays == 1) return 'Yesterday';
     return '${dt.day}/${dt.month}/${dt.year}';
   }
-
-  // ─── Build ──────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -240,26 +226,22 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── Thumbnail ──────────────────────────────────────────────────
+          // Thumbnail
           if (detail.thumbnailUrl != null)
-            Card(
-              elevation: 2,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: Image.network(
-                  detail.thumbnailUrl!,
-                  width: double.infinity,
-                  height: 200,
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) =>
-                      const Icon(Icons.broken_image, size: 80),
-                ),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: Image.network(
+                detail.thumbnailUrl!,
+                width: double.infinity,
+                height: 200,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) =>
+                    const Icon(Icons.broken_image, size: 80),
               ),
             ),
           const SizedBox(height: 16),
 
-          // ── Title & File name ──────────────────────────────────────────
+          // Title & File name
           Text(
             detail.name,
             style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
@@ -271,7 +253,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           ),
           const SizedBox(height: 16),
 
-          // ── Metadata grid ──────────────────────────────────────────────
+          // Metadata grid
           Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -287,7 +269,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           ),
           const SizedBox(height: 24),
 
-          // ── Languages ──────────────────────────────────────────────────
+          // Languages
           if (detail.languages.isNotEmpty) ...[
             const Text(
               'Languages',
@@ -303,45 +285,40 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
             const SizedBox(height: 16),
           ],
 
-          // ── Segments ────────────────────────────────────────────────────
+          // Segments
           if (detail.segments.isNotEmpty) ...[
             const Text(
               'Segments',
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 8),
-            Card(
-              elevation: 1,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              child: ListView.separated(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                itemCount: detail.segments.length,
-                padding: EdgeInsets.zero,
-                separatorBuilder: (_, __) => const Divider(height: 1),
-                itemBuilder: (ctx, index) {
-                  final seg = detail.segments[index];
-                  return ListTile(
-                    leading: CircleAvatar(
-                      child: Text('${index + 1}'),
-                    ),
-                    title: Text('${_formatDuration(seg.start)} – ${_formatDuration(seg.end)}'),
-                    subtitle: seg.language != null ? Text(seg.language!) : null,
-                    trailing: seg.url != null
-                        ? IconButton(
-                            icon: const Icon(Icons.play_arrow, color: Colors.blue),
-                            onPressed: () {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text('Playing segment ${index + 1}'),
-                                ),
-                              );
-                            },
-                          )
-                        : null,
-                  );
-                },
-              ),
+            ListView.separated(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: detail.segments.length,
+              separatorBuilder: (_, __) => const Divider(),
+              itemBuilder: (ctx, index) {
+                final seg = detail.segments[index];
+                return ListTile(
+                  leading: CircleAvatar(
+                    child: Text('${index + 1}'),
+                  ),
+                  title: Text('${_formatDuration(seg.start)} – ${_formatDuration(seg.end)}'),
+                  subtitle: seg.language != null ? Text(seg.language!) : null,
+                  trailing: seg.url != null
+                      ? IconButton(
+                          icon: const Icon(Icons.play_arrow),
+                          onPressed: () {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('Playing segment ${index + 1}'),
+                              ),
+                            );
+                          },
+                        )
+                      : null,
+                );
+              },
             ),
           ],
 
@@ -350,12 +327,8 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           // ── Work button ────────────────────────────────────────────────
           Center(
             child: ElevatedButton.icon(
-              onPressed: () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Work on this session (coming soon)')),
-                );
-              },
-              icon: const Icon(Icons.work),
+              onPressed: _startWork,
+              icon: const Icon(Icons.work), // fixed icon
               label: const Text('Work on this session'),
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.blue,
