@@ -49,5 +49,14 @@
 	<array>
     	<string>audio</string>
 	</array>
-</dict>
+	<key>CFBundleURLTypes</key>
+		<array>
+			<dict>
+				<key>CFBundleURLSchemes</key>
+				<array>
+					<string>com.GetAllSubtitled.app</string>
+				</array>
+			</dict>
+		</array>
+	</dict>
 </plist>
