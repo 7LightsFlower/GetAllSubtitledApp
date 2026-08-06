@@ -1,6 +1,7 @@
 // live_output_screen.dart
 import 'dart:convert';
 import 'package:asr_live_translator/constants.dart';
+import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -33,10 +34,26 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
   Future<void> _fetchStatus() async {
     setState(() => _isLoading = true);
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('auth_token') ?? '';
+      // Try to get a valid internal token (OAuth2)
+      final internalToken = await InternalAuthService.getValidAccessToken();
+      String baseUrl;
+      String token;
+
+      if (internalToken != null) {
+        // Use internal server with OAuth token
+        baseUrl = internalServerUrl;
+        token = internalToken;
+      } else {
+        // Fall back to public server with main auth token
+        final prefs = await SharedPreferences.getInstance();
+        final publicToken = prefs.getString('auth_token') ?? '';
+        if (publicToken.isEmpty) throw Exception('Not logged in.');
+        baseUrl = authBaseUrl;
+        token = publicToken;
+      }
+
       final response = await http.get(
-        Uri.parse('$authBaseUrl/job_status/${widget.jobId}'),
+        Uri.parse('$baseUrl/job_status/${widget.jobId}'),
         headers: {'Authorization': 'Bearer $token'},
       );
       if (response.statusCode == 200) {
@@ -46,7 +63,7 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
           _isLoading = false;
         });
       } else {
-        throw Exception('Failed to load job status');
+        throw Exception('Failed to load job status (HTTP ${response.statusCode})');
       }
     } catch (e) {
       setState(() {

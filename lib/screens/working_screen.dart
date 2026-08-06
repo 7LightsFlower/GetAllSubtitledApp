@@ -15,12 +15,11 @@ DateTime _parseDateTime(String dateStr) {
   try {
     return DateTime.parse(dateStr);
   } catch (_) {
-    // Clean up common invalid formats: e.g., "2026-08-05T13:13:35.197942+00:00Z"
     final cleaned = dateStr.replaceFirst(RegExp(r'\+00:00(?=Z)'), '');
     try {
       return DateTime.parse(cleaned);
     } catch (_) {
-      return DateTime.now(); // fallback
+      return DateTime.now();
     }
   }
 }
@@ -111,33 +110,16 @@ class _WorkingScreenState extends State<WorkingScreen> {
 
     try {
       final url = Uri.parse('$authBaseUrl/videos');
-      if (kDebugMode) {
-        print('📡 Fetching videos from: $url');
-      }
+      if (kDebugMode) print('📡 Fetching videos from: $url');
       final response = await http.get(url, headers: {'Content-Type': 'application/json'});
 
-      if (kDebugMode) {
-        print('📡 Status: ${response.statusCode}');
-      }
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
-        if (kDebugMode) {
-          print('📄 Response keys: ${data.keys}');
-        }
-        if (kDebugMode) {
-          print('📄 Projects count: ${(data['projects'] as List?)?.length ?? 0}');
-        }
-
         final projects = (data['projects'] as List?)?.map((e) {
           try {
             return VideoProject.fromJson(e as Map<String, dynamic>);
           } catch (e) {
-            if (kDebugMode) {
-              print('❌ Error parsing project: $e');
-            }
-            if (kDebugMode) {
-              print('📄 Project JSON: $e');
-            }
+            if (kDebugMode) print('❌ Error parsing project: $e');
             return null;
           }
         }).whereType<VideoProject>().toList() ?? [];
@@ -152,9 +134,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
         throw Exception('Failed to load projects (HTTP ${response.statusCode})');
       }
     } catch (e) {
-      if (kDebugMode) {
-        print('❌ Error in _fetchProjects: $e');
-      }
+      if (kDebugMode) print('❌ Error in _fetchProjects: $e');
       setState(() {
         _listError = 'Error loading projects: $e';
         _isLoading = false;
@@ -170,6 +150,23 @@ class _WorkingScreenState extends State<WorkingScreen> {
         backgroundColor: isError ? Colors.red : Colors.green,
       ),
     );
+  }
+
+  // ─── OAuth2 actions ─────────────────────────────────────────────────
+  Future<void> _showOAuthLogin() async {
+    final success = await InternalAuthService.loginWithOAuth();
+    if (success && mounted) {
+      _showSnackBar('Internal server connected via OAuth.');
+    } else if (mounted) {
+      _showSnackBar('OAuth login failed. Please try again.', isError: true);
+    }
+  }
+
+  Future<void> _logoutInternal() async {
+    await InternalAuthService.clearTokens();
+    if (mounted) {
+      _showSnackBar('Internal server disconnected.');
+    }
   }
 
   // ─── Navigation and actions ──────────────────────────────────
@@ -312,9 +309,9 @@ class _WorkingScreenState extends State<WorkingScreen> {
 
   // ─── Internal actions (require token) ──────────────────────────────
   Future<void> _stopSegmentation(String videoKey) async {
-    final token = await InternalAuthService.getToken();
+    final token = await InternalAuthService.getValidAccessToken();
     if (token == null) {
-      _showSnackBar('Authentication required. Connect via session detail.', isError: true);
+      _showSnackBar('Authentication required. Log in via Internal OAuth.', isError: true);
       return;
     }
 
@@ -340,9 +337,9 @@ class _WorkingScreenState extends State<WorkingScreen> {
   }
 
   Future<void> _deleteProject(String videoKey) async {
-    final token = await InternalAuthService.getToken();
+    final token = await InternalAuthService.getValidAccessToken();
     if (token == null) {
-      _showSnackBar('Authentication required. Connect via session detail.', isError: true);
+      _showSnackBar('Authentication required. Log in via Internal OAuth.', isError: true);
       return;
     }
 
@@ -387,6 +384,59 @@ class _WorkingScreenState extends State<WorkingScreen> {
     ) ?? false;
   }
 
+  // ─── Edit name – uses internal API ──────────────────────────────────
+  Future<void> _editProjectName(VideoProject project) async {
+    final token = await InternalAuthService.getValidAccessToken();
+    if (token == null) {
+      _showSnackBar('Authentication required. Log in via Internal OAuth.', isError: true);
+      return;
+    }
+
+    if (!mounted) return;
+    final controller = TextEditingController(text: project.name);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Edit Project Name'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Name'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (newName != null && newName.isNotEmpty) {
+      try {
+        final response = await http.post(
+          Uri.parse('$internalServerUrl/update_project_name/${project.key}'),
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer $token',
+          },
+          body: jsonEncode({'project_name': newName}),
+        );
+        if (response.statusCode == 200) {
+          _showSnackBar('Project name updated.');
+          _fetchProjects();
+        } else {
+          _showSnackBar('Failed to update name.', isError: true);
+        }
+      } catch (e) {
+        _showSnackBar('Error: $e', isError: true);
+      }
+    }
+  }
+
   // ─── Upload – using bytes (web-compatible) ──────────────────────────
   Future<void> _uploadVideo() async {
     FilePickerResult? result = await FilePicker.platform.pickFiles(
@@ -396,7 +446,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
 
     final pickedFile = result.files.single;
     final fileName = pickedFile.name;
-    final bytes = pickedFile.bytes; // Uint8List
+    final bytes = pickedFile.bytes;
 
     if (bytes == null) {
       _showSnackBar('Failed to read file bytes', isError: true);
@@ -415,6 +465,16 @@ class _WorkingScreenState extends State<WorkingScreen> {
     );
   }
 
+  // ─── Logout from public server ──────────────────────────────────────
+  Future<void> _logoutPublic() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('auth_token');
+    // Also clear internal tokens if you want
+    await InternalAuthService.clearTokens();
+    if (!mounted) return;
+    Navigator.pushReplacementNamed(context, '/login');
+  }
+
   // ─── UI Build ──────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
@@ -422,6 +482,26 @@ class _WorkingScreenState extends State<WorkingScreen> {
       appBar: AppBar(
         title: const Text(appTitle),
         actions: [
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.settings),
+            onSelected: (value) {
+              if (value == 'oauth_login') {
+                _showOAuthLogin();
+              } else if (value == 'oauth_logout') {
+                _logoutInternal();
+              }
+            },
+            itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: 'oauth_login',
+                child: Text('Internal OAuth Login'),
+              ),
+              const PopupMenuItem(
+                value: 'oauth_logout',
+                child: Text('Internal Logout'),
+              ),
+            ],
+          ),
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _fetchProjects,
@@ -429,8 +509,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
           ),
           IconButton(
             icon: const Icon(Icons.logout),
-            onPressed: _logout,
-            tooltip: 'Logout',
+            onPressed: _logoutPublic,
+            tooltip: 'Logout from public server',
           ),
         ],
       ),
@@ -727,67 +807,6 @@ class _WorkingScreenState extends State<WorkingScreen> {
         ],
       );
     }
-  }
-
-  // ─── Edit name – uses internal API ──────────────────────────────────
-  Future<void> _editProjectName(VideoProject project) async {
-    final token = await InternalAuthService.getToken();
-    if (token == null) {
-      _showSnackBar('Authentication required. Connect via session detail.', isError: true);
-      return;
-    }
-
-    if (!mounted) return;
-    final controller = TextEditingController(text: project.name);
-    final newName = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Edit Project Name'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(labelText: 'Name'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    );
-    if (newName != null && newName.isNotEmpty) {
-      try {
-        final response = await http.post(
-          Uri.parse('$internalServerUrl/update_project_name/${project.key}'),
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer $token',
-          },
-          body: jsonEncode({'project_name': newName}),
-        );
-        if (response.statusCode == 200) {
-          _showSnackBar('Project name updated.');
-          _fetchProjects();
-        } else {
-          _showSnackBar('Failed to update name.', isError: true);
-        }
-      } catch (e) {
-        _showSnackBar('Error: $e', isError: true);
-      }
-    }
-  }
-
-  Future<void> _logout() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('auth_token');
-    await InternalAuthService.clearToken();
-    if (!mounted) return;
-    Navigator.pushReplacementNamed(context, '/login');
   }
 
   String _formatDate(DateTime dt) {

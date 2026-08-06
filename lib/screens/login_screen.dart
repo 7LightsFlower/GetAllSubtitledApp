@@ -1,6 +1,5 @@
 // login_screen.dart
 import 'package:asr_live_translator/constants.dart';
-import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
@@ -14,16 +13,14 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  
   final TextEditingController _emailController = TextEditingController(
-    text: isDevelopment ? dummyEmail : '',   // autofill only in dev mode
+    text: isDevelopment ? dummyEmail : '', // autofill only in dev mode
   );
   final TextEditingController _passwordController = TextEditingController(
     text: isDevelopment ? dummyPassword : '',
   );
 
   bool _isLoading = false;
-  final bool _useInternal = false; // toggle for internal server login
 
   Future<void> _login() async {
     final email = _emailController.text.trim();
@@ -42,7 +39,7 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _isLoading = true);
 
     try {
-      // 1. Public server login
+      // Public server login
       final response = await http.post(
         Uri.parse('$authBaseUrl/login'),
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -58,24 +55,6 @@ class _LoginScreenState extends State<LoginScreen> {
         if (token != null) {
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString('auth_token', token);
-        }
-
-        // 2. Internal server login (if toggle is ON)
-        if (_useInternal) {
-          final internalOk = await InternalAuthService.loginInternal();
-          if (!internalOk && mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text(
-                  'Internal server login failed. Video processing features may be unavailable.',
-                ),
-                backgroundColor: Colors.orange,
-              ),
-            );
-          }
-        } else {
-          // Ensure internal token is cleared if user doesn't want it
-          await InternalAuthService.clearToken();
         }
 
         if (mounted) {
