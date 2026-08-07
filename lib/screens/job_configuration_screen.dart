@@ -85,6 +85,9 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     try {
       // Try to get a valid internal token (OAuth2)
       final internalToken = await InternalAuthService.getValidAccessToken();
+            if (internalToken == null) {
+        throw Exception('Please log in to the internal server first.');
+      }
       String baseUrl;
       String token;
 

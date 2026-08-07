@@ -169,6 +169,59 @@ class _WorkingScreenState extends State<WorkingScreen> {
     }
   }
 
+  // ─── Manual code exchange (debug workaround) ──────────────────────
+  void _showManualCodeDialog() {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Manual Code Exchange'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Paste the code from the redirect URL after login:'),
+            const SizedBox(height: 8),
+            TextField(
+              controller: controller,
+              decoration: const InputDecoration(
+                labelText: 'Code',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              final code = controller.text.trim();
+              if (code.isEmpty) {
+                ScaffoldMessenger.of(ctx).showSnackBar(
+                  const SnackBar(content: Text('Please enter a code')),
+                );
+                return;
+              }
+              final success = await InternalAuthService.exchangeCodeManually(code);
+              // ✅ Check that both the screen AND the dialog are still mounted
+              if (!mounted) return;
+              if (!ctx.mounted) return;
+              if (success) {
+                _showSnackBar('Token obtained successfully!');
+              } else {
+                _showSnackBar('Exchange failed. Check console.', isError: true);
+              }
+              Navigator.pop(ctx);
+            },
+            child: const Text('Exchange'),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ─── Navigation and actions ──────────────────────────────────
   void _openSessionDetail(String videoKey) {
     Navigator.push(
@@ -489,6 +542,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
                 _showOAuthLogin();
               } else if (value == 'oauth_logout') {
                 _logoutInternal();
+              } else if (value == 'manual_code') {
+                _showManualCodeDialog();
               }
             },
             itemBuilder: (context) => [
@@ -499,6 +554,10 @@ class _WorkingScreenState extends State<WorkingScreen> {
               const PopupMenuItem(
                 value: 'oauth_logout',
                 child: Text('Internal Logout'),
+              ),
+              const PopupMenuItem(
+                value: 'manual_code',
+                child: Text('Manual Code Exchange (debug)'),
               ),
             ],
           ),
@@ -850,7 +909,7 @@ class _UploadDialogState extends State<_UploadDialog> {
   double _progress = 0.0;
   bool _isUploading = false;
   String _statusText = 'Ready';
-  bool _autoSegmentation = false;
+  bool _autoSegmentation = true; // enabled by default
 
   @override
   void initState() {

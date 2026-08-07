@@ -16,6 +16,9 @@ class InternalAuthService {
   static const String _refreshTokenKey = 'internal_refresh_token';
   static const String _expiryKey = 'internal_token_expiry';
 
+  // ─── Store the last verifier for manual exchange ──────────
+  static String? _lastVerifier;
+
   // ─── PKCE helpers ──────────────────────────────────────────────
   static String _generateCodeVerifier() {
     final random = Random.secure();
@@ -33,6 +36,7 @@ class InternalAuthService {
   static Future<bool> loginWithOAuth() async {
     try {
       final verifier = _generateCodeVerifier();
+      _lastVerifier = verifier; // store for manual exchange
       final challenge = _generateCodeChallenge(verifier);
 
       final authUrl = Uri.parse('$dexIssuer/auth').replace(queryParameters: {
@@ -59,7 +63,7 @@ class InternalAuthService {
         // Poll the popup's URL every 500ms
         Timer.periodic(const Duration(milliseconds: 500), (timer) {
           try {
-            // Cast to dynamic to avoid static analysis issues with 'href'
+            // Cast to dynamic to avoid static analysis issues
             final currentUrl = (popup.location as dynamic).href as String;
             if (currentUrl.startsWith(dexRedirectUri)) {
               timer.cancel();
@@ -80,13 +84,11 @@ class InternalAuthService {
         );
       } else {
         // ─── Mobile (Android/iOS): use native plugin ─────────────
-        // ⚠️ IMPORTANT: For mobile, you must use a custom URL scheme
-        // (e.g., 'myapp://oauth') and ask the Dex admin to add it as
-        // an allowed redirect URI. Then set callbackUrlScheme = 'myapp'
-        // and change dexRedirectUri accordingly.
+        // ⚠️ For mobile you need a custom scheme (e.g., 'myapp://oauth')
+        // and must add it to the allowed redirect URIs on the server.
         redirectUrl = await FlutterWebAuth.authenticate(
           url: authUrl.toString(),
-          callbackUrlScheme: 'https', // fails on mobile – you need a custom scheme
+          callbackUrlScheme: 'https', // Replace with your custom scheme
         );
       }
 
@@ -143,6 +145,59 @@ class InternalAuthService {
       return true;
     } catch (e) {
       if (kDebugMode) print('OAuth login error: $e');
+      return false;
+    }
+  }
+
+  // ─── Manual exchange (debug workaround) ──────────────────────
+  static Future<bool> exchangeCodeManually(String code) async {
+    if (_lastVerifier == null) {
+      if (kDebugMode) print('No verifier available. Please run OAuth login first.');
+      return false;
+    }
+    try {
+      final tokenResponse = await http.post(
+        Uri.parse('$dexIssuer/token'),
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: {
+          'client_id': dexClientId,
+          'grant_type': 'authorization_code',
+          'code': code,
+          'redirect_uri': dexRedirectUri,
+          'code_verifier': _lastVerifier!,
+        },
+      );
+
+      if (tokenResponse.statusCode != 200) {
+        if (kDebugMode) {
+          print('Manual token exchange failed: ${tokenResponse.statusCode}');
+          print('Body: ${tokenResponse.body}');
+        }
+        return false;
+      }
+
+      final data = jsonDecode(tokenResponse.body);
+      final accessToken = data['access_token'];
+      final refreshToken = data['refresh_token'];
+      final expiresIn = data['expires_in'] ?? 3600;
+
+      if (accessToken == null) {
+        if (kDebugMode) print('No access token in manual response');
+        return false;
+      }
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_accessTokenKey, accessToken);
+      if (refreshToken != null) {
+        await prefs.setString(_refreshTokenKey, refreshToken);
+      }
+      final expiry = DateTime.now().toUtc().add(Duration(seconds: expiresIn));
+      await prefs.setString(_expiryKey, expiry.toIso8601String());
+
+      if (kDebugMode) print('✅ Manual token exchange successful');
+      return true;
+    } catch (e) {
+      if (kDebugMode) print('Manual exchange error: $e');
       return false;
     }
   }

@@ -1,10 +1,10 @@
 // live_output_screen.dart
+import 'dart:async';
 import 'dart:convert';
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 
 class LiveOutputScreen extends StatefulWidget {
   final String videoKey;
@@ -22,8 +22,11 @@ class LiveOutputScreen extends StatefulWidget {
 
 class _LiveOutputScreenState extends State<LiveOutputScreen> {
   bool _isLoading = true;
+  bool _isFetching = false; // prevent overlapping requests
   String? _error;
   Map<String, dynamic>? _outputData;
+  Timer? _pollTimer;
+  bool _isDisposed = false;
 
   @override
   void initState() {
@@ -31,46 +34,83 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
     _fetchStatus();
   }
 
+  @override
+  void dispose() {
+    _isDisposed = true;
+    _pollTimer?.cancel();
+    super.dispose();
+  }
+
   Future<void> _fetchStatus() async {
-    setState(() => _isLoading = true);
+    // Avoid overlapping requests
+    if (_isFetching || _isDisposed) return;
+    setState(() => _isFetching = true);
+
     try {
-      // Try to get a valid internal token (OAuth2)
+      // Get token
       final internalToken = await InternalAuthService.getValidAccessToken();
+      if (internalToken == null) {
+        throw Exception('Please log in to the internal server first.');
+      }
       String baseUrl;
       String token;
 
-      if (internalToken != null) {
-        // Use internal server with OAuth token
-        baseUrl = internalServerUrl;
-        token = internalToken;
-      } else {
-        // Fall back to public server with main auth token
-        final prefs = await SharedPreferences.getInstance();
-        final publicToken = prefs.getString('auth_token') ?? '';
-        if (publicToken.isEmpty) throw Exception('Not logged in.');
-        baseUrl = authBaseUrl;
-        token = publicToken;
-      }
+      baseUrl = internalServerUrl;
+      token = internalToken;
 
       final response = await http.get(
         Uri.parse('$baseUrl/job_status/${widget.jobId}'),
         headers: {'Authorization': 'Bearer $token'},
       );
+
+      if (_isDisposed) return;
+
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         setState(() {
           _outputData = data;
           _isLoading = false;
+          _error = null;
         });
+
+        // Start/stop polling based on status
+        final status = data['status'] as String? ?? 'processing';
+        if (status == 'completed' || status == 'failed') {
+          _pollTimer?.cancel();
+          _pollTimer = null;
+        } else {
+          // If no timer is running, start one
+          if (_pollTimer == null || !_pollTimer!.isActive) {
+            _pollTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
+              _fetchStatus();
+            });
+          }
+        }
       } else {
         throw Exception('Failed to load job status (HTTP ${response.statusCode})');
       }
     } catch (e) {
-      setState(() {
-        _error = e.toString();
-        _isLoading = false;
-      });
+      if (!_isDisposed) {
+        setState(() {
+          _error = e.toString();
+          _isLoading = false;
+        });
+        // Stop polling on error
+        _pollTimer?.cancel();
+        _pollTimer = null;
+      }
+    } finally {
+      if (!_isDisposed) {
+        setState(() => _isFetching = false);
+      }
     }
+  }
+
+  // Manual refresh – also stops and restarts polling
+  void _manualRefresh() {
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    _fetchStatus();
   }
 
   @override
@@ -83,7 +123,8 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: _fetchStatus,
+            onPressed: _manualRefresh,
+            tooltip: 'Refresh',
           ),
         ],
       ),
@@ -97,7 +138,7 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
                       Text('Error: $_error', style: const TextStyle(color: Colors.red)),
                       const SizedBox(height: 16),
                       ElevatedButton(
-                        onPressed: _fetchStatus,
+                        onPressed: _manualRefresh,
                         child: const Text('Retry'),
                       ),
                     ],
