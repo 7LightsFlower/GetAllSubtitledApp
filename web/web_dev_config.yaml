@@ -1,0 +1,5 @@
+proxy:
+  - path: /dex/token
+    target: https://lt2srv-sscherrer.isl.iar.kit.edu/dex/token
+    headers:
+      Access-Control-Allow-Origin: "*"
