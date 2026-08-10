@@ -219,16 +219,47 @@ class InternalAuthService {
     final refreshToken = prefs.getString(_refreshTokenKey);
     final expiryStr = prefs.getString(_expiryKey);
 
-    if (accessToken == null) return null;
+    if (kDebugMode) {
+      print('🔍 getValidAccessToken: accessToken = ${accessToken != null ? "exists (${accessToken.length} chars)" : "null"}');
+    }
+    if (kDebugMode) {
+      print('🔍 getValidAccessToken: refreshToken = ${refreshToken != null ? "exists" : "null"}');
+    }
+    if (kDebugMode) {
+      print('🔍 getValidAccessToken: expiryStr = $expiryStr');
+    }
+
+    if (accessToken == null) {
+      if (kDebugMode) {
+        print('🔍 No access token – returning null');
+      }
+      return null;
+    }
 
     if (expiryStr != null) {
       final expiry = DateTime.parse(expiryStr);
-      if (DateTime.now().toUtc().isBefore(expiry)) {
+      final now = DateTime.now().toUtc();
+      if (kDebugMode) {
+        print('🔍 Token expiry: $expiry, now: $now, isBefore: ${now.isBefore(expiry)}');
+      }
+      if (now.isBefore(expiry)) {
+        if (kDebugMode) {
+          print('✅ Token valid – returning it');
+        }
         return accessToken;
       }
+    } else {
+      if (kDebugMode) {
+        print('⚠️ No expiry stored – assuming valid');
+      }
+      return accessToken; // treat as valid if no expiry
     }
 
+    // Token expired – try to refresh
     if (refreshToken != null) {
+      if (kDebugMode) {
+        print('🔄 Token expired – attempting refresh...');
+      }
       try {
         final credentials = base64Encode(utf8.encode('$dexClientId:$dexClientSecret'));
         final response = await http.post(
@@ -254,14 +285,30 @@ class InternalAuthService {
             }
             final expiry = DateTime.now().toUtc().add(Duration(seconds: expiresIn));
             await prefs.setString(_expiryKey, expiry.toIso8601String());
+            if (kDebugMode) {
+              print('✅ Refresh successful – returning new token');
+            }
             return newAccessToken;
+          }
+        } else {
+          if (kDebugMode) {
+            print('❌ Refresh failed with status ${response.statusCode}: ${response.body}');
           }
         }
       } catch (e) {
-        if (kDebugMode) print('❌ Refresh failed: $e');
+        if (kDebugMode) {
+          print('❌ Refresh error: $e');
+        }
+      }
+    } else {
+      if (kDebugMode) {
+        print('❌ No refresh token – clearing and returning null');
       }
     }
 
+    if (kDebugMode) {
+      print('❌ Token refresh failed or missing – clearing tokens and returning null');
+    }
     await clearTokens();
     return null;
   }

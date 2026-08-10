@@ -2,9 +2,9 @@
 import 'dart:convert';
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:asr_live_translator/screens/live_output_screen.dart';
 
 class JobConfigurationScreen extends StatefulWidget {
@@ -85,24 +85,18 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     try {
       // Try to get a valid internal token (OAuth2)
       final internalToken = await InternalAuthService.getValidAccessToken();
-            if (internalToken == null) {
+      if (kDebugMode) {
+        print('🔑 Token before job start: ${internalToken != null ? 'exists' : 'null'}');
+      }
+      if (internalToken == null) {
         throw Exception('Please log in to the internal server first.');
       }
       String baseUrl;
       String token;
 
-      if (internalToken != null) {
-        // Use internal server with OAuth token
-        baseUrl = internalServerUrl;
-        token = internalToken;
-      } else {
-        // Fall back to public server with main auth token
-        final prefs = await SharedPreferences.getInstance();
-        final publicToken = prefs.getString('auth_token') ?? '';
-        if (publicToken.isEmpty) throw Exception('Not logged in.');
-        baseUrl = authBaseUrl;
-        token = publicToken;
-      }
+      // Use internal server with OAuth token
+      baseUrl = internalServerUrl;
+      token = internalToken;
 
       final url = Uri.parse('$baseUrl/start_job/${widget.videoKey}');
       final response = await http.post(

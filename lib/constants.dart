@@ -33,10 +33,10 @@ const String dummyPassword = 'YourSecurePassword123';
 
 // ─── Dex OAuth 2.0 Configuration ──────────────────────────────
 const String dexClientId = 'traefik-forward-auth';
-const String dexClientSecret = 'XXXXXXXXX';   // <-- replace with your actual client secret from 
+const String dexClientSecret = 'bar';   // <-- replace with your actual client secret from 
 /// docker ps | grep dex
 /// docker inspect <docker_id> | grep -i secret
-/// const String dexRedirectUri = 'http://localhost:5000/oauth_callback.html';
-const String dexRedirectUri = 'https://lt2srv-sscherrer.isl.iar.kit.edu/_oauth';
+const String dexRedirectUri = 'http://localhost:8080/oauth_callback.html';
+/// const String dexRedirectUri = 'https://lt2srv-sscherrer.isl.iar.kit.edu/_oauth';
 const String dexIssuer = 'https://lt2srv-sscherrer.isl.iar.kit.edu/dex';
 const List<String> dexScopes = ['openid', 'profile', 'email'];
