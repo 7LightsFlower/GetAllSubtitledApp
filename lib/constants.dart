@@ -36,7 +36,8 @@ const String dexClientId = 'traefik-forward-auth';
 const String dexClientSecret = 'bar';   // <-- replace with your actual client secret from 
 /// docker ps | grep dex
 /// docker inspect <docker_id> | grep -i secret
-const String dexRedirectUri = 'http://localhost:8080/oauth_callback.html';
+const String dexRedirectUri = 'http://localhost:8080/oauth_callback.html'; 
+// route should be added to the dex config.yaml file in "lt2srv-sscherrer-dev/traefik/auth/"
 /// const String dexRedirectUri = 'https://lt2srv-sscherrer.isl.iar.kit.edu/_oauth';
 const String dexIssuer = 'https://lt2srv-sscherrer.isl.iar.kit.edu/dex';
 const List<String> dexScopes = ['openid', 'profile', 'email'];
