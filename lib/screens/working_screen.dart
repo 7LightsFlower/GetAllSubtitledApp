@@ -169,6 +169,15 @@ class _WorkingScreenState extends State<WorkingScreen> {
     }
   }
 
+  // ─── Redirect login (full‑page redirect) ────────────────────────────
+  Future<void> _loginWithRedirect() async {
+    try {
+      await InternalAuthService.redirectToDex();
+    } catch (e) {
+      _showSnackBar('Redirect error: $e', isError: true);
+    }
+  }
+
   // ─── Manual code exchange (debug workaround) ──────────────────────
   void _showManualCodeDialog() {
     final controller = TextEditingController();
@@ -544,12 +553,18 @@ class _WorkingScreenState extends State<WorkingScreen> {
                 _logoutInternal();
               } else if (value == 'manual_code') {
                 _showManualCodeDialog();
+              } else if (value == 'redirect_login') {
+                _loginWithRedirect();
               }
             },
             itemBuilder: (context) => [
               const PopupMenuItem(
+                value: 'redirect_login',
+                child: Text('Login with Redirect (Dex)'),
+              ),
+              const PopupMenuItem(
                 value: 'oauth_login',
-                child: Text('Internal OAuth Login'),
+                child: Text('Internal OAuth Login (popup)'),
               ),
               const PopupMenuItem(
                 value: 'oauth_logout',

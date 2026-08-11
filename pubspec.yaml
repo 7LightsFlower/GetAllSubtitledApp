@@ -13,6 +13,7 @@ dependencies:
     sdk: flutter
   mobile_scanner: ^7.4.0
   http: ^1.6.0
+  web: ^1.0.0
   web_socket_channel: ^3.0.3
   shared_preferences: ^2.5.5
   wakelock_plus: ^1.2.0          # <-- replace wakelock (deprecated)

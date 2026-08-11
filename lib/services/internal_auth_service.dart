@@ -18,6 +18,17 @@ class InternalAuthService {
 
   static String? _lastVerifier;
 
+  // ─── Helper: token endpoint (proxied on web) ────────────────
+  static bool get _useProxy => false; // set to true only if proxy works
+
+  static String get _tokenEndpoint {
+    if (kIsWeb && _useProxy) {
+      return '/dex/token';
+    } else {
+      return '$dexIssuer/token';
+    }
+  }
+
   static String _generateCodeVerifier() {
     final random = Random.secure();
     var bytes = List<int>.generate(32, (_) => random.nextInt(256));
@@ -94,16 +105,17 @@ class InternalAuthService {
         return false;
       }
 
-      // ─── Exchange code with Basic Auth ──────────────────────────
+      // ─── Exchange code with Basic Auth (proxied on web) ──────
       final credentials = base64Encode(utf8.encode('$dexClientId:$dexClientSecret'));
       if (kDebugMode) {
         print('🔑 Basic Auth length: ${credentials.length}');
         print('🔑 Client ID: $dexClientId');
         print('🔑 Secret (first 10 chars): ${dexClientSecret.substring(0, 10)}...');
+        print('🔑 Token endpoint: $_tokenEndpoint');
       }
 
       final tokenResponse = await http.post(
-        Uri.parse('$dexIssuer/token'),
+        Uri.parse(_tokenEndpoint),
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
           'Authorization': 'Basic $credentials',
@@ -162,10 +174,11 @@ class InternalAuthService {
         print('🔑 Manual exchange – Basic Auth length: ${credentials.length}');
         print('🔑 Client ID: $dexClientId');
         print('🔑 Secret (first 10 chars): ${dexClientSecret.substring(0, 10)}...');
+        print('🔑 Token endpoint: $_tokenEndpoint');
       }
 
       final tokenResponse = await http.post(
-        Uri.parse('$dexIssuer/token'),
+        Uri.parse(_tokenEndpoint),
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
           'Authorization': 'Basic $credentials',
@@ -263,7 +276,7 @@ class InternalAuthService {
       try {
         final credentials = base64Encode(utf8.encode('$dexClientId:$dexClientSecret'));
         final response = await http.post(
-          Uri.parse('$dexIssuer/token'),
+          Uri.parse(_tokenEndpoint),
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
             'Authorization': 'Basic $credentials',
@@ -322,4 +335,96 @@ class InternalAuthService {
 
   static Future<String?> getToken() async => getValidAccessToken();
   static Future<void> clearToken() async => clearTokens();
+
+  // ─── Redirect to Dex (full‑page) ───────────────────────────────
+  static Future<void> redirectToDex() async {
+    if (!kIsWeb) {
+      throw Exception('Redirect login is only supported on web.');
+    }
+    final verifier = _generateCodeVerifier();
+    // Store verifier in sessionStorage
+    html.window.sessionStorage['dex_verifier'] = verifier;
+    final challenge = _generateCodeChallenge(verifier);
+
+    final authUrl = Uri.parse('$dexIssuer/auth').replace(queryParameters: {
+      'client_id': dexClientId,
+      'redirect_uri': dexRedirectUri,
+      'response_type': 'code',
+      'scope': dexScopes.join(' '),
+      'code_challenge': challenge,
+      'code_challenge_method': 'S256',
+      'state': 'random-state-${DateTime.now().millisecondsSinceEpoch}',
+    });
+
+    html.window.location.href = authUrl.toString();
+  }
+
+  static Future<bool> handleOAuthCallback() async {
+    if (!kIsWeb) return false;
+
+    final uri = Uri.parse(html.window.location.href);
+    final code = uri.queryParameters['code'];
+    if (code == null) return false;
+
+    // Retrieve verifier from sessionStorage
+    final verifier = html.window.sessionStorage['dex_verifier'];
+    if (verifier == null) {
+      if (kDebugMode) {
+        print('No verifier found in sessionStorage');
+      }
+      return false;
+    }
+
+    // Clear the code from URL
+    html.window.history.replaceState({}, '', uri.replace(queryParameters: {}).toString());
+
+    // Exchange code for tokens (with Basic Auth)
+    final credentials = base64Encode(utf8.encode('$dexClientId:$dexClientSecret'));
+    if (kDebugMode) {
+      print('🔑 handleOAuthCallback: token endpoint = $_tokenEndpoint');
+    }
+    final tokenResponse = await http.post(
+      Uri.parse(_tokenEndpoint),
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': 'Basic $credentials',
+      },
+      body: {
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': dexRedirectUri,
+        'code_verifier': verifier,
+      },
+    );
+
+    if (tokenResponse.statusCode != 200) {
+      if (kDebugMode) {
+        print('Token exchange failed: ${tokenResponse.body}');
+      }
+      return false;
+    }
+
+    final data = jsonDecode(tokenResponse.body);
+    final accessToken = data['access_token'];
+    final refreshToken = data['refresh_token'];
+    final expiresIn = data['expires_in'] ?? 3600;
+
+    if (accessToken == null) return false;
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_accessTokenKey, accessToken);
+    if (refreshToken != null) {
+      await prefs.setString(_refreshTokenKey, refreshToken);
+    }
+    final expiry = DateTime.now().toUtc().add(Duration(seconds: expiresIn));
+    await prefs.setString(_expiryKey, expiry.toIso8601String());
+
+    // Clean up
+    html.window.sessionStorage.remove('dex_verifier');
+
+    if (kDebugMode) {
+      print('✅ OAuth login successful (redirect flow)');
+    }
+    return true;
+  }
 }

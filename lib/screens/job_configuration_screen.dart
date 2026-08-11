@@ -83,72 +83,102 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     setState(() => _isSubmitting = true);
 
     try {
-      // Try to get a valid internal token (OAuth2)
+      // ─── Get token ──────────────────────────────────────────────
       final internalToken = await InternalAuthService.getValidAccessToken();
       if (kDebugMode) {
-        print('🔑 Token before job start: ${internalToken != null ? 'exists' : 'null'}');
+        print('🔑 Token before job start: ${internalToken != null ? 'exists (${internalToken.substring(0, 20)}...)' : 'null'}');
       }
       if (internalToken == null) {
         throw Exception('Please log in to the internal server first.');
       }
-      String baseUrl;
-      String token;
 
-      // Use internal server with OAuth token
-      baseUrl = internalServerUrl;
-      token = internalToken;
+      // ─── Build request ───────────────────────────────────────────
+      const baseUrl = internalServerUrl;
+      final token = internalToken;
+      // Correct API endpoint
+      final url = Uri.parse('$baseUrl/api/CreateTask');
 
-      final url = Uri.parse('$baseUrl/start_job/${widget.videoKey}');
+      // ─── Prepare request body ──────────────────────────────────
+      // The server likely expects 'dir' (video key) and other parameters.
+      // Based on the HTML, 'dir' is the video key. Adjust field names if needed.
+      final body = {
+        'dir': widget.videoKey,                     // video key
+        'session_name': _sessionNameController.text.trim(),
+        'input_languages': _inputLanguages,
+        'output_languages': _outputLanguages,
+        'audio_languages': _audioLanguages,
+        'availability': _availability,
+        'profanity_filter': _profanityFilter,
+        'filter_music': _filterMusic,
+        'summarization': _enableSummarization,
+        'live_notes': _enableLiveNotes,
+        'diarization': _enableDiarization,
+        'ai_assistant': _enableAIAssistant,
+        'save_session': _saveSession,
+        'smart_chaptering': _smartChaptering,
+        'format': _format,
+      };
+      final jsonBody = jsonEncode(body);
+
+      if (kDebugMode) {
+        print('📡 Starting job with URL: $url');
+        print('📡 Token (first 20 chars): ${token.substring(0, 20)}...');
+        print('📡 Request body: $jsonBody');
+      }
+
+      // ─── Send request ────────────────────────────────────────────
       final response = await http.post(
         url,
         headers: {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer $token',
         },
-        body: jsonEncode({
-          'session_name': _sessionNameController.text.trim(),
-          'input_languages': _inputLanguages,
-          'output_languages': _outputLanguages,
-          'audio_languages': _audioLanguages,
-          'availability': _availability,
-          'profanity_filter': _profanityFilter,
-          'filter_music': _filterMusic,
-          'summarization': _enableSummarization,
-          'live_notes': _enableLiveNotes,
-          'diarization': _enableDiarization,
-          'ai_assistant': _enableAIAssistant,
-          'save_session': _saveSession,
-          'smart_chaptering': _smartChaptering,
-          'format': _format,
-        }),
+        body: jsonBody,
       );
 
+      if (kDebugMode) {
+        print('📡 Response status: ${response.statusCode}');
+        print('📡 Response body (first 500 chars): ${response.body.substring(0, response.body.length > 500 ? 500 : response.body.length)}');
+        if (response.body.length > 500) {
+          print('📡 Response body (full length: ${response.body.length} chars)');
+        }
+      }
+
+      // ─── Handle response ────────────────────────────────────────
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        if (!mounted) return;
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => LiveOutputScreen(
-              videoKey: widget.videoKey,
-              jobId: data['job_id'] ?? 'job',
+        try {
+          final data = jsonDecode(response.body);
+          if (!mounted) return;
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => LiveOutputScreen(
+                videoKey: widget.videoKey,
+                jobId: data['job_id'] ?? 'job',
+              ),
             ),
-          ),
-        );
+          );
+        } catch (e) {
+          throw Exception('Server returned non-JSON response (status 200). Body: ${response.body}');
+        }
       } else {
-        throw Exception('Failed to start job: ${response.statusCode}');
+        throw Exception('Failed to start job (HTTP ${response.statusCode}). Response: ${response.body}');
       }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+        SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 10),
+        ),
       );
     } finally {
       if (mounted) setState(() => _isSubmitting = false);
     }
   }
 
-  // Helper to build a dropdown inside a FormField (no deprecated `value`)
+  // ─── Dropdown helper (unchanged) ──────────────────────────────────
   Widget _buildDropdownField<T>({
     required String label,
     required T value,
@@ -285,7 +315,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ),
               const SizedBox(height: 16),
 
-              // ─── Availability (custom FormField) ──────────────────────
+              // ─── Availability ──────────────────────────────────────
               _buildDropdownField<String>(
                 label: 'Availability',
                 value: _availability,
@@ -294,7 +324,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ),
               const SizedBox(height: 16),
 
-              // ─── Format ───────────────────────────────────────────────
+              // ─── Format ────────────────────────────────────────────
               _buildDropdownField<String>(
                 label: 'Presentation Format',
                 value: _format,
@@ -303,7 +333,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ),
               const SizedBox(height: 16),
 
-              // ─── Smart Chaptering ─────────────────────────────────────
+              // ─── Smart Chaptering ──────────────────────────────────
               _buildDropdownField<String>(
                 label: 'Smart Chaptering',
                 value: _smartChaptering,
