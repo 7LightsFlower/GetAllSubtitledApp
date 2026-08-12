@@ -115,6 +115,10 @@ class _WorkingScreenState extends State<WorkingScreen> {
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
+        if (kDebugMode) {
+          print('📦 Video list response: ${jsonEncode(data)}');
+        }
+
         final projects = (data['projects'] as List?)?.map((e) {
           try {
             return VideoProject.fromJson(e as Map<String, dynamic>);

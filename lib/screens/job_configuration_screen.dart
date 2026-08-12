@@ -1,12 +1,13 @@
 // job_configuration_screen.dart
-import 'dart:convert';
+import 'dart:async'; // for Completer
+// ignore: deprecated_member_use
+import 'dart:html' as html; // ignore: avoid_web_libraries_in_flutter
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:mime/mime.dart';
-import 'package:path/path.dart' as p;
 import 'package:asr_live_translator/screens/live_output_screen.dart';
 
 class JobConfigurationScreen extends StatefulWidget {
@@ -20,7 +21,8 @@ class JobConfigurationScreen extends StatefulWidget {
   });
 
   @override
-  State<JobConfigurationScreen> createState() => _JobConfigurationScreenState();
+  State<JobConfigurationScreen> createState() =>
+      _JobConfigurationScreenState();
 }
 
 class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
@@ -54,22 +56,31 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     'en', 'de', 'fr', 'es', 'it', 'ja', 'ko', 'zh', 'ru', 'ar',
     'hi', 'pt', 'pl', 'tr', 'uk', 'vi', 'th'
   ];
-  final List<String> _availabilityOptions = ['private', 'private+qr', 'kitemployee', 'kitall', 'public'];
-  final List<String> _formatOptions = ['online', 'mixed', 'resending', 'offline'];
-  final List<String> _chapteringOptions = ['online_dynamic', 'online_static', 'offline', 'streaming_simple'];
+  final List<String> _availabilityOptions = [
+    'private', 'private+qr', 'kitemployee', 'kitall', 'public'
+  ];
+  final List<String> _formatOptions = [
+    'online', 'mixed', 'resending', 'offline'
+  ];
+  final List<String> _chapteringOptions = [
+    'online_dynamic', 'online_static', 'offline', 'streaming_simple'
+  ];
 
   String _getDefaultSessionName() {
     final now = DateTime.now();
     final dateTimeStr =
-        '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} '
-        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+        '${now.year}-${now.month.toString().padLeft(2, '0')}-'
+        '${now.day.toString().padLeft(2, '0')} '
+        '${now.hour.toString().padLeft(2, '0')}:'
+        '${now.minute.toString().padLeft(2, '0')}';
     return '${widget.videoName} – $dateTimeStr';
   }
 
   @override
   void initState() {
     super.initState();
-    _sessionNameController = TextEditingController(text: _getDefaultSessionName());
+    _sessionNameController =
+        TextEditingController(text: _getDefaultSessionName());
   }
 
   @override
@@ -85,13 +96,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     setState(() => _isSubmitting = true);
 
     try {
-      // ─── 0. Log the raw videoKey ────────────────────────────────
-      if (kDebugMode) {
-        print('📌 [DEBUG] Raw videoKey: ${widget.videoKey}');
-        print('📌 [DEBUG] videoKey length: ${widget.videoKey.length}');
-      }
-
-      // ─── Get user and token ──────────────────────────────────────
+      // ─── 1. Get internal auth token and user ─────────────────────
       final internalToken = await InternalAuthService.getValidAccessToken();
       if (internalToken == null) {
         throw Exception('Please log in to the internal server first.');
@@ -101,153 +106,189 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         throw Exception('User email not available.');
       }
 
-      const baseUrl = internalServerUrl;
+      const internalBaseUrl = internalServerUrl;
 
-      // ─── 1. Decode videoKey and build the media URL ──────────────
-      String dirPath;
-      try {
-        final decodedBytes = base64Decode(widget.videoKey);
-        dirPath = utf8.decode(decodedBytes);
-        if (kDebugMode) {
-          print('✅ [DEBUG] Decoded directory path: "$dirPath"');
-        }
-      } catch (e) {
-        // If decoding fails, the videoKey might already be plain text
-        if (kDebugMode) {
-          print('⚠️ [DEBUG] Base64 decode failed, treating videoKey as plain string.');
-          print('⚠️ [DEBUG] Error: $e');
-        }
-        dirPath = widget.videoKey; // fallback – maybe it's a UUID or file path
-      }
-
-      final mediaUrl = Uri.parse('$baseUrl/archivemedia/${widget.videoKey}');
-      if (kDebugMode) {
-        print('🌐 [DEBUG] Fetching media from: $mediaUrl');
-        print('🔑 [DEBUG] Authorization: Bearer ${internalToken.substring(0, 20)}...');
-        print('👤 [DEBUG] X-Forwarded-User: $userEmail');
-      }
-
-      // ─── 2. Fetch video bytes ────────────────────────────────────
-      final mediaResponse = await http.get(
-        mediaUrl,
-        headers: {
-          'Authorization': 'Bearer $internalToken',
-          'X-Forwarded-User': userEmail,
-        },
-      );
+      // ─── 2. Fetch video bytes from the local server ──────────────
+      const localBaseUrl = 'http://localhost:5000';
+      final localMediaUrl =
+          Uri.parse('$localBaseUrl/media/${widget.videoKey}');
 
       if (kDebugMode) {
-        print('📥 [DEBUG] Media response status: ${mediaResponse.statusCode}');
-        print('📥 [DEBUG] Media response headers: ${mediaResponse.headers}');
-        if (mediaResponse.statusCode != 200) {
-          // Log the first 500 characters of the error body (may be HTML)
-          final preview = mediaResponse.body.length > 500
-              ? '${mediaResponse.body.substring(0, 500)}...'
-              : mediaResponse.body;
-          print('❌ [DEBUG] Error body preview: $preview');
+        // ignore: avoid_print
+        print('🌐 [DEBUG] Fetching video from local server: $localMediaUrl');
+      }
+
+      http.Response localResponse = await http.get(localMediaUrl);
+
+      if (localResponse.statusCode != 200) {
+        final fallbackUrl =
+            Uri.parse('$localBaseUrl/videos/${widget.videoKey}/download');
+        if (kDebugMode) {
+          // ignore: avoid_print
+          print('⚠️ [DEBUG] First attempt failed, trying fallback: $fallbackUrl');
         }
+        final fallbackResponse = await http.get(fallbackUrl);
+        if (fallbackResponse.statusCode != 200) {
+          throw Exception(
+            'Failed to fetch video from local server (HTTP ${fallbackResponse.statusCode}). '
+            'Body: ${fallbackResponse.body}'
+          );
+        }
+        localResponse = fallbackResponse;
       }
 
-      if (mediaResponse.statusCode != 200) {
-        throw Exception(
-          'Failed to fetch video (HTTP ${mediaResponse.statusCode}). '
-          'Body: ${mediaResponse.body}'
-        );
-      }
-
-      final videoBytes = mediaResponse.bodyBytes;
+      final videoBytes = localResponse.bodyBytes;
       if (videoBytes.isEmpty) {
         throw Exception('Video file is empty.');
       }
 
       if (kDebugMode) {
-        print('✅ [DEBUG] Video bytes fetched: ${videoBytes.length} bytes');
+        // ignore: avoid_print
+        print('✅ [DEBUG] Video fetched from local: ${videoBytes.length} bytes');
       }
 
-      // ─── 3. Extract parent directory and session name ────────────
-      final parentDir = p.dirname(dirPath);
-      final sessionName = _sessionNameController.text.trim();
-
+      // ─── 3. Upload to internal server ────────────────────────────
+      await _uploadToInternalServer(
+        videoBytes: videoBytes,
+        fileName: widget.videoName,
+        internalToken: internalToken,
+        userEmail: userEmail,
+        internalBaseUrl: internalBaseUrl,
+        sessionName: _sessionNameController.text.trim(),
+        availability: _availability,
+        inputLanguages: _inputLanguages,
+        outputLanguages: _outputLanguages,
+        audioLanguages: _audioLanguages,
+        profanityFilter: _profanityFilter,
+        filterMusic: _filterMusic,
+        enableSummarization: _enableSummarization,
+        enableLiveNotes: _enableLiveNotes,
+        enableDiarization: _enableDiarization,
+        enableAIAssistant: _enableAIAssistant,
+        smartChaptering: _smartChaptering,
+        format: _format,
+      );
+    } catch (e) {
       if (kDebugMode) {
-        print('📁 [DEBUG] Parent directory: "$parentDir"');
-        print('📝 [DEBUG] Session name: "$sessionName"');
+        // ignore: avoid_print
+        print('❌ [DEBUG] Exception caught: $e');
       }
-
-      // ─── 4. Build multipart request ──────────────────────────────
-      final uploadUrl = Uri.parse('$baseUrl/upload_lecture');
-      final request = http.MultipartRequest('POST', uploadUrl);
-
-      request.headers.addAll({
-        'Authorization': 'Bearer $internalToken',
-        'X-Forwarded-User': userEmail,
-      });
-
-      // Fields
-      request.fields['name'] = sessionName;
-      request.fields['path'] = parentDir;
-      request.fields['availability'] = _availability;
-
-      for (final lang in _inputLanguages) {
-        request.fields['language'] = lang;
-      }
-      for (final lang in _outputLanguages) {
-        request.fields['mtLanguage'] = lang;
-      }
-      for (final lang in _audioLanguages) {
-        request.fields['audioLanguage'] = lang;
-      }
-
-      if (_profanityFilter) request.fields['profanity'] = 'on';
-      if (_filterMusic) request.fields['filter_music'] = 'on';
-      if (_enableSummarization) request.fields['summarization'] = 'on';
-      if (_enableLiveNotes) request.fields['notes'] = 'on';
-      if (_enableDiarization) request.fields['saasr'] = '1';
-      if (_enableAIAssistant) request.fields['aiassistant'] = 'on';
-
-      request.fields['smartChaptering'] = _smartChaptering;
-      request.fields['format'] = _format;
-      request.fields['topicname'] = sessionName;
-      request.fields['date'] = DateTime.now().toIso8601String().split('T').first;
-      request.fields['speakername'] = userEmail;
-
-      // File attachment
-      final fileName = p.basename(dirPath);
-      final mimeType = lookupMimeType(fileName) ?? 'video/mp4';
-      request.files.add(
-        http.MultipartFile.fromBytes(
-          'videofile',
-          videoBytes,
-          filename: fileName,
-          contentType: http.MediaType.parse(mimeType),
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 10),
         ),
       );
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
+    }
+  }
+
+  // Helper method to perform the actual upload to the internal server
+  Future<void> _uploadToInternalServer({
+    required List<int> videoBytes,
+    required String fileName,
+    required String internalToken,
+    required String userEmail,
+    required String internalBaseUrl,
+    required String sessionName,
+    required String availability,
+    required List<String> inputLanguages,
+    required List<String> outputLanguages,
+    required List<String> audioLanguages,
+    required bool profanityFilter,
+    required bool filterMusic,
+    required bool enableSummarization,
+    required bool enableLiveNotes,
+    required bool enableDiarization,
+    required bool enableAIAssistant,
+    required String smartChaptering,
+    required String format,
+  }) async {
+    final uploadUrl = '$internalBaseUrl/upload_lecture';
+
+    // ─── Web: use dart:html to include cookies (withCredentials) ──
+    if (kIsWeb) {
+      final formData = html.FormData();
+
+      // Add all fields
+      formData.append('path', '/uploads');
+      formData.append('name', sessionName);
+      formData.append('availability', availability);
+      for (final lang in inputLanguages) {
+        formData.append('language', lang);
+      }
+      for (final lang in outputLanguages) {
+        formData.append('mtLanguage', lang);
+      }
+      for (final lang in audioLanguages) {
+        formData.append('audioLanguage', lang);
+      }
+      if (profanityFilter) formData.append('profanity', 'on');
+      if (filterMusic) formData.append('filter_music', 'on');
+      if (enableSummarization) formData.append('summarization', 'on');
+      if (enableLiveNotes) formData.append('notes', 'on');
+      if (enableDiarization) formData.append('saasr', '1');
+      if (enableAIAssistant) formData.append('aiassistant', 'on');
+      formData.append('smartChaptering', smartChaptering);
+      formData.append('format', format);
+      formData.append('topicname', sessionName);
+      formData.append('date', DateTime.now().toIso8601String().split('T').first);
+      formData.append('speakername', userEmail);
+
+      // Determine MIME type and append the video file as a Blob
+      final mimeType = lookupMimeType(fileName) ?? 'video/mp4';
+      final blob = html.Blob([videoBytes], mimeType);
+      formData.appendBlob('videofile', blob, fileName);
+
+      // Prepare the request
+      final request = html.HttpRequest();
+      request.open('POST', uploadUrl, async: true);
+      request.withCredentials = true; // send session cookies
+      request.setRequestHeader('Authorization', 'Bearer $internalToken');
+      request.setRequestHeader('X-Forwarded-User', userEmail);
 
       if (kDebugMode) {
-        print('📤 [DEBUG] Upload URL: $uploadUrl');
-        print('📤 [DEBUG] Multipart fields:');
-        request.fields.forEach((key, value) {
-          print('    $key: $value');
-        });
+        // ignore: avoid_print
+        print('📤 [DEBUG] Upload URL (web): $uploadUrl');
+        // ignore: avoid_print
         print('📤 [DEBUG] File: $fileName ($mimeType, ${videoBytes.length} bytes)');
       }
 
-      // ─── 5. Send request ──────────────────────────────────────────
-      final streamedResponse = await request.send();
-      final response = await http.Response.fromStream(streamedResponse);
+      // Use a Completer to wait for the request to finish
+      final completer = Completer<void>();
+      request.onLoad.listen((_) {
+        completer.complete();
+      });
+      request.onError.listen((error) {
+        completer.completeError(error);
+      });
+      // Send the request (synchronous)
+      request.send(formData);
+
+      // Wait for completion
+      await completer.future;
+
+      final status = request.status;
+      final responseText = request.responseText ?? '';
+      final location = request.getResponseHeader('location');
 
       if (kDebugMode) {
-        print('📥 [DEBUG] Upload response status: ${response.statusCode}');
-        print('📥 [DEBUG] Upload headers: ${response.headers}');
-        // Log body preview (may be HTML error page)
-        final bodyPreview = response.body.length > 500
-            ? '${response.body.substring(0, 500)}...'
-            : response.body;
-        print('📥 [DEBUG] Upload body preview: $bodyPreview');
+        // ignore: avoid_print
+        print('📥 [DEBUG] Upload response status (web): $status');
+        // ignore: avoid_print
+        print('📥 [DEBUG] Upload headers (web): ${request.getAllResponseHeaders()}');
+        final preview = responseText.length > 500
+            ? '${responseText.substring(0, 500)}...'
+            : responseText;
+        // ignore: avoid_print
+        print('📥 [DEBUG] Upload body preview (web): $preview');
       }
 
-      // ─── 6. Handle response ──────────────────────────────────────
-      if (response.statusCode == 302) {
-        final location = response.headers['location'];
+      // Handle response
+      if (status == 302) {
         if (location == null) {
           throw Exception('Redirect location missing.');
         }
@@ -262,27 +303,107 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             ),
           ),
         );
-      } else if (response.statusCode == 200) {
-        // Might be a success page – try to extract session ID from HTML
-        // For now, treat as error
-        throw Exception('Unexpected 200 response, expected redirect. Body: ${response.body}');
+      } else if (status == 200) {
+        throw Exception('Unexpected 200 response, expected redirect. Body: $responseText');
       } else {
-        throw Exception('Upload failed (HTTP ${response.statusCode}). ${response.body}');
+        throw Exception('Upload failed (HTTP $status). $responseText');
       }
-    } catch (e) {
-      if (kDebugMode) {
-        print('❌ [DEBUG] Exception caught: $e');
+      return;
+    }
+
+    // ─── Non‑web: use the existing http.MultipartRequest ────────────
+    final request = http.MultipartRequest('POST', Uri.parse(uploadUrl));
+
+    request.headers.addAll({
+      'Authorization': 'Bearer $internalToken',
+      'X-Forwarded-User': userEmail,
+    });
+
+    request.fields['path'] = '/uploads';
+    request.fields['name'] = sessionName;
+    request.fields['availability'] = availability;
+
+    for (final lang in inputLanguages) {
+      request.fields['language'] = lang;
+    }
+    for (final lang in outputLanguages) {
+      request.fields['mtLanguage'] = lang;
+    }
+    for (final lang in audioLanguages) {
+      request.fields['audioLanguage'] = lang;
+    }
+
+    if (profanityFilter) request.fields['profanity'] = 'on';
+    if (filterMusic) request.fields['filter_music'] = 'on';
+    if (enableSummarization) request.fields['summarization'] = 'on';
+    if (enableLiveNotes) request.fields['notes'] = 'on';
+    if (enableDiarization) request.fields['saasr'] = '1';
+    if (enableAIAssistant) request.fields['aiassistant'] = 'on';
+
+    request.fields['smartChaptering'] = smartChaptering;
+    request.fields['format'] = format;
+    request.fields['topicname'] = sessionName;
+    request.fields['date'] = DateTime.now().toIso8601String().split('T').first;
+    request.fields['speakername'] = userEmail;
+
+    final mimeType = lookupMimeType(fileName) ?? 'video/mp4';
+    request.files.add(
+      http.MultipartFile.fromBytes(
+        'videofile',
+        videoBytes,
+        filename: fileName,
+        contentType: http.MediaType.parse(mimeType),
+      ),
+    );
+
+    if (kDebugMode) {
+      // ignore: avoid_print
+      print('📤 [DEBUG] Upload URL (non-web): $uploadUrl');
+      // ignore: avoid_print
+      print('📤 [DEBUG] Multipart fields:');
+      request.fields.forEach((key, value) {
+        // ignore: avoid_print
+        print('    $key: $value');
+      });
+      // ignore: avoid_print
+      print('📤 [DEBUG] File: $fileName ($mimeType, ${videoBytes.length} bytes)');
+    }
+
+    final streamedResponse = await request.send();
+    final response = await http.Response.fromStream(streamedResponse);
+
+    if (kDebugMode) {
+      // ignore: avoid_print
+      print('📥 [DEBUG] Upload response status: ${response.statusCode}');
+      // ignore: avoid_print
+      print('📥 [DEBUG] Upload headers: ${response.headers}');
+      final bodyPreview = response.body.length > 500
+          ? '${response.body.substring(0, 500)}...'
+          : response.body;
+      // ignore: avoid_print
+      print('📥 [DEBUG] Upload body preview: $bodyPreview');
+    }
+
+    if (response.statusCode == 302) {
+      final location = response.headers['location'];
+      if (location == null) {
+        throw Exception('Redirect location missing.');
       }
+      final sessionId = Uri.parse(location).pathSegments.last;
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error: $e'),
-          backgroundColor: Colors.red,
-          duration: const Duration(seconds: 10),
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => LiveOutputScreen(
+            videoKey: widget.videoKey,
+            jobId: sessionId,
+          ),
         ),
       );
-    } finally {
-      if (mounted) setState(() => _isSubmitting = false);
+    } else if (response.statusCode == 200) {
+      throw Exception('Unexpected 200 response, expected redirect. Body: ${response.body}');
+    } else {
+      throw Exception('Upload failed (HTTP ${response.statusCode}). ${response.body}');
     }
   }
 
@@ -380,7 +501,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               const SizedBox(height: 16),
 
               // Output Languages
-              const Text('Output Languages (Translation)', style: TextStyle(fontWeight: FontWeight.bold)),
+              const Text('Output Languages (Translation)',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
               Wrap(
                 spacing: 8,
                 children: _allOutputLanguages.map((lang) {
@@ -402,7 +524,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               const SizedBox(height: 16),
 
               // Audio Languages
-              const Text('Generated Audio Languages', style: TextStyle(fontWeight: FontWeight.bold)),
+              const Text('Generated Audio Languages',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
               Wrap(
                 spacing: 8,
                 children: _allAudioLanguages.map((lang) {
@@ -423,7 +546,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ),
               const SizedBox(height: 16),
 
-              // ─── Availability ──────────────────────────────────────
+              // Availability
               _buildDropdownField<String>(
                 label: 'Availability',
                 value: _availability,
@@ -432,7 +555,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ),
               const SizedBox(height: 16),
 
-              // ─── Format ────────────────────────────────────────────
+              // Format
               _buildDropdownField<String>(
                 label: 'Presentation Format',
                 value: _format,
@@ -441,7 +564,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ),
               const SizedBox(height: 16),
 
-              // ─── Smart Chaptering ──────────────────────────────────
+              // Smart Chaptering
               _buildDropdownField<String>(
                 label: 'Smart Chaptering',
                 value: _smartChaptering,
@@ -451,7 +574,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               const SizedBox(height: 16),
 
               // Features
-              const Text('Features', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const Text('Features',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               Wrap(
                 spacing: 16,
                 children: [
