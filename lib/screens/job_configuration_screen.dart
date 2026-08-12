@@ -5,6 +5,8 @@ import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:mime/mime.dart';
+import 'package:path/path.dart' as p;
 import 'package:asr_live_translator/screens/live_output_screen.dart';
 
 class JobConfigurationScreen extends StatefulWidget {
@@ -83,88 +85,194 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     setState(() => _isSubmitting = true);
 
     try {
-      // ─── Get token ──────────────────────────────────────────────
-      final internalToken = await InternalAuthService.getValidAccessToken();
+      // ─── 0. Log the raw videoKey ────────────────────────────────
       if (kDebugMode) {
-        print('🔑 Token before job start: ${internalToken != null ? 'exists (${internalToken.substring(0, 20)}...)' : 'null'}');
+        print('📌 [DEBUG] Raw videoKey: ${widget.videoKey}');
+        print('📌 [DEBUG] videoKey length: ${widget.videoKey.length}');
       }
+
+      // ─── Get user and token ──────────────────────────────────────
+      final internalToken = await InternalAuthService.getValidAccessToken();
       if (internalToken == null) {
         throw Exception('Please log in to the internal server first.');
       }
-
-      // ─── Build request ───────────────────────────────────────────
-      const baseUrl = internalServerUrl;
-      final token = internalToken;
-      // Correct API endpoint
-      final url = Uri.parse('$baseUrl/api/CreateTask');
-
-      // ─── Prepare request body ──────────────────────────────────
-      // The server likely expects 'dir' (video key) and other parameters.
-      // Based on the HTML, 'dir' is the video key. Adjust field names if needed.
-      final body = {
-        'dir': widget.videoKey,                     // video key
-        'session_name': _sessionNameController.text.trim(),
-        'input_languages': _inputLanguages,
-        'output_languages': _outputLanguages,
-        'audio_languages': _audioLanguages,
-        'availability': _availability,
-        'profanity_filter': _profanityFilter,
-        'filter_music': _filterMusic,
-        'summarization': _enableSummarization,
-        'live_notes': _enableLiveNotes,
-        'diarization': _enableDiarization,
-        'ai_assistant': _enableAIAssistant,
-        'save_session': _saveSession,
-        'smart_chaptering': _smartChaptering,
-        'format': _format,
-      };
-      final jsonBody = jsonEncode(body);
-
-      if (kDebugMode) {
-        print('📡 Starting job with URL: $url');
-        print('📡 Token (first 20 chars): ${token.substring(0, 20)}...');
-        print('📡 Request body: $jsonBody');
+      final userEmail = await InternalAuthService.getUserEmail();
+      if (userEmail == null) {
+        throw Exception('User email not available.');
       }
 
-      // ─── Send request ────────────────────────────────────────────
-      final response = await http.post(
-        url,
+      const baseUrl = internalServerUrl;
+
+      // ─── 1. Decode videoKey and build the media URL ──────────────
+      String dirPath;
+      try {
+        final decodedBytes = base64Decode(widget.videoKey);
+        dirPath = utf8.decode(decodedBytes);
+        if (kDebugMode) {
+          print('✅ [DEBUG] Decoded directory path: "$dirPath"');
+        }
+      } catch (e) {
+        // If decoding fails, the videoKey might already be plain text
+        if (kDebugMode) {
+          print('⚠️ [DEBUG] Base64 decode failed, treating videoKey as plain string.');
+          print('⚠️ [DEBUG] Error: $e');
+        }
+        dirPath = widget.videoKey; // fallback – maybe it's a UUID or file path
+      }
+
+      final mediaUrl = Uri.parse('$baseUrl/archivemedia/${widget.videoKey}');
+      if (kDebugMode) {
+        print('🌐 [DEBUG] Fetching media from: $mediaUrl');
+        print('🔑 [DEBUG] Authorization: Bearer ${internalToken.substring(0, 20)}...');
+        print('👤 [DEBUG] X-Forwarded-User: $userEmail');
+      }
+
+      // ─── 2. Fetch video bytes ────────────────────────────────────
+      final mediaResponse = await http.get(
+        mediaUrl,
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
+          'Authorization': 'Bearer $internalToken',
+          'X-Forwarded-User': userEmail,
         },
-        body: jsonBody,
       );
 
       if (kDebugMode) {
-        print('📡 Response status: ${response.statusCode}');
-        print('📡 Response body (first 500 chars): ${response.body.substring(0, response.body.length > 500 ? 500 : response.body.length)}');
-        if (response.body.length > 500) {
-          print('📡 Response body (full length: ${response.body.length} chars)');
+        print('📥 [DEBUG] Media response status: ${mediaResponse.statusCode}');
+        print('📥 [DEBUG] Media response headers: ${mediaResponse.headers}');
+        if (mediaResponse.statusCode != 200) {
+          // Log the first 500 characters of the error body (may be HTML)
+          final preview = mediaResponse.body.length > 500
+              ? '${mediaResponse.body.substring(0, 500)}...'
+              : mediaResponse.body;
+          print('❌ [DEBUG] Error body preview: $preview');
         }
       }
 
-      // ─── Handle response ────────────────────────────────────────
-      if (response.statusCode == 200) {
-        try {
-          final data = jsonDecode(response.body);
-          if (!mounted) return;
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (_) => LiveOutputScreen(
-                videoKey: widget.videoKey,
-                jobId: data['job_id'] ?? 'job',
-              ),
-            ),
-          );
-        } catch (e) {
-          throw Exception('Server returned non-JSON response (status 200). Body: ${response.body}');
+      if (mediaResponse.statusCode != 200) {
+        throw Exception(
+          'Failed to fetch video (HTTP ${mediaResponse.statusCode}). '
+          'Body: ${mediaResponse.body}'
+        );
+      }
+
+      final videoBytes = mediaResponse.bodyBytes;
+      if (videoBytes.isEmpty) {
+        throw Exception('Video file is empty.');
+      }
+
+      if (kDebugMode) {
+        print('✅ [DEBUG] Video bytes fetched: ${videoBytes.length} bytes');
+      }
+
+      // ─── 3. Extract parent directory and session name ────────────
+      final parentDir = p.dirname(dirPath);
+      final sessionName = _sessionNameController.text.trim();
+
+      if (kDebugMode) {
+        print('📁 [DEBUG] Parent directory: "$parentDir"');
+        print('📝 [DEBUG] Session name: "$sessionName"');
+      }
+
+      // ─── 4. Build multipart request ──────────────────────────────
+      final uploadUrl = Uri.parse('$baseUrl/upload_lecture');
+      final request = http.MultipartRequest('POST', uploadUrl);
+
+      request.headers.addAll({
+        'Authorization': 'Bearer $internalToken',
+        'X-Forwarded-User': userEmail,
+      });
+
+      // Fields
+      request.fields['name'] = sessionName;
+      request.fields['path'] = parentDir;
+      request.fields['availability'] = _availability;
+
+      for (final lang in _inputLanguages) {
+        request.fields['language'] = lang;
+      }
+      for (final lang in _outputLanguages) {
+        request.fields['mtLanguage'] = lang;
+      }
+      for (final lang in _audioLanguages) {
+        request.fields['audioLanguage'] = lang;
+      }
+
+      if (_profanityFilter) request.fields['profanity'] = 'on';
+      if (_filterMusic) request.fields['filter_music'] = 'on';
+      if (_enableSummarization) request.fields['summarization'] = 'on';
+      if (_enableLiveNotes) request.fields['notes'] = 'on';
+      if (_enableDiarization) request.fields['saasr'] = '1';
+      if (_enableAIAssistant) request.fields['aiassistant'] = 'on';
+
+      request.fields['smartChaptering'] = _smartChaptering;
+      request.fields['format'] = _format;
+      request.fields['topicname'] = sessionName;
+      request.fields['date'] = DateTime.now().toIso8601String().split('T').first;
+      request.fields['speakername'] = userEmail;
+
+      // File attachment
+      final fileName = p.basename(dirPath);
+      final mimeType = lookupMimeType(fileName) ?? 'video/mp4';
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          'videofile',
+          videoBytes,
+          filename: fileName,
+          contentType: http.MediaType.parse(mimeType),
+        ),
+      );
+
+      if (kDebugMode) {
+        print('📤 [DEBUG] Upload URL: $uploadUrl');
+        print('📤 [DEBUG] Multipart fields:');
+        request.fields.forEach((key, value) {
+          print('    $key: $value');
+        });
+        print('📤 [DEBUG] File: $fileName ($mimeType, ${videoBytes.length} bytes)');
+      }
+
+      // ─── 5. Send request ──────────────────────────────────────────
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+
+      if (kDebugMode) {
+        print('📥 [DEBUG] Upload response status: ${response.statusCode}');
+        print('📥 [DEBUG] Upload headers: ${response.headers}');
+        // Log body preview (may be HTML error page)
+        final bodyPreview = response.body.length > 500
+            ? '${response.body.substring(0, 500)}...'
+            : response.body;
+        print('📥 [DEBUG] Upload body preview: $bodyPreview');
+      }
+
+      // ─── 6. Handle response ──────────────────────────────────────
+      if (response.statusCode == 302) {
+        final location = response.headers['location'];
+        if (location == null) {
+          throw Exception('Redirect location missing.');
         }
+        final sessionId = Uri.parse(location).pathSegments.last;
+        if (!mounted) return;
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => LiveOutputScreen(
+              videoKey: widget.videoKey,
+              jobId: sessionId,
+            ),
+          ),
+        );
+      } else if (response.statusCode == 200) {
+        // Might be a success page – try to extract session ID from HTML
+        // For now, treat as error
+        throw Exception('Unexpected 200 response, expected redirect. Body: ${response.body}');
       } else {
-        throw Exception('Failed to start job (HTTP ${response.statusCode}). Response: ${response.body}');
+        throw Exception('Upload failed (HTTP ${response.statusCode}). ${response.body}');
       }
     } catch (e) {
+      if (kDebugMode) {
+        print('❌ [DEBUG] Exception caught: $e');
+      }
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(

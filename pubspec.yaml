@@ -32,6 +32,8 @@ dependencies:
   flutter_secure_storage: ^10.3.1 # <-- upgrade
   file_picker: ^3.0.4
   http_parser: ^4.0.2
+  mime: ^2.0.0
+  path: ^1.9.0
 
 dev_dependencies:
   flutter_test:

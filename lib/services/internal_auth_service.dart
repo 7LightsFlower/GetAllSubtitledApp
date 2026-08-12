@@ -15,6 +15,7 @@ class InternalAuthService {
   static const String _accessTokenKey = 'internal_access_token';
   static const String _refreshTokenKey = 'internal_refresh_token';
   static const String _expiryKey = 'internal_token_expiry';
+  static const String _emailKey = 'user_email';
 
   static String? _lastVerifier;
 
@@ -154,6 +155,9 @@ class InternalAuthService {
       final expiry = DateTime.now().toUtc().add(Duration(seconds: expiresIn));
       await prefs.setString(_expiryKey, expiry.toIso8601String());
 
+      // Cache user email (optional, but avoids an extra request later)
+      await getUserEmail();
+
       if (kDebugMode) print('✅ OAuth login successful, token stored');
       return true;
     } catch (e) {
@@ -216,6 +220,8 @@ class InternalAuthService {
       }
       final expiry = DateTime.now().toUtc().add(Duration(seconds: expiresIn));
       await prefs.setString(_expiryKey, expiry.toIso8601String());
+
+      await getUserEmail(); // cache email
 
       if (kDebugMode) print('✅ Manual token exchange successful');
       return true;
@@ -331,10 +337,52 @@ class InternalAuthService {
     await prefs.remove(_accessTokenKey);
     await prefs.remove(_refreshTokenKey);
     await prefs.remove(_expiryKey);
+    await prefs.remove(_emailKey);
   }
 
   static Future<String?> getToken() async => getValidAccessToken();
   static Future<void> clearToken() async => clearTokens();
+
+  // ─── Get user email (cached or from userinfo) ────────────────
+  static Future<String?> getUserEmail() async {
+    final prefs = await SharedPreferences.getInstance();
+    final cached = prefs.getString(_emailKey);
+    if (cached != null && cached.isNotEmpty) {
+      if (kDebugMode) print('📧 Using cached email: $cached');
+      return cached;
+    }
+
+    final token = await getValidAccessToken();
+    if (token == null) {
+      if (kDebugMode) print('❌ No valid token to fetch userinfo');
+      return null;
+    }
+
+    try {
+      final response = await http.get(
+        Uri.parse('$dexIssuer/userinfo'),
+        headers: {'Authorization': 'Bearer $token'},
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final email = data['email'] as String?;
+        if (email != null && email.isNotEmpty) {
+          await prefs.setString(_emailKey, email);
+          if (kDebugMode) print('📧 Fetched and cached email: $email');
+          return email;
+        } else {
+          if (kDebugMode) print('⚠️ Userinfo response missing email field');
+        }
+      } else {
+        if (kDebugMode) {
+          print('❌ Userinfo failed: ${response.statusCode} - ${response.body}');
+        }
+      }
+    } catch (e) {
+      if (kDebugMode) print('❌ Error fetching userinfo: $e');
+    }
+    return null;
+  }
 
   // ─── Redirect to Dex (full‑page) ───────────────────────────────
   static Future<void> redirectToDex() async {
@@ -421,6 +469,9 @@ class InternalAuthService {
 
     // Clean up
     html.window.sessionStorage.remove('dex_verifier');
+
+    // Cache email
+    await getUserEmail();
 
     if (kDebugMode) {
       print('✅ OAuth login successful (redirect flow)');
