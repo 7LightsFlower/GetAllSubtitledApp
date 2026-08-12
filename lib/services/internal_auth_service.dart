@@ -19,14 +19,24 @@ class InternalAuthService {
 
   static String? _lastVerifier;
 
-  // ─── Helper: token endpoint (proxied on web) ────────────────
-  static bool get _useProxy => false; // set to true only if proxy works
+  // ─── Helpers to choose the right endpoint (web proxy vs direct) ──
 
+  /// Returns the token endpoint URL.
+  /// On web we use the proxy, otherwise we talk directly to the internal server.
   static String get _tokenEndpoint {
-    if (kIsWeb && _useProxy) {
-      return '/dex/token';
+    if (kIsWeb) {
+      return '$authBaseUrl/dex/token';
     } else {
       return '$dexIssuer/token';
+    }
+  }
+
+  /// Returns the userinfo endpoint URL.
+  static String get _userInfoEndpoint {
+    if (kIsWeb) {
+      return '$authBaseUrl/dex/userinfo';
+    } else {
+      return '$dexIssuer/userinfo';
     }
   }
 
@@ -106,7 +116,7 @@ class InternalAuthService {
         return false;
       }
 
-      // ─── Exchange code with Basic Auth (proxied on web) ──────
+      // ─── Exchange code with Basic Auth ──────────────────────────
       final credentials = base64Encode(utf8.encode('$dexClientId:$dexClientSecret'));
       if (kDebugMode) {
         print('🔑 Basic Auth length: ${credentials.length}');
@@ -360,7 +370,7 @@ class InternalAuthService {
 
     try {
       final response = await http.get(
-        Uri.parse('$dexIssuer/userinfo'),
+        Uri.parse(_userInfoEndpoint), // <-- use proxied or direct endpoint
         headers: {'Authorization': 'Bearer $token'},
       );
       if (response.statusCode == 200) {
@@ -432,7 +442,7 @@ class InternalAuthService {
       print('🔑 handleOAuthCallback: token endpoint = $_tokenEndpoint');
     }
     final tokenResponse = await http.post(
-      Uri.parse(_tokenEndpoint),
+      Uri.parse(_tokenEndpoint), // <-- uses proxy on web
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         'Authorization': 'Basic $credentials',

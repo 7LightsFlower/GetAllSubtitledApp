@@ -1,4 +1,4 @@
-"""Mock Flask server for testing video upload and transcription jobs."""
+"""Mock Flask server with proxy endpoints for the internal server."""
 
 import datetime
 import os
@@ -6,11 +6,72 @@ import threading
 import time
 import uuid
 
+import requests  # requires: pip install requests
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
+CORS(
+    app,
+    origins=["http://localhost:8080"],  # your Flutter web origin
+    supports_credentials=True,
+    methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Forwarded-User"],
+    expose_headers=["Location"]
+)
+
+# ─── Internal server URL ────────────────────────────────────────────────────
+INTERNAL_SERVER_URL = "https://lt2srv-sscherrer.isl.iar.kit.edu"
+
+# ─── Session management ────────────────────────────────────────────────────
+# We use a single requests session to store cookies from the internal server.
+internal_session = requests.Session()
+internal_session.verify = False  # for self‑signed certs; set True in production
+
+# Use a mutable container to store the last token we used for authentication.
+_state = {'token': None}
+
+
+def ensure_authenticated(token: str) -> bool:
+    """
+    Check if the current session has a valid cookie.
+    If not, try to authenticate using the given Bearer token.
+    Returns True if authenticated, False otherwise.
+    """
+    if token == _state['token'] and internal_session.cookies:
+        # We already have a session with this token – check if it's still valid
+        try:
+            resp = internal_session.get(
+                INTERNAL_SERVER_URL,
+                allow_redirects=False,
+                timeout=5
+            )
+            # If we get a 200 and not a login page, we're good
+            if resp.status_code == 200 and 'dex' not in resp.url:
+                return True
+        except requests.exceptions.RequestException:
+            pass
+
+    # Either no session or session expired – try to authenticate with token
+    # Send a GET to the root with the Authorization header
+    headers = {'Authorization': f'Bearer {token}'}
+    try:
+        resp = internal_session.get(
+            INTERNAL_SERVER_URL,
+            headers=headers,
+            allow_redirects=False,
+            timeout=10
+        )
+        # If we get a 200 and the response is not a login page, we're authenticated
+        if resp.status_code == 200 and 'dex' not in resp.url:
+            _state['token'] = token
+            return True
+        else:
+            # The server redirected to dex or returned a login page
+            return False
+    except requests.exceptions.RequestException:
+        return False
+
 
 # ─── Error handlers ──────────────────────────────────────────────────────────
 
@@ -19,15 +80,18 @@ def not_found(_error):
     """Return JSON for 404 errors."""
     return jsonify({'error': 'Endpoint not found'}), 404
 
+
 @app.errorhandler(405)
 def method_not_allowed(_error):
     """Return JSON for 405 errors."""
     return jsonify({'error': 'Method not allowed'}), 405
 
+
 @app.errorhandler(500)
 def internal_error(_error):
     """Return JSON for 500 errors."""
     return jsonify({'error': 'Internal server error'}), 500
+
 
 # ─── Data stores ─────────────────────────────────────────────────────────────
 
@@ -39,6 +103,7 @@ jobs = {}
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def utc_now_iso():
@@ -46,6 +111,7 @@ def utc_now_iso():
     return datetime.datetime.now(datetime.UTC).isoformat(
         timespec='milliseconds'
     ).replace('+00:00', 'Z')
+
 
 def generate_mock_transcript():
     """Return a static sample transcript."""
@@ -59,6 +125,7 @@ def generate_mock_transcript():
         "Transformers, in particular, have become the backbone of "
         "modern AI systems."
     )
+
 
 def generate_mock_segments():
     """Return a list of mock transcript segments with timestamps."""
@@ -99,12 +166,12 @@ def generate_mock_segments():
         },
     ]
 
+
 def process_job(job_id):
     """Simulate background job processing with progress updates."""
     job = jobs.get(job_id)
     if not job:
         return
-
     progress = 0.0
     while progress < 1.0:
         time.sleep(1)
@@ -116,6 +183,7 @@ def process_job(job_id):
             job['status'] = 'completed'
             job['transcript'] = generate_mock_transcript()
             job['segments'] = generate_mock_segments()
+
 
 # ─── Dummy project ──────────────────────────────────────────────────────────
 # You must place a sample.mp4 file in the uploads/ folder for this to work.
@@ -137,13 +205,13 @@ dummy_project = {
 }
 videos.append(dummy_project)
 
-# Pre‑register a test user
 users['testuser@example.com'] = {
     'name': 'Test User',
     'password': 'YourSecurePassword123'
 }
 
-# ─── Auth endpoints ─────────────────────────────────────────────────────────
+
+# ─── Auth endpoints (local) ────────────────────────────────────────────────
 
 @app.route('/register', methods=['POST'])
 def register():
@@ -159,6 +227,7 @@ def register():
     token = str(uuid.uuid4())
     return jsonify({'token': token, 'message': 'User registered successfully'}), 201
 
+
 @app.route('/login', methods=['POST'])
 def login():
     """Log in an existing user."""
@@ -172,7 +241,8 @@ def login():
     token = str(uuid.uuid4())
     return jsonify({'token': token, 'message': 'Login successful'}), 200
 
-# ─── Video endpoints ────────────────────────────────────────────────────────
+
+# ─── Video endpoints (local) ───────────────────────────────────────────────
 
 @app.route('/videos', methods=['GET'])
 def get_videos():
@@ -183,6 +253,7 @@ def get_videos():
         'storage_used_gb': round(storage_used_gb, 2),
         'storage_limit_gb': 50.0
     }), 200
+
 
 @app.route('/video_detail/<video_key>', methods=['GET'])
 def video_detail(video_key):
@@ -195,6 +266,7 @@ def video_detail(video_key):
             detail['video_url'] = None
             return jsonify(detail), 200
     return jsonify({'error': 'Video not found'}), 404
+
 
 @app.route('/media/<video_key>')
 def serve_video(video_key):
@@ -210,6 +282,7 @@ def serve_video(video_key):
         return jsonify({'error': f'File "{file_name}" not found on disk'}), 404
     return send_file(file_path, as_attachment=False)
 
+
 @app.route('/upload-chunk', methods=['POST'])
 def upload_chunk():
     """Receive a chunk of a file upload."""
@@ -224,6 +297,7 @@ def upload_chunk():
     chunk_storage[filename][chunk_index] = file.read()
     return jsonify({'message': 'Chunk uploaded'}), 200
 
+
 @app.route('/finish-upload', methods=['POST'])
 def finish_upload():
     """Complete a chunked upload and persist the file to disk."""
@@ -236,7 +310,6 @@ def finish_upload():
     if not chunks or any(chunk is None for chunk in chunks):
         return jsonify({'message': 'Incomplete upload'}), 400
 
-    # Combine chunks and write to disk
     combined = b''.join(chunks)
     file_path = os.path.join(UPLOAD_FOLDER, filename)
     with open(file_path, 'wb') as f:
@@ -262,14 +335,14 @@ def finish_upload():
     del chunk_storage[filename]
     return jsonify({'message': 'Upload finished', 'project': project}), 200
 
-# ─── Job endpoints ──────────────────────────────────────────────────────────
+
+# ─── Job endpoints (local mock) ────────────────────────────────────────────
 
 @app.route('/start_job/<video_key>', methods=['POST'])
 def start_job(video_key):
     """Start a background transcription job for the given video."""
     data = request.get_json()
     job_id = str(uuid.uuid4())
-
     job = {
         'id': job_id,
         'video_key': video_key,
@@ -284,6 +357,7 @@ def start_job(video_key):
     threading.Thread(target=process_job, args=(job_id,), daemon=True).start()
     return jsonify({'job_id': job_id, 'status': 'processing'}), 200
 
+
 @app.route('/job_status/<job_id>', methods=['GET'])
 def job_status(job_id):
     """Return the current status of a transcription job."""
@@ -297,6 +371,173 @@ def job_status(job_id):
         'segments': job.get('segments'),
     }), 200
 
+
+# ─── PROXY ENDPOINTS for the internal server ──────────────────────────────
+
+@app.route('/check-session', methods=['GET'])
+def check_session():
+    """
+    Forward a GET request to the internal server root.
+    Returns JSON: { 'authenticated': bool }
+    """
+    headers = {}
+    auth = request.headers.get('Authorization')
+    if auth:
+        headers['Authorization'] = auth
+    forwarded_user = request.headers.get('X-Forwarded-User')
+    if forwarded_user:
+        headers['X-Forwarded-User'] = forwarded_user
+
+    try:
+        resp = requests.get(
+            INTERNAL_SERVER_URL,
+            headers=headers,
+            allow_redirects=False,
+            timeout=10,
+            verify=False  # set to True in production
+        )
+        final_url = resp.url if hasattr(resp, 'url') else INTERNAL_SERVER_URL
+        is_login_page = (
+            resp.status_code == 200 and
+            ('Log in to dex' in resp.text or 'dex-container' in resp.text)
+        )
+        if 'dex' in final_url or resp.status_code == 302 or is_login_page:
+            authenticated = False
+        else:
+            authenticated = True
+        return jsonify({'authenticated': authenticated}), 200
+    except requests.exceptions.RequestException:
+        return jsonify({'authenticated': False, 'error': 'Request failed'}), 200
+
+
+@app.route('/upload-lecture', methods=['POST'])
+def upload_lecture():
+    """
+    Forward a multipart POST to the internal server's /upload_lecture.
+    Uses a persistent session and authenticates with the provided Bearer token.
+    """
+    # 1. Extract token from Authorization header
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return jsonify({'error': 'Missing or invalid Authorization header'}), 401
+
+    token = auth_header.split(' ')[1]
+
+    # 2. Ensure the proxy session is authenticated with this token
+    if not ensure_authenticated(token):
+        return jsonify({'error': 'Authentication failed. Please log in again.'}), 401
+
+    # 3. Forward the upload request using the authenticated session
+    headers = {}
+    forwarded_user = request.headers.get('X-Forwarded-User')
+    if forwarded_user:
+        headers['X-Forwarded-User'] = forwarded_user
+
+    # Copy form data and files
+    data = {}
+    for key, value in request.form.items():
+        data[key] = value
+
+    files = {}
+    if 'videofile' in request.files:
+        file_storage = request.files['videofile']
+        files['videofile'] = (
+            file_storage.filename,
+            file_storage.read(),
+            file_storage.mimetype or 'video/mp4'
+        )
+
+    try:
+        # Use the global session (which has the session cookie)
+        resp = internal_session.post(
+            f"{INTERNAL_SERVER_URL}/upload_lecture",
+            data=data,
+            files=files,
+            headers=headers,
+            allow_redirects=False,
+            timeout=60
+        )
+
+        status = resp.status_code
+        response_headers = dict(resp.headers)
+        location = response_headers.get('Location')
+        response_body = resp.text
+
+        # --- DEBUG LOGGING ---
+        print("=== DEBUG upload-lecture ===")
+        print(f"Status: {status}")
+        print(f"Headers: {response_headers}")
+        print(f"Body preview: {response_body[:200]}")
+        print("============================")
+
+        # If it's a redirect (3xx) and the Location points to the internal server
+        # or contains 'dex', treat as authentication error.
+        if status in (301, 302, 303, 307):
+            if location and (
+                location.startswith(INTERNAL_SERVER_URL) or
+                'dex' in location or
+                '/_oauth' in location
+            ):
+                # Clear the session so we re‑authenticate next time
+                internal_session.cookies.clear()
+                return jsonify({'error': 'Authentication required. Please log in again.'}), 401
+
+        # Otherwise, forward the response to the client
+        flask_response = app.make_response(response_body)
+        flask_response.status_code = status
+        if location:
+            flask_response.headers['Location'] = location
+
+        return flask_response
+
+    except requests.exceptions.RequestException as e:
+        return jsonify({'error': f'Proxy error: {str(e)}'}), 500
+
+# ─── PROXY ENDPOINTS FOR OAuth ─────────────────────────────────────────────
+
+@app.route('/dex/token', methods=['POST'])
+def dex_token():
+    """
+    Forward token exchange to the internal server's /dex/token.
+    Returns the exact response from the internal server.
+    """
+    try:
+        # Copy headers except 'host' to avoid conflicts
+        headers = {k: v for k, v in request.headers if k.lower() != 'host'}
+        resp = requests.post(
+            f"{INTERNAL_SERVER_URL}/dex/token",
+            data=request.get_data(),
+            headers=headers,
+            allow_redirects=False,
+            timeout=30,
+            verify=False
+        )
+        # Return the exact status, headers, and body
+        return (resp.content, resp.status_code, resp.headers.items())
+    except requests.exceptions.RequestException as e:
+        return jsonify({'error': f'Proxy error: {str(e)}'}), 500
+
+
+@app.route('/dex/userinfo', methods=['GET'])
+def dex_userinfo():
+    """
+    Forward userinfo request to the internal server's /dex/userinfo.
+    Returns the exact response from the internal server.
+    """
+    try:
+        headers = {k: v for k, v in request.headers if k.lower() != 'host'}
+        resp = requests.get(
+            f"{INTERNAL_SERVER_URL}/dex/userinfo",
+            headers=headers,
+            allow_redirects=False,
+            timeout=30,
+            verify=False
+        )
+        return (resp.content, resp.status_code, resp.headers.items())
+    except requests.exceptions.RequestException as e:
+        return jsonify({'error': f'Proxy error: {str(e)}'}), 500
+
+
 # ─── Debug endpoints ────────────────────────────────────────────────────────
 
 @app.route('/debug-videos', methods=['GET'])
@@ -304,10 +545,12 @@ def debug_videos():
     """Debug: return all video metadata."""
     return jsonify({'count': len(videos), 'projects': videos}), 200
 
+
 @app.route('/debug-jobs', methods=['GET'])
 def debug_jobs():
     """Debug: return all jobs."""
     return jsonify({'count': len(jobs), 'jobs': jobs}), 200
+
 
 @app.route('/clear-videos', methods=['POST'])
 def clear_videos():
@@ -317,5 +560,15 @@ def clear_videos():
     chunk_storage.clear()
     return jsonify({'message': 'Cleared'}), 200
 
+
+# ─── Main ──────────────────────────────────────────────────────────────────
+
 if __name__ == '__main__':
+    # Suppress insecure request warnings (optional)
+    try:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    except ImportError:
+        pass  # urllib3 not installed, continue anyway
+
     app.run(port=5000, debug=True)
