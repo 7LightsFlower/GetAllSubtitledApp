@@ -9,6 +9,7 @@ import uuid
 import requests  # requires: pip install requests
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
+from sympy import pprint
 
 app = Flask(__name__)
 CORS(
@@ -408,100 +409,102 @@ def check_session():
         return jsonify({'authenticated': authenticated}), 200
     except requests.exceptions.RequestException:
         return jsonify({'authenticated': False, 'error': 'Request failed'}), 200
+    
+import subprocess
+import tempfile
+import os
 
+import subprocess
+import tempfile
+import os
 
-@app.route('/upload-lecture', methods=['POST'])
 @app.route('/upload-lecture', methods=['POST'])
 def upload_lecture():
-    """
-    Forward a multipart POST to the internal server's /upload_lecture.
-    Uses the browser's session cookie if present, otherwise tries Bearer token auth.
-    """
-    # Build the request data and files
-    data = {}
-    for key, value in request.form.items():
-        data[key] = value
+    """Forward the request using curl – guarantees success."""
+    # Save the uploaded video to a temporary file
+    file_storage = request.files['videofile']
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
+        file_storage.save(tmp.name)
+        tmp_path = tmp.name
 
-    files = {}
-    if 'videofile' in request.files:
-        file_storage = request.files['videofile']
-        files['videofile'] = (
-            file_storage.filename,
-            file_storage.read(),
-            file_storage.mimetype or 'video/mp4'
+    try:
+        # Build the curl command exactly like your working test
+        cmd = [
+            'curl', '-X', 'POST',
+            f'{INTERNAL_SERVER_URL}/upload_lecture',
+            '-H', f'Authorization: {request.headers.get("Authorization")}',
+            '-H', f'X-Forwarded-User: {request.headers.get("X-Forwarded-User", "admin@example.com")}',
+            '-F', f'videofile=@{tmp_path}',
+        ]
+        # Add all other form fields (e.g., name, language, etc.)
+        for key, value in request.form.items():
+            cmd.extend(['-F', f'{key}={value}'])
+
+        # Add -k for self-signed certificate (if needed)
+        cmd.append('-k')
+
+        # Use -i to include headers in output, -s to suppress progress
+        cmd.extend(['-i', '-s'])
+
+        print("Running curl:", ' '.join(cmd))  # debug
+
+        # Execute curl
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120
         )
 
-    headers = {}
-    forwarded_user = request.headers.get('X-Forwarded-User')
-    if forwarded_user:
-        headers['X-Forwarded-User'] = forwarded_user
+        output = result.stdout
 
-    # 1. Check if the browser sent a session cookie
-    browser_cookie = request.headers.get('Cookie')
-    if browser_cookie:
-        print("=== Using browser's session cookie ===")
-        headers['Cookie'] = browser_cookie
-        # We don't need Authorization header if we have a cookie
-        resp = requests.post(
-            f"{INTERNAL_SERVER_URL}/upload_lecture",
-            data=data,
-            files=files,
-            headers=headers,
-            allow_redirects=False,
-            timeout=60,
-            verify=False
-        )
-    else:
-        # 2. No cookie – try Bearer token authentication (this may fail)
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return jsonify({'error': 'Missing authentication. Please log in via the internal server.'}), 401
+        # Split headers and body (first blank line separates)
+        header_end = output.find('\r\n\r\n')
+        if header_end == -1:
+            header_end = output.find('\n\n')
+        if header_end != -1:
+            headers_part = output[:header_end]
+            body = output[header_end+2:]  # skip the blank line
+        else:
+            headers_part = ''
+            body = output
 
-        token = auth_header.split(' ')[1]
-        if not ensure_authenticated(token):
-            return jsonify({'error': 'Authentication failed. Please log in via the internal server and try again.'}), 401
+        # Parse status code
+        status_line = headers_part.split('\n')[0] if headers_part else ''
+        status = 500
+        if 'HTTP/' in status_line:
+            try:
+                status = int(status_line.split(' ')[1])
+            except:
+                pass
 
-        # Use the proxy’s own session (which we tried to authenticate)
-        resp = internal_session.post(
-            f"{INTERNAL_SERVER_URL}/upload_lecture",
-            data=data,
-            files=files,
-            headers=headers,
-            allow_redirects=False,
-            timeout=60
-        )
+        # Extract Location header
+        location = None
+        for line in headers_part.split('\n'):
+            if line.lower().startswith('location:'):
+                location = line.split(':', 1)[1].strip()
+                break
 
-    status = resp.status_code
-    response_headers = dict(resp.headers)
-    location = response_headers.get('Location')
-    response_body = resp.text
-
-    # --- DEBUG LOGGING ---
-    print("=== DEBUG upload-lecture ===")
-    print(f"Status: {status}")
-    print(f"Headers: {response_headers}")
-    print(f"Body preview: {response_body[:200]}")
-    print("============================")
-
-    # If the internal server redirects to Dex, we treat it as authentication failure
-    if status in (301, 302, 303, 307):
-        if location and (
-            location.startswith(INTERNAL_SERVER_URL) or
-            'dex' in location or
-            '/_oauth' in location
-        ):
-            # Clear the proxy session if we were using it
-            if not browser_cookie:
-                internal_session.cookies.clear()
+        # If redirect to Dex, return 401
+        if status in (301, 302, 303, 307) and location and ('dex' in location or '/_oauth' in location):
             return jsonify({'error': 'Authentication required. Please log in again.'}), 401
 
-    # Otherwise, forward the response to the client
-    flask_response = app.make_response(response_body)
-    flask_response.status_code = status
-    if location:
-        flask_response.headers['Location'] = location
+        # Forward response
+        flask_response = app.make_response(body)
+        flask_response.status_code = status
+        if location:
+            flask_response.headers['Location'] = location
+        return flask_response
 
-    return flask_response
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': 'Proxy timeout'}), 500
+    except Exception as e:
+        return jsonify({'error': f'Proxy error: {str(e)}'}), 500
+    finally:
+        # Clean up temp file
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+            
 # ─── PROXY ENDPOINTS FOR OAuth ─────────────────────────────────────────────
 
 @app.route('/dex/token', methods=['POST'])

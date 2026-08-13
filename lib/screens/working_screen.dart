@@ -3,6 +3,7 @@ import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:asr_live_translator/screens/session_detail_screen.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -156,11 +157,56 @@ class _WorkingScreenState extends State<WorkingScreen> {
     );
   }
 
+  // ─── Token display helpers ──────────────────────────────────────────
+
+  void _showTokenDialog(String token, String title) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: SelectableText(
+          token,
+          style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+          maxLines: 10,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: token));
+              ScaffoldMessenger.of(ctx).showSnackBar(
+                const SnackBar(content: Text('Token copied to clipboard')),
+              );
+            },
+            child: const Text('Copy'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showCurrentToken() async {
+    final token = await InternalAuthService.getValidAccessToken();
+    if (token == null) {
+      _showSnackBar('No token available. Please log in first.', isError: true);
+      return;
+    }
+    _showTokenDialog(token, 'Current Access Token');
+  }
+
   // ─── OAuth2 actions ─────────────────────────────────────────────────
+
   Future<void> _showOAuthLogin() async {
     final success = await InternalAuthService.loginWithOAuth();
     if (success && mounted) {
       _showSnackBar('Internal server connected via OAuth.');
+      final token = await InternalAuthService.getValidAccessToken();
+      if (token != null) {
+        _showTokenDialog(token, 'Token obtained from OAuth');
+      }
     } else if (mounted) {
       _showSnackBar('OAuth login failed. Please try again.', isError: true);
     }
@@ -174,6 +220,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
   }
 
   // ─── Redirect login (full‑page redirect) ────────────────────────────
+
   Future<void> _loginWithRedirect() async {
     try {
       await InternalAuthService.redirectToDex();
@@ -182,7 +229,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
     }
   }
 
-  // ─── Manual code exchange (debug workaround) ──────────────────────
+  // ─── Manual code exchange (debug workaround) – FIXED ───────────────
+
   void _showManualCodeDialog() {
     final controller = TextEditingController();
     showDialog(
@@ -212,21 +260,34 @@ class _WorkingScreenState extends State<WorkingScreen> {
             onPressed: () async {
               final code = controller.text.trim();
               if (code.isEmpty) {
+                // Use the dialog's context for the snackbar
                 ScaffoldMessenger.of(ctx).showSnackBar(
                   const SnackBar(content: Text('Please enter a code')),
                 );
                 return;
               }
+
+              // Perform the exchange
               final success = await InternalAuthService.exchangeCodeManually(code);
-              // ✅ Check that both the screen AND the dialog are still mounted
+
+              // Guard: check both widget and dialog contexts
               if (!mounted) return;
               if (!ctx.mounted) return;
+
               if (success) {
                 _showSnackBar('Token obtained successfully!');
+                final token = await InternalAuthService.getValidAccessToken();
+                if (token != null) {
+                  _showTokenDialog(token, 'Token from manual exchange');
+                }
               } else {
                 _showSnackBar('Exchange failed. Check console.', isError: true);
               }
-              Navigator.pop(ctx);
+
+              // Close the dialog – ensure the context is still valid
+              if (ctx.mounted) {
+                Navigator.pop(ctx);
+              }
             },
             child: const Text('Exchange'),
           ),
@@ -236,6 +297,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
   }
 
   // ─── Navigation and actions ──────────────────────────────────
+
   void _openSessionDetail(String videoKey) {
     Navigator.push(
       context,
@@ -374,6 +436,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
   }
 
   // ─── Internal actions (require token) ──────────────────────────────
+
   Future<void> _stopSegmentation(String videoKey) async {
     final token = await InternalAuthService.getValidAccessToken();
     if (token == null) {
@@ -451,6 +514,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
   }
 
   // ─── Edit name – uses internal API ──────────────────────────────────
+
   Future<void> _editProjectName(VideoProject project) async {
     final token = await InternalAuthService.getValidAccessToken();
     if (token == null) {
@@ -504,6 +568,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
   }
 
   // ─── Upload – using bytes (web-compatible) ──────────────────────────
+
   Future<void> _uploadVideo() async {
     FilePickerResult? result = await FilePicker.platform.pickFiles(
       type: FileType.video,
@@ -532,16 +597,17 @@ class _WorkingScreenState extends State<WorkingScreen> {
   }
 
   // ─── Logout from public server ──────────────────────────────────────
+
   Future<void> _logoutPublic() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('auth_token');
-    // Also clear internal tokens if you want
     await InternalAuthService.clearTokens();
     if (!mounted) return;
     Navigator.pushReplacementNamed(context, '/login');
   }
 
   // ─── UI Build ──────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -559,6 +625,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
                 _showManualCodeDialog();
               } else if (value == 'redirect_login') {
                 _loginWithRedirect();
+              } else if (value == 'show_token') {
+                _showCurrentToken();
               }
             },
             itemBuilder: (context) => [
@@ -577,6 +645,10 @@ class _WorkingScreenState extends State<WorkingScreen> {
               const PopupMenuItem(
                 value: 'manual_code',
                 child: Text('Manual Code Exchange (debug)'),
+              ),
+              const PopupMenuItem(
+                value: 'show_token',
+                child: Text('Show Token'),
               ),
             ],
           ),
@@ -909,6 +981,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
 }
 
 // ─── Upload Dialog – accepts bytes (web-compatible) ──────────────
+
 class _UploadDialog extends StatefulWidget {
   final Uint8List bytes;
   final String fileName;
@@ -928,7 +1001,7 @@ class _UploadDialogState extends State<_UploadDialog> {
   double _progress = 0.0;
   bool _isUploading = false;
   String _statusText = 'Ready';
-  bool _autoSegmentation = true; // enabled by default
+  bool _autoSegmentation = true;
 
   @override
   void initState() {

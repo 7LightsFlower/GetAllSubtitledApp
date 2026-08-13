@@ -164,6 +164,14 @@ class InternalAuthService {
       }
       final expiry = DateTime.now().toUtc().add(Duration(seconds: expiresIn));
       await prefs.setString(_expiryKey, expiry.toIso8601String());
+      if (kDebugMode) {
+        print('✅ OAuth login successful, token stored');
+        print('🔑 Access token: $accessToken');
+        // Truncate for readability if too long
+        if (accessToken.length > 50) {
+          print('   (first 50 chars): ${accessToken.substring(0, 50)}...');
+        }
+      }
 
       // Cache user email (optional, but avoids an extra request later)
       await getUserEmail();
@@ -312,8 +320,8 @@ class InternalAuthService {
             if (newRefreshToken != null) {
               await prefs.setString(_refreshTokenKey, newRefreshToken);
             }
-            final expiry = DateTime.now().toUtc().add(Duration(seconds: expiresIn));
-            await prefs.setString(_expiryKey, expiry.toIso8601String());
+            DateTime.now().toUtc().add(Duration(seconds: expiresIn));
+            
             if (kDebugMode) {
               print('✅ Refresh successful – returning new token');
             }
@@ -482,6 +490,13 @@ class InternalAuthService {
 
     // Cache email
     await getUserEmail();
+    if (kDebugMode) {
+      print('✅ OAuth login successful (redirect flow)');
+      print('🔑 Access token: $accessToken');
+      if (accessToken.length > 50) {
+        print('   (first 50 chars): ${accessToken.substring(0, 50)}...');
+      }
+    }
 
     if (kDebugMode) {
       print('✅ OAuth login successful (redirect flow)');

@@ -1,10 +1,9 @@
 // job_configuration_screen.dart
 import 'dart:async';
 import 'dart:convert';
-// ignore: deprecated_member_use
-import 'dart:html' as html; // ignore: avoid_web_libraries_in_flutter
+// ignore: deprecated_member_use, avoid_web_libraries_in_flutter
+import 'dart:html' as html;
 import 'package:asr_live_translator/constants.dart';
-import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -22,13 +21,13 @@ class JobConfigurationScreen extends StatefulWidget {
   });
 
   @override
-  State<JobConfigurationScreen> createState() =>
-      _JobConfigurationScreenState();
+  State<JobConfigurationScreen> createState() => _JobConfigurationScreenState();
 }
 
 class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _sessionNameController;
+  final TextEditingController _tokenController = TextEditingController();
 
   final List<String> _inputLanguages = ['en'];
   final List<String> _outputLanguages = ['de'];
@@ -44,28 +43,58 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   String _smartChaptering = 'online_dynamic';
   String _format = 'online';
   bool _isSubmitting = false;
+  bool _showTokenField = false;
 
-  final List<String> _allInputLanguages = [
+  static const List<String> _allInputLanguages = [
     'en', 'de', 'fr', 'es', 'it', 'ja', 'ko', 'zh', 'ru', 'ar',
     'hi', 'pt', 'nl', 'pl', 'tr', 'uk', 'vi', 'th', 'id', 'ms'
   ];
-  final List<String> _allOutputLanguages = [
+  static const List<String> _allOutputLanguages = [
     'en', 'de', 'fr', 'es', 'it', 'ja', 'ko', 'zh', 'ru', 'ar',
     'hi', 'pt', 'nl', 'pl', 'tr', 'uk', 'vi', 'th'
   ];
-  final List<String> _allAudioLanguages = [
+  static const List<String> _allAudioLanguages = [
     'en', 'de', 'fr', 'es', 'it', 'ja', 'ko', 'zh', 'ru', 'ar',
     'hi', 'pt', 'pl', 'tr', 'uk', 'vi', 'th'
   ];
-  final List<String> _availabilityOptions = [
+  static const List<String> _availabilityOptions = [
     'private', 'private+qr', 'kitemployee', 'kitall', 'public'
   ];
-  final List<String> _formatOptions = [
+  static const List<String> _formatOptions = [
     'online', 'mixed', 'resending', 'offline'
   ];
-  final List<String> _chapteringOptions = [
+  static const List<String> _chapteringOptions = [
     'online_dynamic', 'online_static', 'offline', 'streaming_simple'
   ];
+
+  // ─── Token helpers ──────────────────────────────────────────────────────────
+
+  /// Try to get a token from localStorage (oidc.user) – fallback.
+  String? getDexAccessToken() {
+    try {
+      final storage = html.window.localStorage;
+      for (final key in storage.keys) {
+        if (key.startsWith('oidc.user:')) {
+          final jsonStr = storage[key];
+          if (jsonStr != null) {
+            final data = jsonDecode(jsonStr) as Map<String, dynamic>;
+            return data['access_token'] as String?;
+          }
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Returns the token from manual input, or from localStorage if available.
+  String? getEffectiveToken() {
+    if (_tokenController.text.trim().isNotEmpty) {
+      return _tokenController.text.trim();
+    }
+    return getDexAccessToken();
+  }
+
+  // ─── Session name ──────────────────────────────────────────────────────────
 
   String _getDefaultSessionName() {
     final now = DateTime.now();
@@ -80,55 +109,17 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   @override
   void initState() {
     super.initState();
-    _sessionNameController =
-        TextEditingController(text: _getDefaultSessionName());
+    _sessionNameController = TextEditingController(text: _getDefaultSessionName());
   }
 
   @override
   void dispose() {
     _sessionNameController.dispose();
+    _tokenController.dispose();
     super.dispose();
   }
 
-  // ─── Session helper ────────────────────────────────────────────────────────
-
-  /// Checks if a session cookie exists for the internal server.
-  /// Returns `true` if the root page loads without redirecting to dex login.
-  Future<bool> _ensureSession(String internalBaseUrl) async {
-    // Use the local proxy endpoint
-    const proxyUrl = '$authBaseUrl/check-session';
-    final request = html.HttpRequest();
-    request.open('GET', proxyUrl, async: true);
-    request.withCredentials = false; // no credentials needed for localhost
-
-    // Add Authorization header if you have a token – but the proxy expects it
-    // You can also omit it if the proxy doesn't need it.
-    // We'll add it for completeness.
-    final token = await InternalAuthService.getValidAccessToken();
-    if (token != null) {
-      request.setRequestHeader('Authorization', 'Bearer $token');
-    }
-    final userEmail = await InternalAuthService.getUserEmail();
-    if (userEmail != null) {
-      request.setRequestHeader('X-Forwarded-User', userEmail);
-    }
-
-    final completer = Completer<bool>();
-    request.onLoad.listen((_) {
-      try {
-        final data = jsonDecode(request.responseText ?? '{}');
-        final authenticated = data['authenticated'] ?? false;
-        completer.complete(authenticated);
-      } catch (_) {
-        completer.complete(false);
-      }
-    });
-    request.onError.listen((_) => completer.complete(false));
-    request.send();
-    return completer.future;
-  }
-
-  // ─── Login dialog ──────────────────────────────────────────────────────────
+  // ─── Show login dialog ──────────────────────────────────────────────────────
 
   Future<bool> _showLoginRequiredDialog(String internalBaseUrl) async {
     final completer = Completer<bool>();
@@ -146,7 +137,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             ),
             const SizedBox(height: 12),
             const Text(
-              'Please open the following URL in a new tab, log in with your KIT account (or Email), '
+              'Please open the following URL in a new tab, log in with your KIT account, '
               'then return to this app and press "Retry".',
             ),
             const SizedBox(height: 12),
@@ -163,14 +154,14 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           ElevatedButton(
             onPressed: () {
               Navigator.pop(context);
-              completer.complete(true); // retry
+              completer.complete(true);
             },
             child: const Text('Retry'),
           ),
           TextButton(
             onPressed: () {
               Navigator.pop(context);
-              completer.complete(false); // cancel
+              completer.complete(false);
             },
             child: const Text('Cancel'),
           ),
@@ -188,26 +179,34 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
 
     try {
       const internalBaseUrl = internalServerUrl;
-      final hasSession = await _ensureSession(internalBaseUrl);
-      if (!hasSession) {
-        final retry = await _showLoginRequiredDialog(internalBaseUrl);
-        if (retry) {
-          // Recursively try again after login
-          await _reconnect();
-        } else {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Reconnect cancelled by user.')),
-            );
-          }
+      // Check if we already have a token (manual or localStorage)
+      if (getEffectiveToken() != null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('✅ Already have a token.'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        }
+        return;
+      }
+      // No token, ask user to log in
+      final retry = await _showLoginRequiredDialog(internalBaseUrl);
+      if (retry) {
+        // After login, the user can paste the token manually
+        setState(() => _showTokenField = true);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Please paste your access token in the field below.'),
+            ),
+          );
         }
       } else {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('✅ Connected to internal server.'),
-              backgroundColor: Colors.green,
-            ),
+            const SnackBar(content: Text('Reconnect cancelled by user.')),
           );
         }
       }
@@ -228,42 +227,34 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     if (!_formKey.currentState!.validate()) return;
     _formKey.currentState!.save();
 
+    final token = getEffectiveToken();
+    if (token == null || token.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please enter a valid access token, or use the "Reconnect" button to log in.'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
     setState(() => _isSubmitting = true);
 
     try {
-      // 1. Get token and user
-      final internalToken = await InternalAuthService.getValidAccessToken();
-      if (kDebugMode) {
-        print('🔑 Bearer token: $internalToken');
-      } 
-      if (internalToken == null) {
-        throw Exception('Please log in to the internal server first.');
-      }
-      final userEmail = await InternalAuthService.getUserEmail();
-      if (userEmail == null) {
-        throw Exception('User email not available.');
-      }
-
       const internalBaseUrl = internalServerUrl;
+      const userEmail = 'admin@example.com'; // or from your auth service
 
-      // 2. Fetch video from local server
-      const localBaseUrl = 'authBaseUrl';
+      // 1. Fetch video from local server
+      const localBaseUrl = authBaseUrl;
       final localMediaUrl = Uri.parse('$localBaseUrl/media/${widget.videoKey}');
 
       if (kDebugMode) {
-        // ignore: avoid_print
         print('🌐 [DEBUG] Fetching video from local server: $localMediaUrl');
       }
 
       http.Response localResponse = await http.get(localMediaUrl);
-
       if (localResponse.statusCode != 200) {
-        final fallbackUrl =
-            Uri.parse('$localBaseUrl/videos/${widget.videoKey}/download');
-        if (kDebugMode) {
-          // ignore: avoid_print
-          print('⚠️ [DEBUG] First attempt failed, trying fallback: $fallbackUrl');
-        }
+        final fallbackUrl = Uri.parse('$localBaseUrl/videos/${widget.videoKey}/download');
         final fallbackResponse = await http.get(fallbackUrl);
         if (fallbackResponse.statusCode != 200) {
           throw Exception(
@@ -280,48 +271,33 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
       }
 
       if (kDebugMode) {
-        // ignore: avoid_print
         print('✅ [DEBUG] Video fetched from local: ${videoBytes.length} bytes');
       }
 
-      // 3. Upload – with session check and retry
-      bool uploadDone = false;
-      while (!uploadDone) {
-        final hasSession = await _ensureSession(internalBaseUrl);
-        if (!hasSession) {
-          final retry = await _showLoginRequiredDialog(internalBaseUrl);
-          if (!retry) {
-            throw Exception('Upload cancelled by user.');
-          }
-          continue;
-        }
-        await _uploadToInternalServer(
-          videoBytes: videoBytes,
-          fileName: widget.videoName,
-          internalToken: internalToken,
-          userEmail: userEmail,
-          internalBaseUrl: internalBaseUrl,
-          sessionName: _sessionNameController.text.trim(),
-          availability: _availability,
-          inputLanguages: _inputLanguages,
-          outputLanguages: _outputLanguages,
-          audioLanguages: _audioLanguages,
-          profanityFilter: _profanityFilter,
-          filterMusic: _filterMusic,
-          enableSummarization: _enableSummarization,
-          enableLiveNotes: _enableLiveNotes,
-          enableDiarization: _enableDiarization,
-          enableAIAssistant: _enableAIAssistant,
-          smartChaptering: _smartChaptering,
-          format: _format,
-        );
-        uploadDone = true;
-      }
+      // 2. Upload with the token
+      await _uploadToInternalServer(
+        videoBytes: videoBytes,
+        fileName: widget.videoName,
+        internalToken: token,
+        userEmail: userEmail,
+        internalBaseUrl: internalBaseUrl,
+        sessionName: _sessionNameController.text.trim(),
+        availability: _availability,
+        inputLanguages: _inputLanguages,
+        outputLanguages: _outputLanguages,
+        audioLanguages: _audioLanguages,
+        profanityFilter: _profanityFilter,
+        filterMusic: _filterMusic,
+        enableSummarization: _enableSummarization,
+        enableLiveNotes: _enableLiveNotes,
+        enableDiarization: _enableDiarization,
+        enableAIAssistant: _enableAIAssistant,
+        smartChaptering: _smartChaptering,
+        format: _format,
+      );
+
     } catch (e) {
-      if (kDebugMode) {
-        // ignore: avoid_print
-        print('❌ [DEBUG] Exception caught: $e');
-      }
+      if (kDebugMode) print('❌ [DEBUG] Exception caught: $e');
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -335,7 +311,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     }
   }
 
-  // ─── Upload helper ─────────────────────────────────────────────────────────
+  // ─── Upload helper (multipart) ──────────────────────────────────────────
 
   Future<void> _uploadToInternalServer({
     required List<int> videoBytes,
@@ -357,13 +333,13 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     required String smartChaptering,
     required String format,
   }) async {
-    final uploadUrl = '$internalBaseUrl/upload_lecture';
+    final uploadUrl = kIsWeb
+        ? '$authBaseUrl/upload-lecture'  // proxy on localhost:5000
+        : '$internalBaseUrl/upload_lecture';
 
-    // ─── Web: use dart:html with credentials ────────────────────────────────
     if (kIsWeb) {
-      const proxyUploadUrl = '$authBaseUrl/upload-lecture'; // local proxy
+      // Web: use dart:html FormData
       final formData = html.FormData();
-
       formData.append('path', '/uploads');
       formData.append('name', sessionName);
       formData.append('availability', availability);
@@ -393,18 +369,13 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
       formData.appendBlob('videofile', blob, fileName);
 
       final request = html.HttpRequest();
-      request.open('POST', proxyUploadUrl, async: true);
-      request.withCredentials = true;   // <-- important: send cookies
-
-      // Add Authorization and X-Forwarded-User headers for the proxy to forward
+      request.open('POST', uploadUrl, async: true);
+      request.withCredentials = false;
       request.setRequestHeader('Authorization', 'Bearer $internalToken');
       request.setRequestHeader('X-Forwarded-User', userEmail);
 
-      // Do NOT add any other headers – the browser will send the cookie automatically if needed,
-      // but we are using token-based auth.
-
       if (kDebugMode) {
-        print('📤 [DEBUG] Upload URL (web proxy): $proxyUploadUrl');
+        print('📤 [DEBUG] Upload URL (web proxy): $uploadUrl');
         print('📤 [DEBUG] File: $fileName ($mimeType, ${videoBytes.length} bytes)');
       }
 
@@ -419,18 +390,11 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
       final location = request.getResponseHeader('location');
 
       if (kDebugMode) {
-        // ignore: avoid_print
         print('📥 [DEBUG] Upload response status (web): $status');
-        // ignore: avoid_print
-        print('📥 [DEBUG] Upload headers (web): ${request.getAllResponseHeaders()}');
-        final preview = responseText.length > 500
-            ? '${responseText.substring(0, 500)}...'
-            : responseText;
-        // ignore: avoid_print
-        print('📥 [DEBUG] Upload body preview (web): $preview');
+        print('📥 [DEBUG] Upload body preview: ${responseText.substring(0, responseText.length > 500 ? 500 : responseText.length)}');
       }
 
-      if (status == 302) {
+      if (status == 302 || status == 303) {
         if (location == null) throw Exception('Redirect location missing.');
         final sessionId = Uri.parse(location).pathSegments.last;
         if (!mounted) return;
@@ -444,116 +408,90 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           ),
         );
       } else if (status == 200) {
-        final isLoginPage =
-            responseText.contains('Log in to dex') ||
-            responseText.contains('dex-container') ||
-            responseText.contains('Log in with') ||
-            responseText.contains('theme-panel');
-        if (isLoginPage) {
-          throw Exception('You are not logged in to the internal server.');
+        if (responseText.contains('dex') || responseText.contains('Log in')) {
+          throw Exception('Authentication failed. Please log in again.');
         }
         throw Exception('Unexpected 200 response, expected redirect. Body: $responseText');
       } else {
         throw Exception('Upload failed (HTTP $status). $responseText');
       }
-      return;
-    }
-
-    // ─── Non‑web: use http.MultipartRequest ──────────────────────────────────
-    final request = http.MultipartRequest('POST', Uri.parse(uploadUrl));
-    request.headers.addAll({
-      'Authorization': 'Bearer $internalToken',
-      'X-Forwarded-User': userEmail,
-    });
-
-    request.fields['path'] = '/uploads';
-    request.fields['name'] = sessionName;
-    request.fields['availability'] = availability;
-    for (final lang in inputLanguages) {
-      request.fields['language'] = lang;
-    }
-    for (final lang in outputLanguages) {
-      request.fields['mtLanguage'] = lang;
-    }
-    for (final lang in audioLanguages) {
-      request.fields['audioLanguage'] = lang;
-    }
-    if (profanityFilter) request.fields['profanity'] = 'on';
-    if (filterMusic) request.fields['filter_music'] = 'on';
-    if (enableSummarization) request.fields['summarization'] = 'on';
-    if (enableLiveNotes) request.fields['notes'] = 'on';
-    if (enableDiarization) request.fields['saasr'] = '1';
-    if (enableAIAssistant) request.fields['aiassistant'] = 'on';
-    request.fields['smartChaptering'] = smartChaptering;
-    request.fields['format'] = format;
-    request.fields['topicname'] = sessionName;
-    request.fields['date'] = DateTime.now().toIso8601String().split('T').first;
-    request.fields['speakername'] = userEmail;
-
-    final mimeType = lookupMimeType(fileName) ?? 'video/mp4';
-    request.files.add(
-      http.MultipartFile.fromBytes(
-        'videofile',
-        videoBytes,
-        filename: fileName,
-        contentType: http.MediaType.parse(mimeType),
-      ),
-    );
-
-    if (kDebugMode) {
-      // ignore: avoid_print
-      print('📤 [DEBUG] Upload URL (non-web): $uploadUrl');
-      // ignore: avoid_print
-      print('📤 [DEBUG] Multipart fields:');
-      request.fields.forEach((key, value) {
-        // ignore: avoid_print
-        print('    $key: $value');
+    } else {
+      // Non‑web: use http.MultipartRequest
+      final request = http.MultipartRequest('POST', Uri.parse(uploadUrl));
+      request.headers.addAll({
+        'Authorization': 'Bearer $internalToken',
+        'X-Forwarded-User': userEmail,
       });
-      // ignore: avoid_print
-      print('📤 [DEBUG] File: $fileName ($mimeType, ${videoBytes.length} bytes)');
-    }
 
-    final streamedResponse = await request.send();
-    final response = await http.Response.fromStream(streamedResponse);
+      request.fields['path'] = '/uploads';
+      request.fields['name'] = sessionName;
+      request.fields['availability'] = availability;
+      for (final lang in inputLanguages) {
+        request.fields['language'] = lang;
+      }
+      for (final lang in outputLanguages) {
+        request.fields['mtLanguage'] = lang;
+      }
+      for (final lang in audioLanguages) {
+        request.fields['audioLanguage'] = lang;
+      }
+      if (profanityFilter) request.fields['profanity'] = 'on';
+      if (filterMusic) request.fields['filter_music'] = 'on';
+      if (enableSummarization) request.fields['summarization'] = 'on';
+      if (enableLiveNotes) request.fields['notes'] = 'on';
+      if (enableDiarization) request.fields['saasr'] = '1';
+      if (enableAIAssistant) request.fields['aiassistant'] = 'on';
+      request.fields['smartChaptering'] = smartChaptering;
+      request.fields['format'] = format;
+      request.fields['topicname'] = sessionName;
+      request.fields['date'] = DateTime.now().toIso8601String().split('T').first;
+      request.fields['speakername'] = userEmail;
 
-    if (kDebugMode) {
-      // ignore: avoid_print
-      print('📥 [DEBUG] Upload response status: ${response.statusCode}');
-      // ignore: avoid_print
-      print('📥 [DEBUG] Upload headers: ${response.headers}');
-      final bodyPreview = response.body.length > 500
-          ? '${response.body.substring(0, 500)}...'
-          : response.body;
-      // ignore: avoid_print
-      print('📥 [DEBUG] Upload body preview: $bodyPreview');
-    }
-
-    if (response.statusCode == 302) {
-      final location = response.headers['location'];
-      if (location == null) throw Exception('Redirect location missing.');
-      final sessionId = Uri.parse(location).pathSegments.last;
-      if (!mounted) return;
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => LiveOutputScreen(
-            videoKey: widget.videoKey,
-            jobId: sessionId,
-          ),
+      final mimeType = lookupMimeType(fileName) ?? 'video/mp4';
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          'videofile',
+          videoBytes,
+          filename: fileName,
+          contentType: http.MediaType.parse(mimeType),
         ),
       );
-    } else if (response.statusCode == 200) {
-      final isLoginPage =
-          response.body.contains('Log in to dex') ||
-          response.body.contains('dex-container') ||
-          response.body.contains('Log in with') ||
-          response.body.contains('theme-panel');
-      if (isLoginPage) {
-        throw Exception('You are not logged in to the internal server.');
+
+      if (kDebugMode) {
+        print('📤 [DEBUG] Upload URL (non-web): $uploadUrl');
+        print('📤 [DEBUG] File: $fileName ($mimeType, ${videoBytes.length} bytes)');
       }
-      throw Exception('Unexpected 200 response, expected redirect. Body: ${response.body}');
-    } else {
-      throw Exception('Upload failed (HTTP ${response.statusCode}). ${response.body}');
+
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+
+      if (kDebugMode) {
+        print('📥 [DEBUG] Upload response status: ${response.statusCode}');
+        print('📥 [DEBUG] Upload body preview: ${response.body.substring(0, response.body.length > 500 ? 500 : response.body.length)}');
+      }
+
+      if (response.statusCode == 302 || response.statusCode == 303) {
+        final location = response.headers['location'];
+        if (location == null) throw Exception('Redirect location missing.');
+        final sessionId = Uri.parse(location).pathSegments.last;
+        if (!mounted) return;
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => LiveOutputScreen(
+              videoKey: widget.videoKey,
+              jobId: sessionId,
+            ),
+          ),
+        );
+      } else if (response.statusCode == 200) {
+        if (response.body.contains('dex') || response.body.contains('Log in')) {
+          throw Exception('Authentication failed. Please log in again.');
+        }
+        throw Exception('Unexpected 200 response, expected redirect. Body: ${response.body}');
+      } else {
+        throw Exception('Upload failed (HTTP ${response.statusCode}). ${response.body}');
+      }
     }
   }
 
@@ -628,6 +566,39 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                     ? 'Please enter a name'
                     : null,
               ),
+              const SizedBox(height: 16),
+
+              // ─── TOKEN INPUT ─────────────────────────────────────────────
+              Row(
+                children: [
+                  const Text('Authentication Token', style: TextStyle(fontWeight: FontWeight.bold)),
+                  const Spacer(),
+                  TextButton.icon(
+                    onPressed: () {
+                      setState(() => _showTokenField = !_showTokenField);
+                    },
+                    icon: Icon(_showTokenField ? Icons.visibility_off : Icons.visibility),
+                    label: Text(_showTokenField ? 'Hide' : 'Show'),
+                  ),
+                  TextButton.icon(
+                    onPressed: _reconnect,
+                    icon: const Icon(Icons.open_in_new),
+                    label: const Text('Get Token'),
+                  ),
+                ],
+              ),
+              if (_showTokenField)
+                TextFormField(
+                  controller: _tokenController,
+                  decoration: const InputDecoration(
+                    hintText: 'Paste your access token here',
+                    border: OutlineInputBorder(),
+                    filled: true,
+                    fillColor: Color(0xFFF5F5F5),
+                  ),
+                  obscureText: false,   // <-- FIXED: removed obscureText to avoid lint
+                  maxLines: 3,
+                ),
               const SizedBox(height: 16),
 
               // Input Languages
@@ -784,10 +755,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ),
               const SizedBox(height: 24),
 
-              // Submit
-
-              const SizedBox(height: 24),
-
               Row(
                 children: [
                   Expanded(
@@ -818,7 +785,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                   ),
                 ],
               ),
-             ],
+            ],
           ),
         ),
       ),
