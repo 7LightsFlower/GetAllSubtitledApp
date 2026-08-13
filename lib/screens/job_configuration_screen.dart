@@ -212,8 +212,10 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     setState(() => _isSubmitting = true);
 
     try {
-      final token = await _getToken();
-      if (kDebugMode) print('🚀 [UPLOAD] Token fetched: $token');
+    // Get the token - this will now work with manual token
+    final token = await _getToken();
+    if (kDebugMode) print('🚀 [UPLOAD] Using token: $token');
+
 
       const userEmail = 'admin@example.com';
 
@@ -299,96 +301,71 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     required String smartChaptering,
     required String format,
   }) async {
-    const uploadUrl = kIsWeb
-        ? '$authBaseUrl/upload-lecture'
-        : '$internalServerUrl/upload_lecture';
-
-    // Build fields exactly as in the Python script
-    final fields = <String, String>{
-      'path': '/home/$userEmail',
-      'name': sessionName,
-      'availability': availability,
-      'topicname': sessionName,
-      'date': DateTime.now().toIso8601String().split('T').first,
-      'speakername': 'Christian Huber',
-      'format': format,
-      'smartChaptering': smartChaptering,
-      'errorCorrection': 'None',
-      'ttsQualityMode': 'high_quality',
-    };
-
+    // Use the same URL as the Python script
+    const uploadUrl = '$internalServerUrl/upload_lecture';
+    
+    // Build fields exactly like the Python script - using list of tuples for multi-value fields
+    final fields = <String, List<String>>{};
+    
+    // Required fields
+    _addField(fields, 'path', '/home/$userEmail');
+    _addField(fields, 'name', sessionName);
+    _addField(fields, 'availability', availability);
+    _addField(fields, 'topicname', sessionName);
+    _addField(fields, 'date', DateTime.now().toIso8601String().split('T').first);
+    _addField(fields, 'speakername', 'Christian Huber');
+    
+    // Input languages - repeat for each language (like in Python)
     for (final lang in inputLanguages) {
-      fields['language'] = lang;
+      _addField(fields, 'language', lang);
     }
+    
+    // Output languages (translation targets)
     for (final lang in outputLanguages) {
-      fields['mtLanguage'] = lang;
+      _addField(fields, 'mtLanguage', lang);
     }
+    
+    // Audio languages (TTS targets)
     for (final lang in audioLanguages) {
-      fields['audioLanguage'] = lang;
+      _addField(fields, 'audioLanguage', lang);
     }
-
-    if (profanityFilter) fields['profanity'] = '1';
-    if (filterMusic) fields['filter_music'] = '1';
-    if (enableSummarization) fields['summarization'] = '1';
-    if (enableLiveNotes) fields['notes'] = '1';
-    if (enableDiarization) fields['saasr'] = '1';
-    if (enableAIAssistant) fields['aiassistant'] = '1';
-
-    if (kIsWeb) {
-      // ─── 1. Store the token as a browser cookie ──────────────────────────
-      // This makes the browser attach it automatically when we use withCredentials.
-      html.document.cookie = '_forward_auth=$token; path=/;';
-
-      // ─── 2. Build the multipart form data ────────────────────────────────
-      final formData = html.FormData();
-      fields.forEach((key, value) {
-        formData.append(key, value);
-      });
-
-      final mimeType = lookupMimeType(fileName) ?? 'video/mp4';
-      final blob = html.Blob([videoBytes], mimeType);
-      formData.appendBlob('videofile', blob, fileName);
-
-      // ─── 3. Create the request ────────────────────────────────────────────
-      final request = html.HttpRequest();
-      request.open('POST', uploadUrl, async: true);
-
-      // ✅ Enable credentials so the browser sends the cookie from its jar
-      request.withCredentials = true;
-
-      // ❌ REMOVE the line that manually sets the Cookie header:
-      // request.setRequestHeader('Cookie', '_forward_auth=$token');
-
-      if (kDebugMode) {
-        print('📤 [DEBUG] Upload URL (web proxy): $uploadUrl');
-        print('📤 [DEBUG] File: $fileName ($mimeType, ${videoBytes.length} bytes)');
-        print('📤 [DEBUG] Fields: $fields');
-        print('🔑 [DEBUG] Cookie stored in document.cookie, will be sent automatically');
-      }
-
-      final completer = Completer<void>();
-      request.onLoad.listen((_) => completer.complete());
-      request.onError.listen((error) => completer.completeError(error));
-      request.send(formData);
-      await completer.future;
-
-      final status = request.status;
-      final responseText = request.responseText ?? '';
-      final location = request.getResponseHeader('location');
-
-      if (kDebugMode) {
-        print('📥 [DEBUG] Upload response status (web): $status');
-        print('📥 [DEBUG] Upload body preview: ${responseText.substring(0, responseText.length > 500 ? 500 : responseText.length)}');
-      }
-
-      _handleUploadResponse(status, location, responseText);
-    } else {
+    
+    // Optional fields
+    _addField(fields, 'format', format);
+    _addField(fields, 'smartChaptering', smartChaptering);
+    _addField(fields, 'errorCorrection', 'None');
+    _addField(fields, 'ttsQualityMode', 'high_quality');
+    
+    // Checkbox-style flags - presence alone enables them (like in Python)
+    if (profanityFilter) _addField(fields, 'profanity', '1');
+    if (filterMusic) _addField(fields, 'filter_music', '1');
+    if (enableSummarization) _addField(fields, 'summarization', '1');
+    if (enableLiveNotes) _addField(fields, 'notes', '1');
+    if (enableAIAssistant) _addField(fields, 'aiassistant', '1');
+    if (enableDiarization) _addField(fields, 'saasr', '1');
+    
+    if (kDebugMode) {
+      print('📤 [DEBUG] Upload URL: $uploadUrl');
+      print('📤 [DEBUG] File: $fileName (${videoBytes.length} bytes)');
+      print('📤 [DEBUG] Fields: $fields');
+      print('🔑 [DEBUG] Using token: $token');
+    }
+    
+    try {
+      // Create multipart request
       final request = http.MultipartRequest('POST', Uri.parse(uploadUrl));
-      request.headers.addAll({
-        'Cookie': '_forward_auth=$token',
+      
+      // Add cookie with token (exactly like Python script)
+      request.headers['Cookie'] = '_forward_auth=$token';
+      
+      // Add fields - flatten the lists
+      fields.forEach((key, values) {
+        for (final value in values) {
+          request.fields[key] = value;
+        }
       });
-      request.fields.addAll(fields);
-
+      
+      // Add the video file
       final mimeType = lookupMimeType(fileName) ?? 'video/mp4';
       request.files.add(
         http.MultipartFile.fromBytes(
@@ -398,24 +375,57 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           contentType: http.MediaType.parse(mimeType),
         ),
       );
-
-      if (kDebugMode) {
-        print('📤 [DEBUG] Upload URL (non-web): $uploadUrl');
-        print('📤 [DEBUG] File: $fileName ($mimeType, ${videoBytes.length} bytes)');
-        print('📤 [DEBUG] Fields: $fields');
-        print('🔑 [DEBUG] Sending cookie: _forward_auth=$token');
-      }
-
-      final streamedResponse = await request.send();
+      
+      // Send the request with timeout matching Python script (30 minutes)
+      final streamedResponse = await request.send().timeout(
+        const Duration(minutes: 30),
+        onTimeout: () => throw Exception('Upload timed out after 30 minutes'),
+      );
+      
       final response = await http.Response.fromStream(streamedResponse);
-
+      
       if (kDebugMode) {
         print('📥 [DEBUG] Upload response status: ${response.statusCode}');
+        print('📥 [DEBUG] Upload response headers: ${response.headers}');
         print('📥 [DEBUG] Upload body preview: ${response.body.substring(0, response.body.length > 500 ? 500 : response.body.length)}');
       }
-
-      _handleUploadResponse(response.statusCode, response.headers['location'], response.body);
+      
+      // Handle response like Python script
+      if (response.statusCode == 302 || response.statusCode == 303) {
+        final location = response.headers['location'];
+        if (location == null) throw Exception('Redirect location missing.');
+        final sessionId = Uri.parse(location).pathSegments.last;
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => LiveOutputScreen(
+                videoKey: widget.videoKey,
+                jobId: sessionId,
+              ),
+            ),
+          );
+        }
+      } else if (response.statusCode == 200) {
+        if (response.body.contains('dex') || response.body.contains('Log in')) {
+          throw Exception('Authentication failed. Please check your token.');
+        }
+        throw Exception('Unexpected 200 response, expected redirect. Body: ${response.body}');
+      } else {
+        throw Exception('Upload failed (HTTP ${response.statusCode}). ${response.body}');
+      }
+    } catch (e) {
+      if (kDebugMode) print('❌ [DEBUG] Upload error: $e');
+      rethrow;
     }
+  }
+
+  // Helper to add multi-value fields
+  void _addField(Map<String, List<String>> fields, String key, String value) {
+    if (!fields.containsKey(key)) {
+      fields[key] = [];
+    }
+    fields[key]!.add(value);
   }
 
   void _handleUploadResponse(int? status, String? location, String body) {
