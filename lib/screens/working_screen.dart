@@ -91,19 +91,122 @@ class WorkingScreen extends StatefulWidget {
 class _WorkingScreenState extends State<WorkingScreen> {
   List<VideoProject> _projects = [];
   bool _isLoading = true;
+  bool _isConnected = false;
+  bool _isConnecting = false;
   String _searchQuery = '';
   String _sortMode = 'newest';
   double _storageUsed = 0.0;
   double _storageLimit = 50.0;
   String? _listError;
 
+  // ─── Connection management ──────────────────────────────────────────────
+
+  Future<void> _checkConnection() async {
+    if (!mounted) return;
+    final token = await InternalAuthService.getToken();
+    if (mounted) {
+      setState(() => _isConnected = token != null && token.isNotEmpty);
+    }
+  }
+
+  Future<void> _connectToInternal() async {
+    if (!mounted || _isConnecting) return;
+    setState(() => _isConnecting = true);
+    try {
+      final success = await InternalAuthService.loginWithOAuth();
+      if (!mounted) return;
+      if (success) {
+        setState(() => _isConnected = true);
+        _showSnackBar('✅ Connected to internal server.');
+        _fetchProjects();
+      } else {
+        _showSnackBar('❌ Connection failed. Please try again.', isError: true);
+      }
+    } catch (e) {
+      if (mounted) _showSnackBar('Error: $e', isError: true);
+    } finally {
+      if (mounted) setState(() => _isConnecting = false);
+    }
+  }
+
+  Future<String> _getToken() async {
+    final token = await InternalAuthService.getToken();
+    if (token == null || token.isEmpty) {
+      throw Exception('No token. Use "Manual Token" or click "Connect".');
+    }
+    return token;
+  }
+
+  // ─── Manual token dialog ───────────────────────────────────────────────
+
+  void _showManualTokenDialog() {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Enter Cookie Token'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Paste the token from /gettoken (e.g., "abc...|123|user@kit.edu")'),
+            const SizedBox(height: 8),
+            TextField(
+              controller: controller,
+              maxLines: 3,
+              decoration: const InputDecoration(
+                hintText: 'Paste token here',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              final token = controller.text.trim();
+              if (token.isNotEmpty) {
+                await InternalAuthService.setManualToken(token);
+                if (mounted) {
+                  setState(() => _isConnected = true);
+                  _showSnackBar('✅ Token set manually.');
+                  if (ctx.mounted) Navigator.pop(ctx);
+                }
+                _fetchProjects();
+              }
+            },
+            child: const Text('Set Token'),
+          ),
+          TextButton(
+            onPressed: () async {
+              await InternalAuthService.clearManualToken();
+              if (mounted) {
+                setState(() => _isConnected = false);
+                _showSnackBar('Manual token cleared.');
+                if (ctx.mounted) Navigator.pop(ctx);
+              }
+            },
+            child: const Text('Clear Token', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─── Lifecycle ──────────────────────────────────────────────────────────
+
   @override
   void initState() {
     super.initState();
+    _checkConnection();
     _fetchProjects();
   }
 
   Future<void> _fetchProjects() async {
+    if (!mounted) return;
     setState(() {
       _isLoading = true;
       _listError = null;
@@ -113,6 +216,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
       final url = Uri.parse('$authBaseUrl/videos');
       if (kDebugMode) print('📡 Fetching videos from: $url');
       final response = await http.get(url, headers: {'Content-Type': 'application/json'});
+
+      if (!mounted) return;
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -129,21 +234,25 @@ class _WorkingScreenState extends State<WorkingScreen> {
           }
         }).whereType<VideoProject>().toList() ?? [];
 
-        setState(() {
-          _projects = projects;
-          _storageUsed = (data['storage_used_gb'] ?? 0.0).toDouble();
-          _storageLimit = (data['storage_limit_gb'] ?? 50.0).toDouble();
-          _isLoading = false;
-        });
+        if (mounted) {
+          setState(() {
+            _projects = projects;
+            _storageUsed = (data['storage_used_gb'] ?? 0.0).toDouble();
+            _storageLimit = (data['storage_limit_gb'] ?? 50.0).toDouble();
+            _isLoading = false;
+          });
+        }
       } else {
         throw Exception('Failed to load projects (HTTP ${response.statusCode})');
       }
     } catch (e) {
       if (kDebugMode) print('❌ Error in _fetchProjects: $e');
-      setState(() {
-        _listError = 'Error loading projects: $e';
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _listError = 'Error loading projects: $e';
+          _isLoading = false;
+        });
+      }
     }
   }
 
@@ -153,145 +262,6 @@ class _WorkingScreenState extends State<WorkingScreen> {
       SnackBar(
         content: Text(msg),
         backgroundColor: isError ? Colors.red : Colors.green,
-      ),
-    );
-  }
-
-  // ─── Token display helpers ──────────────────────────────────────────
-
-  void _showTokenDialog(String token, String title) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(title),
-        content: SelectableText(
-          token,
-          style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
-          maxLines: 10,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Close'),
-          ),
-          TextButton(
-            onPressed: () {
-              Clipboard.setData(ClipboardData(text: token));
-              ScaffoldMessenger.of(ctx).showSnackBar(
-                const SnackBar(content: Text('Token copied to clipboard')),
-              );
-            },
-            child: const Text('Copy'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _showCurrentToken() async {
-    final token = await InternalAuthService.getValidAccessToken();
-    if (token == null) {
-      _showSnackBar('No token available. Please log in first.', isError: true);
-      return;
-    }
-    _showTokenDialog(token, 'Current Access Token');
-  }
-
-  // ─── OAuth2 actions ─────────────────────────────────────────────────
-
-  Future<void> _showOAuthLogin() async {
-    final success = await InternalAuthService.loginWithOAuth();
-    if (success && mounted) {
-      _showSnackBar('Internal server connected via OAuth.');
-      final token = await InternalAuthService.getValidAccessToken();
-      if (token != null) {
-        _showTokenDialog(token, 'Token obtained from OAuth');
-      }
-    } else if (mounted) {
-      _showSnackBar('OAuth login failed. Please try again.', isError: true);
-    }
-  }
-
-  Future<void> _logoutInternal() async {
-    await InternalAuthService.clearTokens();
-    if (mounted) {
-      _showSnackBar('Internal server disconnected.');
-    }
-  }
-
-  // ─── Redirect login (full‑page redirect) ────────────────────────────
-
-  Future<void> _loginWithRedirect() async {
-    try {
-      await InternalAuthService.redirectToDex();
-    } catch (e) {
-      _showSnackBar('Redirect error: $e', isError: true);
-    }
-  }
-
-  // ─── Manual code exchange (debug workaround) – FIXED ───────────────
-
-  void _showManualCodeDialog() {
-    final controller = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Manual Code Exchange'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text('Paste the code from the redirect URL after login:'),
-            const SizedBox(height: 8),
-            TextField(
-              controller: controller,
-              decoration: const InputDecoration(
-                labelText: 'Code',
-                border: OutlineInputBorder(),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              final code = controller.text.trim();
-              if (code.isEmpty) {
-                // Use the dialog's context for the snackbar
-                ScaffoldMessenger.of(ctx).showSnackBar(
-                  const SnackBar(content: Text('Please enter a code')),
-                );
-                return;
-              }
-
-              // Perform the exchange
-              final success = await InternalAuthService.exchangeCodeManually(code);
-
-              // Guard: check both widget and dialog contexts
-              if (!mounted) return;
-              if (!ctx.mounted) return;
-
-              if (success) {
-                _showSnackBar('Token obtained successfully!');
-                final token = await InternalAuthService.getValidAccessToken();
-                if (token != null) {
-                  _showTokenDialog(token, 'Token from manual exchange');
-                }
-              } else {
-                _showSnackBar('Exchange failed. Check console.', isError: true);
-              }
-
-              // Close the dialog – ensure the context is still valid
-              if (ctx.mounted) {
-                Navigator.pop(ctx);
-              }
-            },
-            child: const Text('Exchange'),
-          ),
-        ],
       ),
     );
   }
@@ -435,25 +405,35 @@ class _WorkingScreenState extends State<WorkingScreen> {
     Navigator.pushNamed(context, '/progress', arguments: videoKey);
   }
 
-  // ─── Internal actions (require token) ──────────────────────────────
+  // ─── Internal actions (require cookie token) ──────────────────────────
 
   Future<void> _stopSegmentation(String videoKey) async {
-    final token = await InternalAuthService.getValidAccessToken();
-    if (token == null) {
-      _showSnackBar('Authentication required. Log in via Internal OAuth.', isError: true);
+    if (!mounted) return;
+    String token;
+    try {
+      token = await _getToken();
+    } catch (e) {
+      _showSnackBar('Cannot get token: $e', isError: true);
       return;
     }
 
     final confirm = await _confirmAction('Stop segmentation?');
     if (!confirm) return;
     try {
-      await http.post(
+      final response = await http.post(
         Uri.parse('$internalServerUrl/stop_segmentation/$videoKey'),
-        headers: {'Authorization': 'Bearer $token'},
+        headers: {'Cookie': '_forward_auth=$token'},
       );
-      _fetchProjects();
+      if (mounted) {
+        if (response.statusCode == 200) {
+          _showSnackBar('Segmentation stopped.');
+          _fetchProjects();
+        } else {
+          _showSnackBar('Failed to stop segmentation.', isError: true);
+        }
+      }
     } catch (e) {
-      _showSnackBar('Error: $e', isError: true);
+      if (mounted) _showSnackBar('Error: $e', isError: true);
     }
   }
 
@@ -466,9 +446,12 @@ class _WorkingScreenState extends State<WorkingScreen> {
   }
 
   Future<void> _deleteProject(String videoKey) async {
-    final token = await InternalAuthService.getValidAccessToken();
-    if (token == null) {
-      _showSnackBar('Authentication required. Log in via Internal OAuth.', isError: true);
+    if (!mounted) return;
+    String token;
+    try {
+      token = await _getToken();
+    } catch (e) {
+      _showSnackBar('Cannot get token: $e', isError: true);
       return;
     }
 
@@ -479,17 +462,19 @@ class _WorkingScreenState extends State<WorkingScreen> {
         Uri.parse('$internalServerUrl/delete_video/$videoKey'),
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
+          'Cookie': '_forward_auth=$token',
         },
       );
-      if (response.statusCode == 200) {
-        _showSnackBar('Project deleted.');
-        _fetchProjects();
-      } else {
-        _showSnackBar('Failed to delete.', isError: true);
+      if (mounted) {
+        if (response.statusCode == 200) {
+          _showSnackBar('Project deleted.');
+          _fetchProjects();
+        } else {
+          _showSnackBar('Failed to delete.', isError: true);
+        }
       }
     } catch (e) {
-      _showSnackBar('Error: $e', isError: true);
+      if (mounted) _showSnackBar('Error: $e', isError: true);
     }
   }
 
@@ -516,15 +501,18 @@ class _WorkingScreenState extends State<WorkingScreen> {
   // ─── Edit name – uses internal API ──────────────────────────────────
 
   Future<void> _editProjectName(VideoProject project) async {
-    final token = await InternalAuthService.getValidAccessToken();
-    if (token == null) {
-      _showSnackBar('Authentication required. Log in via Internal OAuth.', isError: true);
+    if (!mounted) return;
+    String token;
+    try {
+      token = await _getToken();
+    } catch (e) {
+      _showSnackBar('Cannot get token: $e', isError: true);
       return;
     }
 
-    if (!mounted) return;
     final controller = TextEditingController(text: project.name);
     final newName = await showDialog<String>(
+      // ignore: use_build_context_synchronously
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Edit Project Name'),
@@ -551,18 +539,20 @@ class _WorkingScreenState extends State<WorkingScreen> {
           Uri.parse('$internalServerUrl/update_project_name/${project.key}'),
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': 'Bearer $token',
+            'Cookie': '_forward_auth=$token',
           },
           body: jsonEncode({'project_name': newName}),
         );
-        if (response.statusCode == 200) {
-          _showSnackBar('Project name updated.');
-          _fetchProjects();
-        } else {
-          _showSnackBar('Failed to update name.', isError: true);
+        if (mounted) {
+          if (response.statusCode == 200) {
+            _showSnackBar('Project name updated.');
+            _fetchProjects();
+          } else {
+            _showSnackBar('Failed to update name.', isError: true);
+          }
         }
       } catch (e) {
-        _showSnackBar('Error: $e', isError: true);
+        if (mounted) _showSnackBar('Error: $e', isError: true);
       }
     }
   }
@@ -570,6 +560,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
   // ─── Upload – using bytes (web-compatible) ──────────────────────────
 
   Future<void> _uploadVideo() async {
+    if (!mounted) return;
     FilePickerResult? result = await FilePicker.platform.pickFiles(
       type: FileType.video,
     );
@@ -584,8 +575,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
       return;
     }
 
-    if (!mounted) return;
     showDialog(
+      // ignore: use_build_context_synchronously
       context: context,
       barrierDismissible: false,
       builder: (ctx) => _UploadDialog(
@@ -599,11 +590,13 @@ class _WorkingScreenState extends State<WorkingScreen> {
   // ─── Logout from public server ──────────────────────────────────────
 
   Future<void> _logoutPublic() async {
+    if (!mounted) return;
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('auth_token');
     await InternalAuthService.clearTokens();
-    if (!mounted) return;
-    Navigator.pushReplacementNamed(context, '/login');
+    if (mounted) {
+      Navigator.pushReplacementNamed(context, '/login');
+    }
   }
 
   // ─── UI Build ──────────────────────────────────────────────────
@@ -614,43 +607,16 @@ class _WorkingScreenState extends State<WorkingScreen> {
       appBar: AppBar(
         title: const Text(appTitle),
         actions: [
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.settings),
-            onSelected: (value) {
-              if (value == 'oauth_login') {
-                _showOAuthLogin();
-              } else if (value == 'oauth_logout') {
-                _logoutInternal();
-              } else if (value == 'manual_code') {
-                _showManualCodeDialog();
-              } else if (value == 'redirect_login') {
-                _loginWithRedirect();
-              } else if (value == 'show_token') {
-                _showCurrentToken();
-              }
-            },
-            itemBuilder: (context) => [
-              const PopupMenuItem(
-                value: 'redirect_login',
-                child: Text('Login with Redirect (Dex)'),
-              ),
-              const PopupMenuItem(
-                value: 'oauth_login',
-                child: Text('Internal OAuth Login (popup)'),
-              ),
-              const PopupMenuItem(
-                value: 'oauth_logout',
-                child: Text('Internal Logout'),
-              ),
-              const PopupMenuItem(
-                value: 'manual_code',
-                child: Text('Manual Code Exchange (debug)'),
-              ),
-              const PopupMenuItem(
-                value: 'show_token',
-                child: Text('Show Token'),
-              ),
-            ],
+          // ─── Manual Token Button ────────────────────────────────────
+          IconButton(
+            icon: const Icon(Icons.vpn_key),
+            onPressed: _showManualTokenDialog,
+            tooltip: 'Manual Token',
+          ),
+          IconButton(
+            icon: Icon(_isConnected ? Icons.link : Icons.link_off),
+            onPressed: _isConnecting ? null : _connectToInternal,
+            tooltip: _isConnected ? 'Reconnect' : 'Connect',
           ),
           IconButton(
             icon: const Icon(Icons.refresh),

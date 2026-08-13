@@ -1,9 +1,9 @@
 // internal_auth_service.dart
+// ignore_for_file: avoid_web_libraries_in_flutter, deprecated_member_use
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
-// ignore: avoid_web_libraries_in_flutter, deprecated_member_use
-import 'dart:html' as html if (dart.library.html) '';
+import 'dart:html' as html;
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -16,13 +16,10 @@ class InternalAuthService {
   static const String _refreshTokenKey = 'internal_refresh_token';
   static const String _expiryKey = 'internal_token_expiry';
   static const String _emailKey = 'user_email';
+  static const String _manualTokenKey = 'manual_auth_token';
 
-  static String? _lastVerifier;
+  // ─── OAuth endpoints ──────────────────────────────────────────────
 
-  // ─── Helpers to choose the right endpoint (web proxy vs direct) ──
-
-  /// Returns the token endpoint URL.
-  /// On web we use the proxy, otherwise we talk directly to the internal server.
   static String get _tokenEndpoint {
     if (kIsWeb) {
       return '$authBaseUrl/dex/token';
@@ -31,7 +28,6 @@ class InternalAuthService {
     }
   }
 
-  /// Returns the userinfo endpoint URL.
   static String get _userInfoEndpoint {
     if (kIsWeb) {
       return '$authBaseUrl/dex/userinfo';
@@ -52,10 +48,36 @@ class InternalAuthService {
     return base64UrlEncode(digest.bytes).replaceAll('=', '');
   }
 
+  // ─── Manual Token Management ──────────────────────────────────────
+
+  static Future<void> setManualToken(String token) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_manualTokenKey, token);
+    // Also store as access token for compatibility
+    await prefs.setString(_accessTokenKey, token);
+    if (kDebugMode) print('✅ Manual token set');
+  }
+
+  static Future<void> clearManualToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_manualTokenKey);
+    await prefs.remove(_accessTokenKey);
+    await prefs.remove(_refreshTokenKey);
+    await prefs.remove(_expiryKey);
+    await prefs.remove(_emailKey);
+    if (kDebugMode) print('✅ Manual token cleared');
+  }
+
+  static Future<String?> getManualToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_manualTokenKey);
+  }
+
+  // ─── OAuth Login (popup) ──────────────────────────────────────────
+
   static Future<bool> loginWithOAuth() async {
     try {
       final verifier = _generateCodeVerifier();
-      _lastVerifier = verifier;
       if (kDebugMode) print('🔑 Generated verifier: $verifier');
 
       final challenge = _generateCodeChallenge(verifier);
@@ -102,7 +124,7 @@ class InternalAuthService {
       } else {
         redirectUrl = await FlutterWebAuth.authenticate(
           url: authUrl.toString(),
-          callbackUrlScheme: 'https', // For mobile, use a custom scheme
+          callbackUrlScheme: 'https',
         );
       }
 
@@ -118,13 +140,6 @@ class InternalAuthService {
 
       // ─── Exchange code with Basic Auth ──────────────────────────
       final credentials = base64Encode(utf8.encode('$dexClientId:$dexClientSecret'));
-      if (kDebugMode) {
-        print('🔑 Basic Auth length: ${credentials.length}');
-        print('🔑 Client ID: $dexClientId');
-        print('🔑 Secret (first 10 chars): ${dexClientSecret.substring(0, 10)}...');
-        print('🔑 Token endpoint: $_tokenEndpoint');
-      }
-
       final tokenResponse = await http.post(
         Uri.parse(_tokenEndpoint),
         headers: {
@@ -164,16 +179,8 @@ class InternalAuthService {
       }
       final expiry = DateTime.now().toUtc().add(Duration(seconds: expiresIn));
       await prefs.setString(_expiryKey, expiry.toIso8601String());
-      if (kDebugMode) {
-        print('✅ OAuth login successful, token stored');
-        print('🔑 Access token: $accessToken');
-        // Truncate for readability if too long
-        if (accessToken.length > 50) {
-          print('   (first 50 chars): ${accessToken.substring(0, 50)}...');
-        }
-      }
 
-      // Cache user email (optional, but avoids an extra request later)
+      // Cache email
       await getUserEmail();
 
       if (kDebugMode) print('✅ OAuth login successful, token stored');
@@ -184,119 +191,119 @@ class InternalAuthService {
     }
   }
 
-  // ─── Manual code exchange (debug workaround) ──────────────────────
-  static Future<bool> exchangeCodeManually(String code) async {
-    if (_lastVerifier == null) {
-      if (kDebugMode) print('❌ No verifier available. Please run OAuth login first.');
+  // ─── Handle OAuth callback (for redirect flow) ────────────────────
+
+  static Future<bool> handleOAuthCallback() async {
+    if (!kIsWeb) return false;
+
+    final uri = Uri.parse(html.window.location.href);
+    final code = uri.queryParameters['code'];
+    if (code == null) return false;
+
+    final verifier = html.window.sessionStorage['dex_verifier'];
+    if (verifier == null) {
+      if (kDebugMode) print('No verifier found in sessionStorage');
       return false;
     }
-    try {
-      final credentials = base64Encode(utf8.encode('$dexClientId:$dexClientSecret'));
-      if (kDebugMode) {
-        print('🔑 Manual exchange – Basic Auth length: ${credentials.length}');
-        print('🔑 Client ID: $dexClientId');
-        print('🔑 Secret (first 10 chars): ${dexClientSecret.substring(0, 10)}...');
-        print('🔑 Token endpoint: $_tokenEndpoint');
-      }
 
-      final tokenResponse = await http.post(
-        Uri.parse(_tokenEndpoint),
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Authorization': 'Basic $credentials',
-        },
-        body: {
-          'grant_type': 'authorization_code',
-          'code': code,
-          'redirect_uri': dexRedirectUri,
-          'code_verifier': _lastVerifier!,
-        },
-      );
+    html.window.history.replaceState({}, '', uri.replace(queryParameters: {}).toString());
 
-      if (tokenResponse.statusCode != 200) {
-        if (kDebugMode) {
-          print('❌ Manual token exchange failed: ${tokenResponse.statusCode}');
-          print('❌ Body: ${tokenResponse.body}');
-        }
-        return false;
-      }
+    final credentials = base64Encode(utf8.encode('$dexClientId:$dexClientSecret'));
+    final tokenResponse = await http.post(
+      Uri.parse(_tokenEndpoint),
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': 'Basic $credentials',
+      },
+      body: {
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': dexRedirectUri,
+        'code_verifier': verifier,
+      },
+    );
 
-      final data = jsonDecode(tokenResponse.body);
-      final accessToken = data['access_token'];
-      final refreshToken = data['refresh_token'];
-      final expiresIn = data['expires_in'] ?? 3600;
-
-      if (accessToken == null) {
-        if (kDebugMode) print('❌ No access token in manual response');
-        return false;
-      }
-
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_accessTokenKey, accessToken);
-      if (refreshToken != null) {
-        await prefs.setString(_refreshTokenKey, refreshToken);
-      }
-      final expiry = DateTime.now().toUtc().add(Duration(seconds: expiresIn));
-      await prefs.setString(_expiryKey, expiry.toIso8601String());
-
-      await getUserEmail(); // cache email
-
-      if (kDebugMode) print('✅ Manual token exchange successful');
-      return true;
-    } catch (e) {
-      if (kDebugMode) print('❌ Manual exchange error: $e');
+    if (tokenResponse.statusCode != 200) {
+      if (kDebugMode) print('Token exchange failed: ${tokenResponse.body}');
       return false;
     }
+
+    final data = jsonDecode(tokenResponse.body);
+    final accessToken = data['access_token'];
+    final refreshToken = data['refresh_token'];
+    final expiresIn = data['expires_in'] ?? 3600;
+
+    if (accessToken == null) return false;
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_accessTokenKey, accessToken);
+    if (refreshToken != null) {
+      await prefs.setString(_refreshTokenKey, refreshToken);
+    }
+    final expiry = DateTime.now().toUtc().add(Duration(seconds: expiresIn));
+    await prefs.setString(_expiryKey, expiry.toIso8601String());
+
+    html.window.sessionStorage.remove('dex_verifier');
+    await getUserEmail();
+    if (kDebugMode) print('✅ OAuth login successful (redirect flow)');
+    return true;
   }
 
-  // ─── Get valid access token (refresh if needed) ──────────────
+  // ─── Redirect to Dex (full‑page) ───────────────────────────────────
+
+  static Future<void> redirectToDex() async {
+    if (!kIsWeb) {
+      throw Exception('Redirect login is only supported on web.');
+    }
+    final verifier = _generateCodeVerifier();
+    html.window.sessionStorage['dex_verifier'] = verifier;
+    final challenge = _generateCodeChallenge(verifier);
+
+    final authUrl = Uri.parse('$dexIssuer/auth').replace(queryParameters: {
+      'client_id': dexClientId,
+      'redirect_uri': dexRedirectUri,
+      'response_type': 'code',
+      'scope': dexScopes.join(' '),
+      'code_challenge': challenge,
+      'code_challenge_method': 'S256',
+      'state': 'random-state-${DateTime.now().millisecondsSinceEpoch}',
+    });
+
+    html.window.location.href = authUrl.toString();
+  }
+
+  // ─── Token storage and refresh ────────────────────────────────────
+
   static Future<String?> getValidAccessToken() async {
     final prefs = await SharedPreferences.getInstance();
+    
+    // Check for manual token first
+    final manualToken = prefs.getString(_manualTokenKey);
+    if (manualToken != null && manualToken.isNotEmpty) {
+      if (kDebugMode) print('🔑 Using manual token');
+      return manualToken;
+    }
+    
     final accessToken = prefs.getString(_accessTokenKey);
     final refreshToken = prefs.getString(_refreshTokenKey);
     final expiryStr = prefs.getString(_expiryKey);
 
-    if (kDebugMode) {
-      print('🔍 getValidAccessToken: accessToken = ${accessToken != null ? "exists (${accessToken.length} chars)" : "null"}');
-    }
-    if (kDebugMode) {
-      print('🔍 getValidAccessToken: refreshToken = ${refreshToken != null ? "exists" : "null"}');
-    }
-    if (kDebugMode) {
-      print('🔍 getValidAccessToken: expiryStr = $expiryStr');
-    }
-
     if (accessToken == null) {
-      if (kDebugMode) {
-        print('🔍 No access token – returning null');
-      }
+      if (kDebugMode) print('🔍 No access token – returning null');
       return null;
     }
 
     if (expiryStr != null) {
       final expiry = DateTime.parse(expiryStr);
       final now = DateTime.now().toUtc();
-      if (kDebugMode) {
-        print('🔍 Token expiry: $expiry, now: $now, isBefore: ${now.isBefore(expiry)}');
-      }
       if (now.isBefore(expiry)) {
-        if (kDebugMode) {
-          print('✅ Token valid – returning it');
-        }
         return accessToken;
       }
-    } else {
-      if (kDebugMode) {
-        print('⚠️ No expiry stored – assuming valid');
-      }
-      return accessToken; // treat as valid if no expiry
     }
 
     // Token expired – try to refresh
     if (refreshToken != null) {
-      if (kDebugMode) {
-        print('🔄 Token expired – attempting refresh...');
-      }
+      if (kDebugMode) print('🔄 Token expired – attempting refresh...');
       try {
         final credentials = base64Encode(utf8.encode('$dexClientId:$dexClientSecret'));
         final response = await http.post(
@@ -320,32 +327,20 @@ class InternalAuthService {
             if (newRefreshToken != null) {
               await prefs.setString(_refreshTokenKey, newRefreshToken);
             }
-            DateTime.now().toUtc().add(Duration(seconds: expiresIn));
-            
-            if (kDebugMode) {
-              print('✅ Refresh successful – returning new token');
-            }
+            final newExpiry = DateTime.now().toUtc().add(Duration(seconds: expiresIn));
+            await prefs.setString(_expiryKey, newExpiry.toIso8601String());
+            if (kDebugMode) print('✅ Refresh successful – returning new token');
             return newAccessToken;
           }
         } else {
-          if (kDebugMode) {
-            print('❌ Refresh failed with status ${response.statusCode}: ${response.body}');
-          }
+          if (kDebugMode) print('❌ Refresh failed: ${response.statusCode}');
         }
       } catch (e) {
-        if (kDebugMode) {
-          print('❌ Refresh error: $e');
-        }
-      }
-    } else {
-      if (kDebugMode) {
-        print('❌ No refresh token – clearing and returning null');
+        if (kDebugMode) print('❌ Refresh error: $e');
       }
     }
 
-    if (kDebugMode) {
-      print('❌ Token refresh failed or missing – clearing tokens and returning null');
-    }
+    if (kDebugMode) print('❌ Token refresh failed – clearing tokens');
     await clearTokens();
     return null;
   }
@@ -356,12 +351,62 @@ class InternalAuthService {
     await prefs.remove(_refreshTokenKey);
     await prefs.remove(_expiryKey);
     await prefs.remove(_emailKey);
+    await prefs.remove(_manualTokenKey);
   }
 
-  static Future<String?> getToken() async => getValidAccessToken();
-  static Future<void> clearToken() async => clearTokens();
+  // ─── Simple token fetcher (for cookie-based endpoints) ───────────
 
-  // ─── Get user email (cached or from userinfo) ────────────────
+  static Future<String?> getToken() async {
+    // First check for manual token
+    final prefs = await SharedPreferences.getInstance();
+    final manualToken = prefs.getString(_manualTokenKey);
+    if (manualToken != null && manualToken.isNotEmpty) {
+      if (kDebugMode) print('🔑 getToken: Using manual token');
+      return manualToken;
+    }
+
+    // If no manual token, try to get from server
+    try {
+      if (kIsWeb) {
+        final completer = Completer<String?>();
+        final request = html.HttpRequest();
+        request.open('GET', '$authBaseUrl/gettoken', async: true);
+        request.withCredentials = true;
+        request.onLoad.listen((_) {
+          if (request.status == 200) {
+            completer.complete(request.responseText?.trim());
+          } else {
+            completer.completeError('HTTP ${request.status}');
+          }
+        });
+        request.onError.listen((e) => completer.completeError(e));
+        request.send();
+        final token = await completer.future;
+        if (token is String && token.isNotEmpty) return token;
+        return null;
+      } else {
+        final response = await http.get(Uri.parse('$internalServerUrl/gettoken'));
+        if (response.statusCode == 200) {
+          final token = response.body.trim();
+          if (token.isNotEmpty) return token;
+        }
+        return null;
+      }
+    } catch (e) {
+      if (kDebugMode) print('❌ Error fetching token: $e');
+      return null;
+    }
+  }
+
+  // ─── Redirect to login (for 401/403 responses) ──────────────────
+
+  static void redirectToLogin() {
+    if (!kIsWeb) return;
+    html.window.location.href = '$internalServerUrl/login';
+  }
+
+  // ─── User email ────────────────────────────────────────────────────
+
   static Future<String?> getUserEmail() async {
     final prefs = await SharedPreferences.getInstance();
     final cached = prefs.getString(_emailKey);
@@ -378,7 +423,7 @@ class InternalAuthService {
 
     try {
       final response = await http.get(
-        Uri.parse(_userInfoEndpoint), // <-- use proxied or direct endpoint
+        Uri.parse(_userInfoEndpoint),
         headers: {'Authorization': 'Bearer $token'},
       );
       if (response.statusCode == 200) {
@@ -388,13 +433,9 @@ class InternalAuthService {
           await prefs.setString(_emailKey, email);
           if (kDebugMode) print('📧 Fetched and cached email: $email');
           return email;
-        } else {
-          if (kDebugMode) print('⚠️ Userinfo response missing email field');
         }
       } else {
-        if (kDebugMode) {
-          print('❌ Userinfo failed: ${response.statusCode} - ${response.body}');
-        }
+        if (kDebugMode) print('❌ Userinfo failed: ${response.statusCode}');
       }
     } catch (e) {
       if (kDebugMode) print('❌ Error fetching userinfo: $e');
@@ -402,105 +443,10 @@ class InternalAuthService {
     return null;
   }
 
-  // ─── Redirect to Dex (full‑page) ───────────────────────────────
-  static Future<void> redirectToDex() async {
-    if (!kIsWeb) {
-      throw Exception('Redirect login is only supported on web.');
-    }
-    final verifier = _generateCodeVerifier();
-    // Store verifier in sessionStorage
-    html.window.sessionStorage['dex_verifier'] = verifier;
-    final challenge = _generateCodeChallenge(verifier);
+  // ─── Check authentication ─────────────────────────────────────────
 
-    final authUrl = Uri.parse('$dexIssuer/auth').replace(queryParameters: {
-      'client_id': dexClientId,
-      'redirect_uri': dexRedirectUri,
-      'response_type': 'code',
-      'scope': dexScopes.join(' '),
-      'code_challenge': challenge,
-      'code_challenge_method': 'S256',
-      'state': 'random-state-${DateTime.now().millisecondsSinceEpoch}',
-    });
-
-    html.window.location.href = authUrl.toString();
-  }
-
-  static Future<bool> handleOAuthCallback() async {
-    if (!kIsWeb) return false;
-
-    final uri = Uri.parse(html.window.location.href);
-    final code = uri.queryParameters['code'];
-    if (code == null) return false;
-
-    // Retrieve verifier from sessionStorage
-    final verifier = html.window.sessionStorage['dex_verifier'];
-    if (verifier == null) {
-      if (kDebugMode) {
-        print('No verifier found in sessionStorage');
-      }
-      return false;
-    }
-
-    // Clear the code from URL
-    html.window.history.replaceState({}, '', uri.replace(queryParameters: {}).toString());
-
-    // Exchange code for tokens (with Basic Auth)
-    final credentials = base64Encode(utf8.encode('$dexClientId:$dexClientSecret'));
-    if (kDebugMode) {
-      print('🔑 handleOAuthCallback: token endpoint = $_tokenEndpoint');
-    }
-    final tokenResponse = await http.post(
-      Uri.parse(_tokenEndpoint), // <-- uses proxy on web
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Authorization': 'Basic $credentials',
-      },
-      body: {
-        'grant_type': 'authorization_code',
-        'code': code,
-        'redirect_uri': dexRedirectUri,
-        'code_verifier': verifier,
-      },
-    );
-
-    if (tokenResponse.statusCode != 200) {
-      if (kDebugMode) {
-        print('Token exchange failed: ${tokenResponse.body}');
-      }
-      return false;
-    }
-
-    final data = jsonDecode(tokenResponse.body);
-    final accessToken = data['access_token'];
-    final refreshToken = data['refresh_token'];
-    final expiresIn = data['expires_in'] ?? 3600;
-
-    if (accessToken == null) return false;
-
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_accessTokenKey, accessToken);
-    if (refreshToken != null) {
-      await prefs.setString(_refreshTokenKey, refreshToken);
-    }
-    final expiry = DateTime.now().toUtc().add(Duration(seconds: expiresIn));
-    await prefs.setString(_expiryKey, expiry.toIso8601String());
-
-    // Clean up
-    html.window.sessionStorage.remove('dex_verifier');
-
-    // Cache email
-    await getUserEmail();
-    if (kDebugMode) {
-      print('✅ OAuth login successful (redirect flow)');
-      print('🔑 Access token: $accessToken');
-      if (accessToken.length > 50) {
-        print('   (first 50 chars): ${accessToken.substring(0, 50)}...');
-      }
-    }
-
-    if (kDebugMode) {
-      print('✅ OAuth login successful (redirect flow)');
-    }
-    return true;
+  static Future<bool> isAuthenticated() async {
+    final token = await getValidAccessToken();
+    return token != null;
   }
 }

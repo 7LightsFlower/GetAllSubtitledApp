@@ -22,7 +22,7 @@ class LiveOutputScreen extends StatefulWidget {
 
 class _LiveOutputScreenState extends State<LiveOutputScreen> {
   bool _isLoading = true;
-  bool _isFetching = false; // prevent overlapping requests
+  bool _isFetching = false;
   String? _error;
   Map<String, dynamic>? _outputData;
   Timer? _pollTimer;
@@ -42,25 +42,19 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
   }
 
   Future<void> _fetchStatus() async {
-    // Avoid overlapping requests
     if (_isFetching || _isDisposed) return;
     setState(() => _isFetching = true);
 
     try {
-      // Get token
-      final internalToken = await InternalAuthService.getValidAccessToken();
-      if (internalToken == null) {
-        throw Exception('Please log in to the internal server first.');
+      // Get the cookie token (not Bearer)
+      final token = await InternalAuthService.getToken();
+      if (token == null || token.isEmpty) {
+        throw Exception('Not connected to internal server. Please go back and connect.');
       }
-      String baseUrl;
-      String token;
-
-      baseUrl = internalServerUrl;
-      token = internalToken;
 
       final response = await http.get(
-        Uri.parse('$baseUrl/job_status/${widget.jobId}'),
-        headers: {'Authorization': 'Bearer $token'},
+        Uri.parse('$internalServerUrl/job_status/${widget.jobId}'),
+        headers: {'Cookie': '_forward_auth=$token'},
       );
 
       if (_isDisposed) return;
@@ -73,19 +67,19 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
           _error = null;
         });
 
-        // Start/stop polling based on status
         final status = data['status'] as String? ?? 'processing';
         if (status == 'completed' || status == 'failed') {
           _pollTimer?.cancel();
           _pollTimer = null;
         } else {
-          // If no timer is running, start one
           if (_pollTimer == null || !_pollTimer!.isActive) {
             _pollTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
               _fetchStatus();
             });
           }
         }
+      } else if (response.statusCode == 401 || response.statusCode == 403) {
+        throw Exception('Authentication failed. Please reconnect.');
       } else {
         throw Exception('Failed to load job status (HTTP ${response.statusCode})');
       }
@@ -95,7 +89,6 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
           _error = e.toString();
           _isLoading = false;
         });
-        // Stop polling on error
         _pollTimer?.cancel();
         _pollTimer = null;
       }
@@ -106,11 +99,14 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
     }
   }
 
-  // Manual refresh – also stops and restarts polling
   void _manualRefresh() {
     _pollTimer?.cancel();
     _pollTimer = null;
     _fetchStatus();
+  }
+
+  void _goBack() {
+    Navigator.pop(context);
   }
 
   @override
@@ -140,6 +136,11 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
                       ElevatedButton(
                         onPressed: _manualRefresh,
                         child: const Text('Retry'),
+                      ),
+                      const SizedBox(height: 8),
+                      TextButton(
+                        onPressed: _goBack,
+                        child: const Text('Go Back'),
                       ),
                     ],
                   ),

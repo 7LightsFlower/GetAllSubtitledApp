@@ -1,9 +1,9 @@
 // job_configuration_screen.dart
 import 'dart:async';
-import 'dart:convert';
 // ignore: deprecated_member_use, avoid_web_libraries_in_flutter
 import 'dart:html' as html;
 import 'package:asr_live_translator/constants.dart';
+import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -27,7 +27,6 @@ class JobConfigurationScreen extends StatefulWidget {
 class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _sessionNameController;
-  final TextEditingController _tokenController = TextEditingController();
 
   final List<String> _inputLanguages = ['en'];
   final List<String> _outputLanguages = ['de'];
@@ -43,7 +42,13 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   String _smartChaptering = 'online_dynamic';
   String _format = 'online';
   bool _isSubmitting = false;
-  bool _showTokenField = false;
+  bool _isConnected = false;
+  bool _isConnecting = false;
+
+  // Manual token state
+  bool _showTokenInput = false;
+  final TextEditingController _tokenController = TextEditingController();
+  String _tokenStatus = '';
 
   static const List<String> _allInputLanguages = [
     'en', 'de', 'fr', 'es', 'it', 'ja', 'ko', 'zh', 'ru', 'ar',
@@ -67,31 +72,109 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     'online_dynamic', 'online_static', 'offline', 'streaming_simple'
   ];
 
-  // ─── Token helpers ──────────────────────────────────────────────────────────
+  // ─── Connection management ──────────────────────────────────────────────
 
-  /// Try to get a token from localStorage (oidc.user) – fallback.
-  String? getDexAccessToken() {
-    try {
-      final storage = html.window.localStorage;
-      for (final key in storage.keys) {
-        if (key.startsWith('oidc.user:')) {
-          final jsonStr = storage[key];
-          if (jsonStr != null) {
-            final data = jsonDecode(jsonStr) as Map<String, dynamic>;
-            return data['access_token'] as String?;
-          }
-        }
-      }
-    } catch (_) {}
-    return null;
+  Future<void> _checkConnection() async {
+    final token = await InternalAuthService.getToken();
+    if (mounted) {
+      setState(() => _isConnected = token != null && token.isNotEmpty);
+    }
   }
 
-  /// Returns the token from manual input, or from localStorage if available.
-  String? getEffectiveToken() {
-    if (_tokenController.text.trim().isNotEmpty) {
-      return _tokenController.text.trim();
+  Future<void> _connectToInternal() async {
+    if (_isConnecting) return;
+    setState(() => _isConnecting = true);
+    try {
+      final success = await InternalAuthService.loginWithOAuth();
+      if (success && mounted) {
+        setState(() => _isConnected = true);
+        // Use mounted check before accessing context
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('✅ Connected to internal server!')),
+          );
+        }
+        await _checkConnection();
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('❌ Connection failed. Please try again.'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isConnecting = false);
     }
-    return getDexAccessToken();
+  }
+
+  // ─── Manual token management ───────────────────────────────────────────────
+
+  Future<void> _setManualToken() async {
+    final token = _tokenController.text.trim();
+    if (token.isEmpty) {
+      setState(() => _tokenStatus = '⚠️ Please enter a token');
+      return;
+    }
+    
+    try {
+      await InternalAuthService.setManualToken(token);
+      if (mounted) {
+        setState(() {
+          _isConnected = true;
+          _tokenStatus = '✅ Token set successfully!';
+          _showTokenInput = false;
+          _tokenController.clear();
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('✅ Token set manually!')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _tokenStatus = '❌ Error: $e');
+      }
+    }
+  }
+
+  Future<void> _clearManualToken() async {
+    try {
+      await InternalAuthService.clearManualToken();
+      if (mounted) {
+        setState(() {
+          _isConnected = false;
+          _tokenStatus = 'Token cleared';
+          _tokenController.clear();
+          _showTokenInput = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Manual token cleared.')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _tokenStatus = '❌ Error: $e');
+      }
+    }
+  }
+
+  // ─── Token helper ──────────────────────────────────────────────────────────
+
+  Future<String> _getToken() async {
+    final token = await InternalAuthService.getToken();
+    if (token == null || token.isEmpty) {
+      throw Exception('Not connected to internal server. Please click "Connect" or set a manual token first.');
+    }
+    return token;
   }
 
   // ─── Session name ──────────────────────────────────────────────────────────
@@ -110,6 +193,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   void initState() {
     super.initState();
     _sessionNameController = TextEditingController(text: _getDefaultSessionName());
+    _checkConnection();
   }
 
   @override
@@ -119,142 +203,27 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     super.dispose();
   }
 
-  // ─── Show login dialog ──────────────────────────────────────────────────────
-
-  Future<bool> _showLoginRequiredDialog(String internalBaseUrl) async {
-    final completer = Completer<bool>();
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: const Text('Internal Server Login Required'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'You must be logged in to the internal server to upload a video.',
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              'Please open the following URL in a new tab, log in with your KIT account, '
-              'then return to this app and press "Retry".',
-            ),
-            const SizedBox(height: 12),
-            SelectableText(internalBaseUrl, style: const TextStyle(color: Colors.blue)),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              html.window.open(internalBaseUrl, '_blank');
-            },
-            child: const Text('Open Login Page'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              completer.complete(true);
-            },
-            child: const Text('Retry'),
-          ),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              completer.complete(false);
-            },
-            child: const Text('Cancel'),
-          ),
-        ],
-      ),
-    );
-    return completer.future;
-  }
-
-  bool _isReconnecting = false;
-
-  Future<void> _reconnect() async {
-    if (_isReconnecting) return;
-    setState(() => _isReconnecting = true);
-
-    try {
-      const internalBaseUrl = internalServerUrl;
-      // Check if we already have a token (manual or localStorage)
-      if (getEffectiveToken() != null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('✅ Already have a token.'),
-              backgroundColor: Colors.green,
-            ),
-          );
-        }
-        return;
-      }
-      // No token, ask user to log in
-      final retry = await _showLoginRequiredDialog(internalBaseUrl);
-      if (retry) {
-        // After login, the user can paste the token manually
-        setState(() => _showTokenField = true);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Please paste your access token in the field below.'),
-            ),
-          );
-        }
-      } else {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Reconnect cancelled by user.')),
-          );
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Reconnect error: $e'), backgroundColor: Colors.red),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isReconnecting = false);
-    }
-  }
-
   // ─── Main submit ───────────────────────────────────────────────────────────
 
   Future<void> _submitJob() async {
     if (!_formKey.currentState!.validate()) return;
     _formKey.currentState!.save();
 
-    final token = getEffectiveToken();
-    if (token == null || token.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please enter a valid access token, or use the "Reconnect" button to log in.'),
-          backgroundColor: Colors.orange,
-        ),
-      );
-      return;
-    }
-
     setState(() => _isSubmitting = true);
 
     try {
-      const internalBaseUrl = internalServerUrl;
-      const userEmail = 'admin@example.com'; // or from your auth service
+      final token = await _getToken();
+      if (kDebugMode) print('🚀 [UPLOAD] Token fetched: $token');
+
+      const userEmail = 'admin@example.com';
 
       // 1. Fetch video from local server
-      const localBaseUrl = authBaseUrl;
-      final localMediaUrl = Uri.parse('$localBaseUrl/media/${widget.videoKey}');
-
-      if (kDebugMode) {
-        print('🌐 [DEBUG] Fetching video from local server: $localMediaUrl');
-      }
+      final localMediaUrl = Uri.parse('$authBaseUrl/media/${widget.videoKey}');
+      if (kDebugMode) print('🌐 [DEBUG] Fetching video from local server: $localMediaUrl');
 
       http.Response localResponse = await http.get(localMediaUrl);
       if (localResponse.statusCode != 200) {
-        final fallbackUrl = Uri.parse('$localBaseUrl/videos/${widget.videoKey}/download');
+        final fallbackUrl = Uri.parse('$authBaseUrl/videos/${widget.videoKey}/download');
         final fallbackResponse = await http.get(fallbackUrl);
         if (fallbackResponse.statusCode != 200) {
           throw Exception(
@@ -270,17 +239,14 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         throw Exception('Video file is empty.');
       }
 
-      if (kDebugMode) {
-        print('✅ [DEBUG] Video fetched from local: ${videoBytes.length} bytes');
-      }
+      if (kDebugMode) print('✅ [DEBUG] Video fetched from local: ${videoBytes.length} bytes');
 
-      // 2. Upload with the token
+      // 2. Upload to internal server using cookie authentication
       await _uploadToInternalServer(
         videoBytes: videoBytes,
         fileName: widget.videoName,
-        internalToken: token,
+        token: token,
         userEmail: userEmail,
-        internalBaseUrl: internalBaseUrl,
         sessionName: _sessionNameController.text.trim(),
         availability: _availability,
         inputLanguages: _inputLanguages,
@@ -298,14 +264,15 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
 
     } catch (e) {
       if (kDebugMode) print('❌ [DEBUG] Exception caught: $e');
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error: $e'),
-          backgroundColor: Colors.red,
-          duration: const Duration(seconds: 10),
-        ),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 10),
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => _isSubmitting = false);
     }
@@ -316,9 +283,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   Future<void> _uploadToInternalServer({
     required List<int> videoBytes,
     required String fileName,
-    required String internalToken,
+    required String token,
     required String userEmail,
-    required String internalBaseUrl,
     required String sessionName,
     required String availability,
     required List<String> inputLanguages,
@@ -333,50 +299,71 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     required String smartChaptering,
     required String format,
   }) async {
-    final uploadUrl = kIsWeb
-        ? '$authBaseUrl/upload-lecture'  // proxy on localhost:5000
-        : '$internalBaseUrl/upload_lecture';
+    const uploadUrl = kIsWeb
+        ? '$authBaseUrl/upload-lecture'
+        : '$internalServerUrl/upload_lecture';
+
+    // Build fields exactly as in the Python script
+    final fields = <String, String>{
+      'path': '/home/$userEmail',
+      'name': sessionName,
+      'availability': availability,
+      'topicname': sessionName,
+      'date': DateTime.now().toIso8601String().split('T').first,
+      'speakername': 'Christian Huber',
+      'format': format,
+      'smartChaptering': smartChaptering,
+      'errorCorrection': 'None',
+      'ttsQualityMode': 'high_quality',
+    };
+
+    for (final lang in inputLanguages) {
+      fields['language'] = lang;
+    }
+    for (final lang in outputLanguages) {
+      fields['mtLanguage'] = lang;
+    }
+    for (final lang in audioLanguages) {
+      fields['audioLanguage'] = lang;
+    }
+
+    if (profanityFilter) fields['profanity'] = '1';
+    if (filterMusic) fields['filter_music'] = '1';
+    if (enableSummarization) fields['summarization'] = '1';
+    if (enableLiveNotes) fields['notes'] = '1';
+    if (enableDiarization) fields['saasr'] = '1';
+    if (enableAIAssistant) fields['aiassistant'] = '1';
 
     if (kIsWeb) {
-      // Web: use dart:html FormData
+      // ─── 1. Store the token as a browser cookie ──────────────────────────
+      // This makes the browser attach it automatically when we use withCredentials.
+      html.document.cookie = '_forward_auth=$token; path=/;';
+
+      // ─── 2. Build the multipart form data ────────────────────────────────
       final formData = html.FormData();
-      formData.append('path', '/uploads');
-      formData.append('name', sessionName);
-      formData.append('availability', availability);
-      for (final lang in inputLanguages) {
-        formData.append('language', lang);
-      }
-      for (final lang in outputLanguages) {
-        formData.append('mtLanguage', lang);
-      }
-      for (final lang in audioLanguages) {
-        formData.append('audioLanguage', lang);
-      }
-      if (profanityFilter) formData.append('profanity', 'on');
-      if (filterMusic) formData.append('filter_music', 'on');
-      if (enableSummarization) formData.append('summarization', 'on');
-      if (enableLiveNotes) formData.append('notes', 'on');
-      if (enableDiarization) formData.append('saasr', '1');
-      if (enableAIAssistant) formData.append('aiassistant', 'on');
-      formData.append('smartChaptering', smartChaptering);
-      formData.append('format', format);
-      formData.append('topicname', sessionName);
-      formData.append('date', DateTime.now().toIso8601String().split('T').first);
-      formData.append('speakername', userEmail);
+      fields.forEach((key, value) {
+        formData.append(key, value);
+      });
 
       final mimeType = lookupMimeType(fileName) ?? 'video/mp4';
       final blob = html.Blob([videoBytes], mimeType);
       formData.appendBlob('videofile', blob, fileName);
 
+      // ─── 3. Create the request ────────────────────────────────────────────
       final request = html.HttpRequest();
       request.open('POST', uploadUrl, async: true);
-      request.withCredentials = false;
-      request.setRequestHeader('Authorization', 'Bearer $internalToken');
-      request.setRequestHeader('X-Forwarded-User', userEmail);
+
+      // ✅ Enable credentials so the browser sends the cookie from its jar
+      request.withCredentials = true;
+
+      // ❌ REMOVE the line that manually sets the Cookie header:
+      // request.setRequestHeader('Cookie', '_forward_auth=$token');
 
       if (kDebugMode) {
         print('📤 [DEBUG] Upload URL (web proxy): $uploadUrl');
         print('📤 [DEBUG] File: $fileName ($mimeType, ${videoBytes.length} bytes)');
+        print('📤 [DEBUG] Fields: $fields');
+        print('🔑 [DEBUG] Cookie stored in document.cookie, will be sent automatically');
       }
 
       final completer = Completer<void>();
@@ -394,58 +381,13 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         print('📥 [DEBUG] Upload body preview: ${responseText.substring(0, responseText.length > 500 ? 500 : responseText.length)}');
       }
 
-      if (status == 302 || status == 303) {
-        if (location == null) throw Exception('Redirect location missing.');
-        final sessionId = Uri.parse(location).pathSegments.last;
-        if (!mounted) return;
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => LiveOutputScreen(
-              videoKey: widget.videoKey,
-              jobId: sessionId,
-            ),
-          ),
-        );
-      } else if (status == 200) {
-        if (responseText.contains('dex') || responseText.contains('Log in')) {
-          throw Exception('Authentication failed. Please log in again.');
-        }
-        throw Exception('Unexpected 200 response, expected redirect. Body: $responseText');
-      } else {
-        throw Exception('Upload failed (HTTP $status). $responseText');
-      }
+      _handleUploadResponse(status, location, responseText);
     } else {
-      // Non‑web: use http.MultipartRequest
       final request = http.MultipartRequest('POST', Uri.parse(uploadUrl));
       request.headers.addAll({
-        'Authorization': 'Bearer $internalToken',
-        'X-Forwarded-User': userEmail,
+        'Cookie': '_forward_auth=$token',
       });
-
-      request.fields['path'] = '/uploads';
-      request.fields['name'] = sessionName;
-      request.fields['availability'] = availability;
-      for (final lang in inputLanguages) {
-        request.fields['language'] = lang;
-      }
-      for (final lang in outputLanguages) {
-        request.fields['mtLanguage'] = lang;
-      }
-      for (final lang in audioLanguages) {
-        request.fields['audioLanguage'] = lang;
-      }
-      if (profanityFilter) request.fields['profanity'] = 'on';
-      if (filterMusic) request.fields['filter_music'] = 'on';
-      if (enableSummarization) request.fields['summarization'] = 'on';
-      if (enableLiveNotes) request.fields['notes'] = 'on';
-      if (enableDiarization) request.fields['saasr'] = '1';
-      if (enableAIAssistant) request.fields['aiassistant'] = 'on';
-      request.fields['smartChaptering'] = smartChaptering;
-      request.fields['format'] = format;
-      request.fields['topicname'] = sessionName;
-      request.fields['date'] = DateTime.now().toIso8601String().split('T').first;
-      request.fields['speakername'] = userEmail;
+      request.fields.addAll(fields);
 
       final mimeType = lookupMimeType(fileName) ?? 'video/mp4';
       request.files.add(
@@ -460,6 +402,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
       if (kDebugMode) {
         print('📤 [DEBUG] Upload URL (non-web): $uploadUrl');
         print('📤 [DEBUG] File: $fileName ($mimeType, ${videoBytes.length} bytes)');
+        print('📤 [DEBUG] Fields: $fields');
+        print('🔑 [DEBUG] Sending cookie: _forward_auth=$token');
       }
 
       final streamedResponse = await request.send();
@@ -470,11 +414,16 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         print('📥 [DEBUG] Upload body preview: ${response.body.substring(0, response.body.length > 500 ? 500 : response.body.length)}');
       }
 
-      if (response.statusCode == 302 || response.statusCode == 303) {
-        final location = response.headers['location'];
-        if (location == null) throw Exception('Redirect location missing.');
-        final sessionId = Uri.parse(location).pathSegments.last;
-        if (!mounted) return;
+      _handleUploadResponse(response.statusCode, response.headers['location'], response.body);
+    }
+  }
+
+  void _handleUploadResponse(int? status, String? location, String body) {
+    final effectiveStatus = status ?? 0;
+    if (effectiveStatus == 302 || effectiveStatus == 303) {
+      if (location == null) throw Exception('Redirect location missing.');
+      final sessionId = Uri.parse(location).pathSegments.last;
+      if (mounted) {
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
@@ -484,14 +433,14 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             ),
           ),
         );
-      } else if (response.statusCode == 200) {
-        if (response.body.contains('dex') || response.body.contains('Log in')) {
-          throw Exception('Authentication failed. Please log in again.');
-        }
-        throw Exception('Unexpected 200 response, expected redirect. Body: ${response.body}');
-      } else {
-        throw Exception('Upload failed (HTTP ${response.statusCode}). ${response.body}');
       }
+    } else if (effectiveStatus == 200) {
+      if (body.contains('dex') || body.contains('Log in')) {
+        throw Exception('Authentication failed. Please log in again.');
+      }
+      throw Exception('Unexpected 200 response, expected redirect. Body: $body');
+    } else {
+      throw Exception('Upload failed (HTTP $effectiveStatus). $body');
     }
   }
 
@@ -548,6 +497,14 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         title: const Text('Configure Job'),
         backgroundColor: Colors.blue.shade700,
         foregroundColor: Colors.white,
+        actions: [
+          // ─── CONNECT BUTTON IN APP BAR ────────────────────────────
+          IconButton(
+            icon: Icon(_isConnected ? Icons.link : Icons.link_off),
+            onPressed: _isConnecting ? null : _connectToInternal,
+            tooltip: _isConnected ? 'Reconnect' : 'Connect',
+          ),
+        ],
       ),
       body: Form(
         key: _formKey,
@@ -566,39 +523,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                     ? 'Please enter a name'
                     : null,
               ),
-              const SizedBox(height: 16),
-
-              // ─── TOKEN INPUT ─────────────────────────────────────────────
-              Row(
-                children: [
-                  const Text('Authentication Token', style: TextStyle(fontWeight: FontWeight.bold)),
-                  const Spacer(),
-                  TextButton.icon(
-                    onPressed: () {
-                      setState(() => _showTokenField = !_showTokenField);
-                    },
-                    icon: Icon(_showTokenField ? Icons.visibility_off : Icons.visibility),
-                    label: Text(_showTokenField ? 'Hide' : 'Show'),
-                  ),
-                  TextButton.icon(
-                    onPressed: _reconnect,
-                    icon: const Icon(Icons.open_in_new),
-                    label: const Text('Get Token'),
-                  ),
-                ],
-              ),
-              if (_showTokenField)
-                TextFormField(
-                  controller: _tokenController,
-                  decoration: const InputDecoration(
-                    hintText: 'Paste your access token here',
-                    border: OutlineInputBorder(),
-                    filled: true,
-                    fillColor: Color(0xFFF5F5F5),
-                  ),
-                  obscureText: false,   // <-- FIXED: removed obscureText to avoid lint
-                  maxLines: 3,
-                ),
               const SizedBox(height: 16),
 
               // Input Languages
@@ -755,35 +679,149 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ),
               const SizedBox(height: 24),
 
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: _isSubmitting || _isReconnecting ? null : _reconnect,
-                      icon: const Icon(Icons.sync),
-                      label: const Text('Reconnect'),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                      ),
+              // ─── CONNECT BUTTON AND STATUS (above Start Processing) ──
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.grey[50],
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.grey[300]!),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(
+                              _isConnected ? Icons.check_circle : Icons.error,
+                              color: _isConnected ? Colors.green : Colors.red,
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              _isConnected ? 'Connected' : 'Not connected',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w500,
+                                color: _isConnected ? Colors.green : Colors.red,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Row(
+                          children: [
+                            // ─── MANUAL TOKEN TOGGLE BUTTON ──────────
+                            TextButton.icon(
+                              onPressed: () {
+                                setState(() {
+                                  _showTokenInput = !_showTokenInput;
+                                  if (!_showTokenInput) {
+                                    _tokenStatus = '';
+                                    _tokenController.clear();
+                                  }
+                                });
+                              },
+                              icon: Icon(
+                                _showTokenInput ? Icons.keyboard_arrow_up : Icons.vpn_key,
+                                size: 18,
+                              ),
+                              label: Text(_showTokenInput ? 'Hide Token' : 'Manual Token'),
+                              style: TextButton.styleFrom(
+                                foregroundColor: Colors.blue,
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            ElevatedButton(
+                              onPressed: _isConnecting ? null : _connectToInternal,
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: _isConnected ? Colors.grey : Colors.blue,
+                                foregroundColor: Colors.white,
+                              ),
+                              child: _isConnecting
+                                  ? const SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(strokeWidth: 2),
+                                    )
+                                  : Text(_isConnected ? 'Reconnect' : 'Connect'),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    flex: 2,
-                    child: ElevatedButton(
-                      onPressed: _isSubmitting || _isReconnecting ? null : _submitJob,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.green,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        textStyle: const TextStyle(fontSize: 18),
+                    // ─── MANUAL TOKEN INPUT ──────────────────────────
+                    if (_showTokenInput) ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: _tokenController,
+                              decoration: InputDecoration(
+                                hintText: 'Paste token here...',
+                                border: const OutlineInputBorder(),
+                                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                errorText: _tokenStatus.contains('❌') ? _tokenStatus : null,
+                                helperText: _tokenStatus.contains('✅') ? _tokenStatus : null,
+                                helperStyle: const TextStyle(color: Colors.green),
+                              ),
+                              maxLines: 2,
+                              onChanged: (_) {
+                                if (_tokenStatus.isNotEmpty) {
+                                  setState(() => _tokenStatus = '');
+                                }
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          ElevatedButton.icon(
+                            onPressed: _setManualToken,
+                            icon: const Icon(Icons.save, size: 18),
+                            label: const Text('Set'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.green,
+                              foregroundColor: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          OutlinedButton.icon(
+                            onPressed: _clearManualToken,
+                            icon: const Icon(Icons.clear, size: 18),
+                            label: const Text('Clear'),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: Colors.red,
+                            ),
+                          ),
+                        ],
                       ),
-                      child: _isSubmitting
-                          ? const CircularProgressIndicator(color: Colors.white)
-                          : const Text('Start Processing'),
-                    ),
-                  ),
-                ],
+                      if (_tokenStatus.isNotEmpty && !_tokenStatus.contains('❌') && !_tokenStatus.contains('✅'))
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4.0),
+                          child: Text(
+                            _tokenStatus,
+                            style: const TextStyle(fontSize: 12, color: Colors.grey),
+                          ),
+                        ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+
+              // ─── Start Processing Button ────────────────────────────
+              ElevatedButton(
+                onPressed: _isSubmitting ? null : _submitJob,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  textStyle: const TextStyle(fontSize: 18),
+                  minimumSize: const Size(double.infinity, 50),
+                ),
+                child: _isSubmitting
+                    ? const CircularProgressIndicator(color: Colors.white)
+                    : const Text('Start Processing'),
               ),
             ],
           ),
