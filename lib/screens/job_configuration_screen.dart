@@ -2,6 +2,7 @@
 import 'dart:async';
 // ignore: deprecated_member_use, avoid_web_libraries_in_flutter
 import 'dart:html' as html;
+import 'dart:convert';
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:flutter/foundation.dart';
@@ -301,69 +302,75 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     required String smartChaptering,
     required String format,
   }) async {
-    // Use the same URL as the Python script
-    const uploadUrl = '$internalServerUrl/upload_lecture';
+    // Use the proxy URL instead of direct internal server
+    // This avoids CORS issues because the proxy adds the CORS headers
+    const uploadUrl = '$authBaseUrl/upload-lecture';
     
-    // Build fields exactly like the Python script - using list of tuples for multi-value fields
-    final fields = <String, List<String>>{};
+    // Build fields as a Map (not list of tuples, since proxy expects standard form data)
+    final fields = <String, String>{
+      'path': '/home/$userEmail',
+      'name': sessionName,
+      'availability': availability,
+      'topicname': sessionName,
+      'date': DateTime.now().toIso8601String().split('T').first,
+      'speakername': 'Christian Huber',
+      'format': format,
+      'smartChaptering': smartChaptering,
+      'errorCorrection': 'None',
+      'ttsQualityMode': 'high_quality',
+    };
     
-    // Required fields
-    _addField(fields, 'path', '/home/$userEmail');
-    _addField(fields, 'name', sessionName);
-    _addField(fields, 'availability', availability);
-    _addField(fields, 'topicname', sessionName);
-    _addField(fields, 'date', DateTime.now().toIso8601String().split('T').first);
-    _addField(fields, 'speakername', 'Christian Huber');
-    
-    // Input languages - repeat for each language (like in Python)
-    for (final lang in inputLanguages) {
-      _addField(fields, 'language', lang);
+    // Input languages - use comma-separated or repeat with different keys
+    // Some proxies handle this differently, try both approaches
+    if (inputLanguages.isNotEmpty) {
+      // Approach 1: Comma-separated
+      fields['language'] = inputLanguages.join(',');
+      // Approach 2: Repeat the key (some proxies support this)
+      // for (int i = 0; i < inputLanguages.length; i++) {
+      //   fields['language_$i'] = inputLanguages[i];
+      // }
     }
     
     // Output languages (translation targets)
-    for (final lang in outputLanguages) {
-      _addField(fields, 'mtLanguage', lang);
+    if (outputLanguages.isNotEmpty) {
+      fields['mtLanguage'] = outputLanguages.join(',');
     }
     
     // Audio languages (TTS targets)
-    for (final lang in audioLanguages) {
-      _addField(fields, 'audioLanguage', lang);
+    if (audioLanguages.isNotEmpty) {
+      fields['audioLanguage'] = audioLanguages.join(',');
     }
     
-    // Optional fields
-    _addField(fields, 'format', format);
-    _addField(fields, 'smartChaptering', smartChaptering);
-    _addField(fields, 'errorCorrection', 'None');
-    _addField(fields, 'ttsQualityMode', 'high_quality');
-    
-    // Checkbox-style flags - presence alone enables them (like in Python)
-    if (profanityFilter) _addField(fields, 'profanity', '1');
-    if (filterMusic) _addField(fields, 'filter_music', '1');
-    if (enableSummarization) _addField(fields, 'summarization', '1');
-    if (enableLiveNotes) _addField(fields, 'notes', '1');
-    if (enableAIAssistant) _addField(fields, 'aiassistant', '1');
-    if (enableDiarization) _addField(fields, 'saasr', '1');
+    // Checkbox-style flags
+    if (profanityFilter) fields['profanity'] = '1';
+    if (filterMusic) fields['filter_music'] = '1';
+    if (enableSummarization) fields['summarization'] = '1';
+    if (enableLiveNotes) fields['notes'] = '1';
+    if (enableAIAssistant) fields['aiassistant'] = '1';
+    if (enableDiarization) fields['saasr'] = '1';
     
     if (kDebugMode) {
-      print('📤 [DEBUG] Upload URL: $uploadUrl');
+      print('📤 [DEBUG] Upload URL (via proxy): $uploadUrl');
       print('📤 [DEBUG] File: $fileName (${videoBytes.length} bytes)');
       print('📤 [DEBUG] Fields: $fields');
       print('🔑 [DEBUG] Using token: $token');
     }
     
     try {
-      // Create multipart request
+      // Use http.MultipartRequest for the upload
       final request = http.MultipartRequest('POST', Uri.parse(uploadUrl));
       
-      // Add cookie with token (exactly like Python script)
+      // IMPORTANT: For the proxy, we need to send the token differently
+      // The proxy likely expects it as a header or in the cookie
+      // Try both approaches:
       request.headers['Cookie'] = '_forward_auth=$token';
+      // Also add as a header (some proxies prefer this)
+      request.headers['X-Forward-Auth'] = token;
+      // Or as a form field
+      request.fields['_forward_auth'] = token;
       
-      // Add fields - flatten the lists
-      fields.forEach((key, values) {
-        for (final value in values) {
-          request.fields[key] = value;
-        }
-      });
+      // Add all other fields
+      request.fields.addAll(fields);
       
       // Add the video file
       final mimeType = lookupMimeType(fileName) ?? 'video/mp4';
@@ -376,12 +383,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         ),
       );
       
-      // Send the request with timeout matching Python script (30 minutes)
-      final streamedResponse = await request.send().timeout(
-        const Duration(minutes: 30),
-        onTimeout: () => throw Exception('Upload timed out after 30 minutes'),
-      );
-      
+      // Send the request
+      final streamedResponse = await request.send();
       final response = await http.Response.fromStream(streamedResponse);
       
       if (kDebugMode) {
@@ -390,7 +393,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         print('📥 [DEBUG] Upload body preview: ${response.body.substring(0, response.body.length > 500 ? 500 : response.body.length)}');
       }
       
-      // Handle response like Python script
+      // Handle response
       if (response.statusCode == 302 || response.statusCode == 303) {
         final location = response.headers['location'];
         if (location == null) throw Exception('Redirect location missing.');
@@ -410,6 +413,27 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         if (response.body.contains('dex') || response.body.contains('Log in')) {
           throw Exception('Authentication failed. Please check your token.');
         }
+        // Try to parse the response for session ID
+        try {
+          final data = jsonDecode(response.body);
+          if (data['session_id'] != null) {
+            final sessionId = data['session_id'].toString();
+            if (mounted) {
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => LiveOutputScreen(
+                    videoKey: widget.videoKey,
+                    jobId: sessionId,
+                  ),
+                ),
+              );
+            }
+            return;
+          }
+        } catch (_) {
+          // Not JSON, continue with error
+        }
         throw Exception('Unexpected 200 response, expected redirect. Body: ${response.body}');
       } else {
         throw Exception('Upload failed (HTTP ${response.statusCode}). ${response.body}');
@@ -418,14 +442,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
       if (kDebugMode) print('❌ [DEBUG] Upload error: $e');
       rethrow;
     }
-  }
-
-  // Helper to add multi-value fields
-  void _addField(Map<String, List<String>> fields, String key, String value) {
-    if (!fields.containsKey(key)) {
-      fields[key] = [];
-    }
-    fields[key]!.add(value);
   }
 
   void _handleUploadResponse(int? status, String? location, String body) {
