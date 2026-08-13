@@ -233,6 +233,9 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     try {
       // 1. Get token and user
       final internalToken = await InternalAuthService.getValidAccessToken();
+      if (kDebugMode) {
+        print('🔑 Bearer token: $internalToken');
+      } 
       if (internalToken == null) {
         throw Exception('Please log in to the internal server first.');
       }
@@ -391,7 +394,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
 
       final request = html.HttpRequest();
       request.open('POST', proxyUploadUrl, async: true);
-      request.withCredentials = false; // no credentials needed for localhost
+      request.withCredentials = true;   // <-- important: send cookies
 
       // Add Authorization and X-Forwarded-User headers for the proxy to forward
       request.setRequestHeader('Authorization', 'Bearer $internalToken');
