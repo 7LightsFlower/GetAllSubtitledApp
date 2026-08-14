@@ -27,6 +27,13 @@ class JobConfigurationScreen extends StatefulWidget {
 class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _sessionNameController;
+  final TextEditingController _topicNameController = TextEditingController();
+  final TextEditingController _speakerNameController = TextEditingController();
+  final TextEditingController _shortenController = TextEditingController();
+  final TextEditingController _muteController = TextEditingController(text: '120');
+  final TextEditingController _pauseController = TextEditingController(text: '2');
+
+  String _date = '';
 
   final List<String> _inputLanguages = ['en'];
   final List<String> _outputLanguages = ['de'];
@@ -37,10 +44,14 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   bool _enableSummarization = true;
   bool _enableLiveNotes = false;
   bool _enableDiarization = false;
-  bool _enableAIAssistant = true;
+  bool _enableAIAssistant = false;
   bool _saveSession = true;
+  bool _distinguishUnknownSpeakers = false;
   String _smartChaptering = 'online_dynamic';
-  String _format = 'online';
+  String _format = 'mixed';
+  String _ttsQualityMode = 'low_latency';
+  String _errorCorrection = 'None';
+  final List<String> _postproduction = <String>[];
   bool _isSubmitting = false;
   bool _isConnected = false;
   bool _isConnecting = false;
@@ -50,6 +61,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   final TextEditingController _tokenController = TextEditingController();
   String _tokenStatus = '';
 
+  // --- Constants ---
   static const List<String> _allInputLanguages = [
     'en', 'de', 'fr', 'es', 'it', 'ja', 'ko', 'zh', 'ru', 'ar',
     'hi', 'pt', 'nl', 'pl', 'tr', 'uk', 'vi', 'th', 'id', 'ms'
@@ -66,14 +78,49 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     'private', 'private+qr', 'kitemployee', 'kitall', 'public'
   ];
   static const List<String> _formatOptions = [
-    'online', 'mixed', 'resending', 'offline'
+    'mixed', 'resending', 'online', 'offline'
   ];
   static const List<String> _chapteringOptions = [
     'online_dynamic', 'online_static', 'offline', 'streaming_simple'
   ];
+  static const List<String> _ttsQualityOptions = ['low_latency', 'high_quality'];
+  static const List<String> _errorCorrectionOptions = ['None', 'dialog', 'dialog2'];
+  static const List<String> _postproductionOptions = ['50', '70', '90'];
 
-  // ─── Connection management ──────────────────────────────────────────────
+  // --- Init ---
+  @override
+  void initState() {
+    super.initState();
+    _sessionNameController = TextEditingController(text: _getDefaultSessionName());
+    final now = DateTime.now();
+    _date = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+    _topicNameController.text = _sessionNameController.text;
+    _checkConnection();
+  }
 
+  @override
+  void dispose() {
+    _sessionNameController.dispose();
+    _topicNameController.dispose();
+    _speakerNameController.dispose();
+    _shortenController.dispose();
+    _muteController.dispose();
+    _pauseController.dispose();
+    _tokenController.dispose();
+    super.dispose();
+  }
+
+  String _getDefaultSessionName() {
+    final now = DateTime.now();
+    final dateTimeStr =
+        '${now.year}-${now.month.toString().padLeft(2, '0')}-'
+        '${now.day.toString().padLeft(2, '0')} '
+        '${now.hour.toString().padLeft(2, '0')}:'
+        '${now.minute.toString().padLeft(2, '0')}';
+    return '${widget.videoName} – $dateTimeStr';
+  }
+
+  // --- Connection ---
   Future<void> _checkConnection() async {
     final token = await InternalAuthService.getToken();
     if (mounted) {
@@ -88,7 +135,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
       final success = await InternalAuthService.loginWithOAuth();
       if (success && mounted) {
         setState(() => _isConnected = true);
-        // Use mounted check before accessing context
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('✅ Connected to internal server!')),
@@ -117,15 +163,13 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     }
   }
 
-  // ─── Manual token management ───────────────────────────────────────────────
-
+  // --- Manual token ---
   Future<void> _setManualToken() async {
     final token = _tokenController.text.trim();
     if (token.isEmpty) {
       setState(() => _tokenStatus = '⚠️ Please enter a token');
       return;
     }
-    
     try {
       await InternalAuthService.setManualToken(token);
       if (mounted) {
@@ -167,8 +211,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     }
   }
 
-  // ─── Token helper ──────────────────────────────────────────────────────────
-
   Future<String> _getToken() async {
     final token = await InternalAuthService.getToken();
     if (token == null || token.isEmpty) {
@@ -177,34 +219,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     return token;
   }
 
-  // ─── Session name ──────────────────────────────────────────────────────────
-
-  String _getDefaultSessionName() {
-    final now = DateTime.now();
-    final dateTimeStr =
-        '${now.year}-${now.month.toString().padLeft(2, '0')}-'
-        '${now.day.toString().padLeft(2, '0')} '
-        '${now.hour.toString().padLeft(2, '0')}:'
-        '${now.minute.toString().padLeft(2, '0')}';
-    return '${widget.videoName} – $dateTimeStr';
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    _sessionNameController = TextEditingController(text: _getDefaultSessionName());
-    _checkConnection();
-  }
-
-  @override
-  void dispose() {
-    _sessionNameController.dispose();
-    _tokenController.dispose();
-    super.dispose();
-  }
-
-  // ─── Main submit ───────────────────────────────────────────────────────────
-
+  // --- Submit ---
   Future<void> _submitJob() async {
     if (!_formKey.currentState!.validate()) return;
     _formKey.currentState!.save();
@@ -212,14 +227,11 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     setState(() => _isSubmitting = true);
 
     try {
-    // Get the token - this will now work with manual token
-    final token = await _getToken();
-    if (kDebugMode) print('🚀 [UPLOAD] Using token: $token');
-
+      final token = await _getToken();
+      if (kDebugMode) print('🚀 [UPLOAD] Using token: $token');
 
       const userEmail = 'admin@example.com';
 
-      // 1. Fetch video from local server
       final localMediaUrl = Uri.parse('$authBaseUrl/media/${widget.videoKey}');
       if (kDebugMode) print('🌐 [DEBUG] Fetching video from local server: $localMediaUrl');
 
@@ -243,13 +255,15 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
 
       if (kDebugMode) print('✅ [DEBUG] Video fetched from local: ${videoBytes.length} bytes');
 
-      // 2. Upload to internal server using cookie authentication
       await _uploadToInternalServer(
         videoBytes: videoBytes,
         fileName: widget.videoName,
         token: token,
         userEmail: userEmail,
         sessionName: _sessionNameController.text.trim(),
+        topicName: _topicNameController.text.trim(),
+        date: _date,
+        speakerName: _speakerNameController.text.trim(),
         availability: _availability,
         inputLanguages: _inputLanguages,
         outputLanguages: _outputLanguages,
@@ -260,8 +274,16 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         enableLiveNotes: _enableLiveNotes,
         enableDiarization: _enableDiarization,
         enableAIAssistant: _enableAIAssistant,
+        saveSession: _saveSession,
+        distinguishUnknownSpeakers: _distinguishUnknownSpeakers,
         smartChaptering: _smartChaptering,
         format: _format,
+        ttsQualityMode: _ttsQualityMode,
+        errorCorrection: _errorCorrection,
+        postproduction: _postproduction,
+        shorten: _shortenController.text.trim(),
+        mute: int.tryParse(_muteController.text.trim()) ?? 120,
+        pause: double.tryParse(_pauseController.text.trim()) ?? 2.0,
       );
 
     } catch (e) {
@@ -280,14 +302,16 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     }
   }
 
-  // ─── Upload helper (multipart) ──────────────────────────────────────────
-
+  // --- Upload helper ---
   Future<void> _uploadToInternalServer({
     required List<int> videoBytes,
     required String fileName,
     required String token,
     required String userEmail,
     required String sessionName,
+    required String topicName,
+    required String date,
+    required String speakerName,
     required String availability,
     required List<String> inputLanguages,
     required List<String> outputLanguages,
@@ -298,70 +322,79 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     required bool enableLiveNotes,
     required bool enableDiarization,
     required bool enableAIAssistant,
+    required bool saveSession,
+    required bool distinguishUnknownSpeakers,
     required String smartChaptering,
     required String format,
+    required String ttsQualityMode,
+    required String errorCorrection,
+    required List<String> postproduction,
+    required String shorten,
+    required int mute,
+    required double pause,
   }) async {
     const uploadUrl = '$flaskServerUrl/upload';
 
-    // 1. Build FormData
     final formData = html.FormData();
 
-    // Token (the Flask server expects this as a form field)
     formData.append('token', token);
-
-    // Required fields (matching the HTML form)
     formData.append('path', '/home/$userEmail');
     formData.append('name', sessionName);
+    formData.append('topicname', topicName);
+    formData.append('date', date);
+    formData.append('speakername', speakerName);
     formData.append('availability', availability);
-    formData.append('topicname', sessionName);
-    formData.append('date', DateTime.now().toIso8601String().split('T').first);
-    formData.append('speakername', 'Christian Huber');
     formData.append('format', format);
     formData.append('smartChaptering', smartChaptering);
-    formData.append('errorCorrection', 'None');
-    formData.append('ttsQualityMode', 'high_quality');
+    formData.append('errorCorrection', errorCorrection);
+    formData.append('ttsQualityMode', ttsQualityMode);
 
-    // Multiple language fields
     for (final lang in inputLanguages) {
       formData.append('language', lang);
     }
-    // Multiple translation target fields
     for (final lang in outputLanguages) {
       formData.append('mtLanguage', lang);
     }
-    // (We skip audioLanguages – not used by the Flask server HTML)
+    for (final lang in audioLanguages) {
+      formData.append('audioLanguage', lang);
+    }
 
-    // Checkboxes – send '1' if enabled
     if (profanityFilter) formData.append('profanity', '1');
     if (filterMusic) formData.append('filter_music', '1');
     if (enableSummarization) formData.append('summarization', '1');
     if (enableLiveNotes) formData.append('notes', '1');
-    if (enableAIAssistant) formData.append('aiassistant', '1');
     if (enableDiarization) formData.append('saasr', '1');
+    if (enableAIAssistant) formData.append('aiassistant', '1');
+    if (saveSession) formData.append('logging', '1');
+    if (distinguishUnknownSpeakers) formData.append('distinguish_unknown_speakers', '1');
 
-    // Video file
+    formData.append('legals', '1');
+    formData.append('profile', 'profile_1');
+    formData.append('profile_names', '');
+    formData.append('shorten', shorten);
+    formData.append('mute', mute.toString());
+    formData.append('pause', pause.toString());
+    formData.append('save_profile', '1');
+
+    for (final rate in postproduction) {
+      formData.append('postproduction', rate);
+    }
+
     final blob = html.Blob([videoBytes]);
     formData.appendBlob('videofile', blob, fileName);
 
-    // 2. Send the request
     final request = html.HttpRequest();
     request.open('POST', uploadUrl);
-    // No need to set cookies or custom headers – token is in the form
     request.send(formData);
-
     await request.onLoadEnd.first;
 
-    // Guard against null status (should not happen after load end, but safe)
     final status = request.status ?? 0;
     final responseText = request.responseText;
-    final finalUrl = request.responseUrl; // final URL after any redirects
+    final finalUrl = request.responseUrl;
 
-    // 3. Handle response
     if (status >= 200 && status < 300) {
-      // Check if we were redirected to a session page
-      if (finalUrl != null && finalUrl.contains('/session/')) {
-        final uri = Uri.parse(finalUrl);
-        final sessionId = uri.pathSegments.last;
+      if (finalUrl != null && finalUrl.contains('/archivesession/')) {
+        final sessionId = finalUrl.split('/archivesession/')[-1].split('/')[0];
         if (mounted) {
           Navigator.pushReplacement(
             context,
@@ -376,7 +409,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         return;
       }
 
-      // Alternatively, the response might be JSON with a session_id
       try {
         final data = jsonDecode(responseText ?? '');
         if (data['session_id'] != null) {
@@ -396,15 +428,13 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         }
       } catch (_) {}
 
-      // If we get here, something unexpected happened
       throw Exception('Unexpected response: $responseText');
     } else {
       throw Exception('Upload failed (HTTP $status): $responseText');
     }
   }
 
-  // ─── Dropdown helper ──────────────────────────────────────────────────────
-
+  // --- Widget helpers ---
   Widget _buildDropdownField<T>({
     required String label,
     required T value,
@@ -447,8 +477,38 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     );
   }
 
-  // ─── Build ─────────────────────────────────────────────────────────────────
+  Widget _buildMultiSelectChips({
+    required String label,
+    required List<String> selected,
+    required List<String> allOptions,
+    required ValueChanged<List<String>> onChanged,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: const TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          children: allOptions.map((opt) {
+            return FilterChip(
+              label: Text(opt),
+              selected: selected.contains(opt),
+              onSelected: (isSelected) {
+                if (isSelected) {
+                  onChanged([...selected, opt]);
+                } else {
+                  onChanged(selected.where((e) => e != opt).toList());
+                }
+              },
+            );
+          }).toList(),
+        ),
+      ],
+    );
+  }
 
+  // --- Build ---
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -457,7 +517,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         backgroundColor: Colors.blue.shade700,
         foregroundColor: Colors.white,
         actions: [
-          // ─── CONNECT BUTTON IN APP BAR ────────────────────────────
           IconButton(
             icon: Icon(_isConnected ? Icons.link : Icons.link_off),
             onPressed: _isConnecting ? null : _connectToInternal,
@@ -472,6 +531,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // Session Name
               TextFormField(
                 controller: _sessionNameController,
                 decoration: const InputDecoration(
@@ -481,6 +541,44 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                 validator: (val) => val == null || val.trim().isEmpty
                     ? 'Please enter a name'
                     : null,
+                onChanged: (_) {
+                  if (_topicNameController.text == _sessionNameController.text) {
+                    _topicNameController.text = _sessionNameController.text;
+                  }
+                },
+              ),
+              const SizedBox(height: 16),
+
+              // Topic, Date, Speaker
+              TextFormField(
+                controller: _topicNameController,
+                decoration: const InputDecoration(
+                  labelText: 'Topic Name',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                initialValue: _date,
+                decoration: const InputDecoration(
+                  labelText: 'Date (YYYY-MM-DD)',
+                  border: OutlineInputBorder(),
+                ),
+                onChanged: (val) => _date = val,
+                validator: (val) {
+                  if (val == null || val.isEmpty) return 'Date is required';
+                  final reg = RegExp(r'^\d{4}-\d{2}-\d{2}$');
+                  if (!reg.hasMatch(val)) return 'Use YYYY-MM-DD format';
+                  return null;
+                },
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _speakerNameController,
+                decoration: const InputDecoration(
+                  labelText: 'Speaker Name',
+                  border: OutlineInputBorder(),
+                ),
               ),
               const SizedBox(height: 16),
 
@@ -579,7 +677,89 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ),
               const SizedBox(height: 16),
 
-              // Features
+              // TTS Quality Mode
+              _buildDropdownField<String>(
+                label: 'TTS Quality Mode',
+                value: _ttsQualityMode,
+                options: _ttsQualityOptions,
+                onChanged: (val) => setState(() => _ttsQualityMode = val!),
+              ),
+              const SizedBox(height: 16),
+
+              // Error Correction
+              _buildDropdownField<String>(
+                label: 'Error Correction',
+                value: _errorCorrection,
+                options: _errorCorrectionOptions,
+                onChanged: (val) => setState(() => _errorCorrection = val!),
+              ),
+              const SizedBox(height: 16),
+
+              // Post-production (multi-select)
+              _buildMultiSelectChips(
+                label: 'Shortening (Post-production)',
+                selected: _postproduction,
+                allOptions: _postproductionOptions,
+                onChanged: (newList) => setState(() => _postproduction..clear()..addAll(newList)),
+              ),
+              const SizedBox(height: 16),
+
+              // Permanent Name
+              TextFormField(
+                controller: _shortenController,
+                decoration: const InputDecoration(
+                  labelText: 'Permanent Name (alphanumeric only)',
+                  border: OutlineInputBorder(),
+                  hintText: 'Leave empty for random',
+                ),
+                validator: (val) {
+                  if (val != null && val.isNotEmpty && !RegExp(r'^[A-Za-z0-9]*$').hasMatch(val)) {
+                    return 'Only letters and numbers allowed';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 16),
+
+              // Mute & Pause
+              Row(
+                children: [
+                  Expanded(
+                    child: TextFormField(
+                      controller: _muteController,
+                      decoration: const InputDecoration(
+                        labelText: 'Notify timeout (minutes)',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                      validator: (val) {
+                        if (val == null || val.isEmpty) return null;
+                        if (int.tryParse(val) == null) return 'Enter a number';
+                        return null;
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: TextFormField(
+                      controller: _pauseController,
+                      decoration: const InputDecoration(
+                        labelText: 'Speech segment timeout (seconds)',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                      validator: (val) {
+                        if (val == null || val.isEmpty) return null;
+                        if (double.tryParse(val) == null) return 'Enter a number';
+                        return null;
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+
+              // Features (checkboxes)
               const Text('Features',
                   style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               Wrap(
@@ -628,9 +808,16 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                     dense: true,
                   ),
                   CheckboxListTile(
-                    title: const Text('Save Session'),
+                    title: const Text('Save Session (logging)'),
                     value: _saveSession,
                     onChanged: (v) => setState(() => _saveSession = v!),
+                    controlAffinity: ListTileControlAffinity.leading,
+                    dense: true,
+                  ),
+                  CheckboxListTile(
+                    title: const Text('Distinguish unknown speakers'),
+                    value: _distinguishUnknownSpeakers,
+                    onChanged: (v) => setState(() => _distinguishUnknownSpeakers = v!),
                     controlAffinity: ListTileControlAffinity.leading,
                     dense: true,
                   ),
@@ -638,7 +825,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ),
               const SizedBox(height: 24),
 
-              // ─── CONNECT BUTTON AND STATUS (above Start Processing) ──
+              // Connect / Token section
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
@@ -670,7 +857,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                         ),
                         Row(
                           children: [
-                            // ─── MANUAL TOKEN TOGGLE BUTTON ──────────
                             TextButton.icon(
                               onPressed: () {
                                 setState(() {
@@ -709,7 +895,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                         ),
                       ],
                     ),
-                    // ─── MANUAL TOKEN INPUT ──────────────────────────
                     if (_showTokenInput) ...[
                       const SizedBox(height: 8),
                       Row(
@@ -768,7 +953,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ),
               const SizedBox(height: 16),
 
-              // ─── Start Processing Button ────────────────────────────
+              // Start Processing
               ElevatedButton(
                 onPressed: _isSubmitting ? null : _submitJob,
                 style: ElevatedButton.styleFrom(
