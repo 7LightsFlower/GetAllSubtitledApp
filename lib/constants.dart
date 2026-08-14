@@ -10,7 +10,10 @@ const String publicServerUrl = 'https://GetAllSubtitled.dataforlearningmachines.
 
 /// Internal backend server (all API calls except registration)
 const String internalServerUrl = 'https://lt2srv-sscherrer.isl.iar.kit.edu';
-const String flaskServerUrl = 'http://localhost:8081'; // adjust to your Flask host/port
+
+/// Your merged Flask server - MUST BE LOCALHOST FOR DEVELOPMENT
+/// This is where the Flutter app sends the video for processing
+const String flaskServerUrl = 'http://localhost:5000';
 
 // ─── Environment mode (for local testing) ─────────────────────
 const bool isDevelopment = true;   // set false for production
@@ -18,28 +21,22 @@ const bool isDevelopment = true;   // set false for production
 // ─── API endpoints ─────────────────────────────────────────────
 /// Authentication (login, register, forgot password)
 const String authBaseUrl = isDevelopment
-    ? 'http://localhost:5000'   // or internalServerUrl
+    ? 'http://localhost:5000'   // Use local server in development
     : publicServerUrl;
 
 const String videoApiBaseUrl = internalServerUrl;   // video processing
 
 // ─── Internal server credentials (for auto‑login) ─────────────
-/// Replace these with your actual internal server credentials.
-const String internalEmail = 'admin@example.com';    // <-- replace with your real internal credentials
-const String internalPassword = 'YourActualPassword123';         // <-- replace
+const String internalEmail = 'admin@example.com';
+const String internalPassword = 'YourActualPassword123';
 
-// ─── Dummy credentials for testing (not auto‑filled) ─────────
+// ─── Dummy credentials for testing ────────────────────────────
 const String dummyEmail = 'testuser@example.com';
 const String dummyPassword = 'YourSecurePassword123';
 
 // ─── Dex OAuth 2.0 Configuration ──────────────────────────────
 const String dexClientId = 'traefik-forward-auth';
-const String dexClientSecret = 'bar';   // <-- replace with your actual client secret from 
-/// docker ps | grep dex
-/// docker inspect <docker_id> | grep -i secret
+const String dexClientSecret = 'bar';
 const String dexRedirectUri = 'http://localhost:8080/';
-/// const String dexRedirectUri = 'http://localhost:8080/oauth_callback.html'; 
-// route should be added to the dex config.yaml file in ~/ltpipeline-dev-sscherrer/traefik/auth/dex.yaml
-/// const String dexRedirectUri = 'https://lt2srv-sscherrer.isl.iar.kit.edu/_oauth';
 const String dexIssuer = 'https://lt2srv-sscherrer.isl.iar.kit.edu/dex';
 const List<String> dexScopes = ['openid', 'profile', 'email'];

@@ -334,6 +334,14 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     required double pause,
   }) async {
     const uploadUrl = '$flaskServerUrl/upload';
+      
+    // Debug: Print the URL being used
+    if (kDebugMode) {
+      print('🔍 UPLOAD URL: $uploadUrl');
+    }
+    if (kDebugMode) {
+      print('🔍 flaskServerUrl: $flaskServerUrl');
+    }
 
     final formData = html.FormData();
 

@@ -1,60 +1,73 @@
-"""Mock Flask server with proxy endpoints for the internal server."""
+#!/usr/bin/env python3
+"""Merged Flask server combining mock server and upload proxy functionality."""
 
+import base64
 import datetime
+import json
+import logging
 import os
 import threading
 import time
 import uuid
 
-import requests  # requires: pip install requests
+import requests
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
-from sympy import pprint
 
+logging.basicConfig(level=logging.DEBUG)
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1 GB
+app.config['DEBUG'] = True
+
+# Enable CORS for Flutter web
 CORS(
     app,
-    origins=["http://localhost:8080"],  # your Flutter web origin
+    origins=[
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:5000",
+        "http://127.0.0.1:5000",
+        "*"
+    ],
     supports_credentials=True,
-    methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Forwarded-User"],
-    expose_headers=["Location"]
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Forwarded-User", "Accept"],
+    expose_headers=["Location", "Content-Disposition"]
 )
 
-# ─── Internal server URL ────────────────────────────────────────────────────
+# ─── Configuration ─────────────────────────────────────────────────────────
 INTERNAL_SERVER_URL = "https://lt2srv-sscherrer.isl.iar.kit.edu"
+TARGET_URL = f"{INTERNAL_SERVER_URL}/upload_lecture"
+BASE_URL = INTERNAL_SERVER_URL
+UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'uploads')
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# ─── Session management ────────────────────────────────────────────────────
-# We use a single requests session to store cookies from the internal server.
+# ─── Data stores ──────────────────────────────────────────────────────────
+users = {}
+videos = []
+chunk_storage = {}
+jobs = {}
+
+# ─── Session management ──────────────────────────────────────────────────
 internal_session = requests.Session()
-internal_session.verify = False  # for self‑signed certs; set True in production
-
-# Use a mutable container to store the last token we used for authentication.
+internal_session.verify = False
 _state = {'token': None}
 
 
 def ensure_authenticated(token: str) -> bool:
-    """
-    Check if the current session has a valid cookie.
-    If not, try to authenticate using the given Bearer token.
-    Returns True if authenticated, False otherwise.
-    """
+    """Check if the current session has a valid cookie."""
     if token == _state['token'] and internal_session.cookies:
-        # We already have a session with this token – check if it's still valid
         try:
             resp = internal_session.get(
                 INTERNAL_SERVER_URL,
                 allow_redirects=False,
                 timeout=5
             )
-            # If we get a 200 and not a login page, we're good
             if resp.status_code == 200 and 'dex' not in resp.url:
                 return True
         except requests.exceptions.RequestException:
             pass
 
-    # Either no session or session expired – try to authenticate with token
-    # Send a GET to the root with the Authorization header
     headers = {'Authorization': f'Bearer {token}'}
     try:
         resp = internal_session.get(
@@ -63,50 +76,15 @@ def ensure_authenticated(token: str) -> bool:
             allow_redirects=False,
             timeout=10
         )
-        # If we get a 200 and the response is not a login page, we're authenticated
         if resp.status_code == 200 and 'dex' not in resp.url:
             _state['token'] = token
             return True
-        else:
-            # The server redirected to dex or returned a login page
-            return False
+        return False
     except requests.exceptions.RequestException:
         return False
 
 
-# ─── Error handlers ──────────────────────────────────────────────────────────
-
-@app.errorhandler(404)
-def not_found(_error):
-    """Return JSON for 404 errors."""
-    return jsonify({'error': 'Endpoint not found'}), 404
-
-
-@app.errorhandler(405)
-def method_not_allowed(_error):
-    """Return JSON for 405 errors."""
-    return jsonify({'error': 'Method not allowed'}), 405
-
-
-@app.errorhandler(500)
-def internal_error(_error):
-    """Return JSON for 500 errors."""
-    return jsonify({'error': 'Internal server error'}), 500
-
-
-# ─── Data stores ─────────────────────────────────────────────────────────────
-
-users = {}
-videos = []
-chunk_storage = {}
-jobs = {}
-
-UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'uploads')
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-
-# ─── Helpers ─────────────────────────────────────────────────────────────────
-
+# ─── Helpers ──────────────────────────────────────────────────────────────
 def utc_now_iso():
     """Return current UTC time in ISO 8601 with milliseconds and 'Z'."""
     return datetime.datetime.now(datetime.UTC).isoformat(
@@ -186,9 +164,7 @@ def process_job(job_id):
             job['segments'] = generate_mock_segments()
 
 
-# ─── Dummy project ──────────────────────────────────────────────────────────
-# You must place a sample.mp4 file in the uploads/ folder for this to work.
-
+# ─── Dummy data ───────────────────────────────────────────────────────────
 dummy_project = {
     'key': 'dummy-key-123',
     'name': 'Sample Video',
@@ -212,8 +188,7 @@ users['testuser@example.com'] = {
 }
 
 
-# ─── Auth endpoints (local) ────────────────────────────────────────────────
-
+# ─── Auth endpoints (local) ──────────────────────────────────────────────
 @app.route('/register', methods=['POST'])
 def register():
     """Register a new user."""
@@ -243,8 +218,7 @@ def login():
     return jsonify({'token': token, 'message': 'Login successful'}), 200
 
 
-# ─── Video endpoints (local) ───────────────────────────────────────────────
-
+# ─── Video endpoints (local) ──────────────────────────────────────────────
 @app.route('/videos', methods=['GET'])
 def get_videos():
     """Return the list of uploaded videos."""
@@ -337,8 +311,7 @@ def finish_upload():
     return jsonify({'message': 'Upload finished', 'project': project}), 200
 
 
-# ─── Job endpoints (local mock) ────────────────────────────────────────────
-
+# ─── Job endpoints (local mock) ──────────────────────────────────────────
 @app.route('/start_job/<video_key>', methods=['POST'])
 def start_job(video_key):
     """Start a background transcription job for the given video."""
@@ -373,14 +346,210 @@ def job_status(job_id):
     }), 200
 
 
-# ─── PROXY ENDPOINTS for the internal server ──────────────────────────────
+# ─── UPLOAD ENDPOINT - EXACTLY LIKE ORIGINAL app.py ──────────────────────
+@app.route('/upload', methods=['POST', 'OPTIONS'])
+def upload_lecture():
+    """
+    Upload a video file to the internal server using requests (like original app.py).
+    Also saves a local copy for the mock server's video list.
+    This endpoint is called by the Flutter app.
+    """
+    # Handle preflight OPTIONS request
+    if request.method == 'OPTIONS':
+        response = jsonify({'message': 'OK'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers',
+                             'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods',
+                             'GET,POST,OPTIONS')
+        return response, 200
 
+    logging.debug("=== UPLOAD REQUEST RECEIVED ===")
+    logging.debug("Headers: %s", dict(request.headers))
+    logging.debug("Form keys: %s", list(request.form.keys()))
+    logging.debug("Files: %s", list(request.files.keys()))
+
+    token = request.form.get('token', '')
+    if not token:
+        logging.error("Missing token in request")
+        return jsonify({'error': 'Missing token'}), 400
+
+    if 'videofile' not in request.files:
+        logging.error("No videofile in request")
+        return jsonify({'error': 'No video file provided'}), 400
+
+    file_storage = request.files['videofile']
+    if file_storage.filename == '':
+        logging.error("Empty filename")
+        return jsonify({'error': 'Empty filename'}), 400
+
+    # Get session name
+    session_name = request.form.get('name', file_storage.filename)
+    logging.info("Received upload: %s (%d bytes)",
+                 file_storage.filename, len(file_storage.read()))
+    file_storage.seek(0)
+
+    # ─── 1. SAVE LOCAL COPY FIRST ──────────────────────────────────────
+    original_filename = file_storage.filename
+    local_filename = f"{uuid.uuid4()}_{original_filename}"
+    local_path = os.path.join(UPLOAD_FOLDER, local_filename)
+
+    # Save the file locally
+    file_storage.save(local_path)
+    file_size = os.path.getsize(local_path)
+    logging.info("Saved local copy: %s (%d bytes)", local_filename, file_size)
+    file_storage.seek(0)
+
+    # ─── 2. CREATE LOCAL PROJECT ENTRY ──────────────────────────────
+    video_key = str(uuid.uuid4())
+    project = {
+        'key': video_key,
+        'name': session_name,
+        'file_name': local_filename,
+        'uploaded': utc_now_iso(),
+        'last_opened': None,
+        'duration': 120.0,
+        'fps': 30.0,
+        'file_size': file_size,
+        'segment_count': 0,
+        'languages': request.form.getlist('language') or ['en'],
+        'thumbnail_url': None,
+        'segmentation_done': False,
+        'segmentation_progress': 0,
+    }
+    videos.append(project)
+    logging.info("Added local project: %s (%s)", session_name, video_key)
+
+    # ─── 3. BUILD DATA DICT (like original app.py) ────────────────────
+    data = {}
+    for key in request.form.keys():
+        if key == 'token':
+            continue
+        values = request.form.getlist(key)
+        data[key] = values[0] if len(values) == 1 else values
+
+    # Add path if not present
+    if 'path' not in data:
+        user_email = 'admin@example.com'
+        data['path'] = f'/home/{user_email}'
+
+    # ─── 4. BUILD FILES DICT (like original app.py) ──────────────────
+    files = {}
+    if 'videofile' in request.files:
+        file_obj = request.files['videofile']
+        if file_obj.filename:
+            files['videofile'] = (file_obj.filename, file_obj.stream,
+                                 file_obj.content_type)
+
+    # ─── 5. SETUP HEADERS AND COOKIES (like original app.py) ──────────
+    headers = {
+        'X-Forward-Auth': token,
+        'User-Agent': 'Mozilla/5.0 (compatible; LT-Uploader/1.0)'
+    }
+    cookies = {'_forward_auth': token}
+
+    try:
+        # ─── 6. SEND REQUEST TO INTERNAL SERVER ──────────────────────
+        resp = requests.post(
+            TARGET_URL,
+            data=data,
+            files=files,
+            headers=headers,
+            cookies=cookies,
+            timeout=(10, 1800),
+            verify=False,
+            allow_redirects=True
+        )
+
+        final_url = resp.url
+        session_id = None
+
+        # Extract session ID from redirect URL
+        if '/archivesession/' in final_url:
+            session_id = final_url.split('/archivesession/')[-1].split('/')[0]
+        elif '/session/' in final_url:
+            session_id = final_url.split('/session/')[-1].split('/')[0]
+
+        # If not found, build it from the form data (fallback)
+        if not session_id and session_name:
+            user_email = data.get('path', '/home/admin@example.com'
+                                  ).strip('/').split('/')[-1]
+            path = f"/home/{user_email}/{session_name}"
+            session_id = base64.b64encode(path.encode()).decode()
+
+        # Get the LT server's original response
+        content = resp.text
+        content_type = resp.headers.get('Content-Type', 'text/html')
+
+        # ─── 7. UPDATE PROJECT WITH SESSION INFO ──────────────────────
+        if session_id:
+            project['session_id'] = session_id
+            project['session_url'] = f"{BASE_URL}/archivesession/{session_id}"
+
+            # Start a background job to simulate processing
+            job = {
+                'id': session_id,
+                'video_key': video_key,
+                'status': 'processing',
+                'progress': 0.0,
+                'transcript': None,
+                'segments': None,
+                'created_at': utc_now_iso(),
+                'config': dict(request.form),
+            }
+            jobs[session_id] = job
+            threading.Thread(target=process_job,
+                           args=(session_id,), daemon=True).start()
+
+        # ─── 8. RETURN RESPONSE ──────────────────────────────────────
+        # Try to parse as JSON first
+        try:
+            response_data = json.loads(content)
+            if session_id:
+                response_data['session_id'] = session_id
+                response_data['video_key'] = video_key
+                response_data['session_url'] = (
+                    f"{BASE_URL}/archivesession/{session_id}"
+                )
+            return jsonify(response_data), resp.status_code
+        except json.JSONDecodeError:
+            # If not JSON, return as text with session info injected
+            if 'text/html' in content_type and session_id:
+                link = f"{BASE_URL}/archivesession/{session_id}"
+                inject = (
+                    '<div style="padding: 1rem; margin: 1rem; background: #eaf0f8; '
+                    'border-radius: 8px; text-align: center; border: 1px solid #b0c6dd;">'
+                    '<strong>📎 Session link:</strong><br>'
+                    f'<a href="{link}" target="_blank" '
+                    f'style="color: #1a4c8a; word-break: break-all;">{link}</a>'
+                    '<br><br>'
+                    f'<strong>Video Key:</strong> {video_key}<br>'
+                    f'<strong>Session ID:</strong> {session_id}'
+                    '</div>'
+                )
+                content = content.replace('</body>', inject + '</body>')
+
+            # Return as text with status
+            response = app.make_response(content)
+            response.status_code = resp.status_code
+            response.headers['Content-Type'] = content_type
+            return response
+
+    except requests.exceptions.Timeout:
+        logging.error("Request timeout")
+        return jsonify({'error': 'Request timeout'}), 504
+    except requests.exceptions.RequestException as e:
+        logging.error("Request error: %s", str(e))
+        return jsonify({'error': f'Request failed: {str(e)}'}), 500
+    except (ValueError, KeyError, AttributeError) as e:
+        logging.error("Upload error: %s", str(e), exc_info=True)
+        return jsonify({'error': f'Upload failed: {str(e)}'}), 500
+
+
+# ─── PROXY ENDPOINTS for the internal server ─────────────────────────────
 @app.route('/check-session', methods=['GET'])
 def check_session():
-    """
-    Forward a GET request to the internal server root.
-    Returns JSON: { 'authenticated': bool }
-    """
+    """Forward a GET request to the internal server root."""
     headers = {}
     auth = request.headers.get('Authorization')
     if auth:
@@ -395,7 +564,7 @@ def check_session():
             headers=headers,
             allow_redirects=False,
             timeout=10,
-            verify=False  # set to True in production
+            verify=False
         )
         final_url = resp.url if hasattr(resp, 'url') else INTERNAL_SERVER_URL
         is_login_page = (
@@ -409,112 +578,12 @@ def check_session():
         return jsonify({'authenticated': authenticated}), 200
     except requests.exceptions.RequestException:
         return jsonify({'authenticated': False, 'error': 'Request failed'}), 200
-    
-import subprocess
-import tempfile
-import os
 
-import subprocess
-import tempfile
-import os
-
-@app.route('/upload-lecture', methods=['POST'])
-def upload_lecture():
-    """Forward the request using curl – guarantees success."""
-    # Save the uploaded video to a temporary file
-    file_storage = request.files['videofile']
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
-        file_storage.save(tmp.name)
-        tmp_path = tmp.name
-
-    try:
-        # Build the curl command exactly like your working test
-        cmd = [
-            'curl', '-X', 'POST',
-            f'{INTERNAL_SERVER_URL}/upload_lecture',
-            '-H', f'Authorization: {request.headers.get("Authorization")}',
-            '-H', f'X-Forwarded-User: {request.headers.get("X-Forwarded-User", "admin@example.com")}',
-            '-F', f'videofile=@{tmp_path}',
-        ]
-        # Add all other form fields (e.g., name, language, etc.)
-        for key, value in request.form.items():
-            cmd.extend(['-F', f'{key}={value}'])
-
-        # Add -k for self-signed certificate (if needed)
-        cmd.append('-k')
-
-        # Use -i to include headers in output, -s to suppress progress
-        cmd.extend(['-i', '-s'])
-
-        print("Running curl:", ' '.join(cmd))  # debug
-
-        # Execute curl
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
-
-        output = result.stdout
-
-        # Split headers and body (first blank line separates)
-        header_end = output.find('\r\n\r\n')
-        if header_end == -1:
-            header_end = output.find('\n\n')
-        if header_end != -1:
-            headers_part = output[:header_end]
-            body = output[header_end+2:]  # skip the blank line
-        else:
-            headers_part = ''
-            body = output
-
-        # Parse status code
-        status_line = headers_part.split('\n')[0] if headers_part else ''
-        status = 500
-        if 'HTTP/' in status_line:
-            try:
-                status = int(status_line.split(' ')[1])
-            except:
-                pass
-
-        # Extract Location header
-        location = None
-        for line in headers_part.split('\n'):
-            if line.lower().startswith('location:'):
-                location = line.split(':', 1)[1].strip()
-                break
-
-        # If redirect to Dex, return 401
-        if status in (301, 302, 303, 307) and location and ('dex' in location or '/_oauth' in location):
-            return jsonify({'error': 'Authentication required. Please log in again.'}), 401
-
-        # Forward response
-        flask_response = app.make_response(body)
-        flask_response.status_code = status
-        if location:
-            flask_response.headers['Location'] = location
-        return flask_response
-
-    except subprocess.TimeoutExpired:
-        return jsonify({'error': 'Proxy timeout'}), 500
-    except Exception as e:
-        return jsonify({'error': f'Proxy error: {str(e)}'}), 500
-    finally:
-        # Clean up temp file
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-            
-# ─── PROXY ENDPOINTS FOR OAuth ─────────────────────────────────────────────
 
 @app.route('/dex/token', methods=['POST'])
 def dex_token():
-    """
-    Forward token exchange to the internal server's /dex/token.
-    Returns the exact response from the internal server.
-    """
+    """Forward token exchange to the internal server's /dex/token."""
     try:
-        # Copy headers except 'host' to avoid conflicts
         headers = {k: v for k, v in request.headers if k.lower() != 'host'}
         resp = requests.post(
             f"{INTERNAL_SERVER_URL}/dex/token",
@@ -524,7 +593,6 @@ def dex_token():
             timeout=30,
             verify=False
         )
-        # Return the exact status, headers, and body
         return (resp.content, resp.status_code, resp.headers.items())
     except requests.exceptions.RequestException as e:
         return jsonify({'error': f'Proxy error: {str(e)}'}), 500
@@ -532,10 +600,7 @@ def dex_token():
 
 @app.route('/dex/userinfo', methods=['GET'])
 def dex_userinfo():
-    """
-    Forward userinfo request to the internal server's /dex/userinfo.
-    Returns the exact response from the internal server.
-    """
+    """Forward userinfo request to the internal server's /dex/userinfo."""
     try:
         headers = {k: v for k, v in request.headers if k.lower() != 'host'}
         resp = requests.get(
@@ -550,8 +615,7 @@ def dex_userinfo():
         return jsonify({'error': f'Proxy error: {str(e)}'}), 500
 
 
-# ─── Debug endpoints ────────────────────────────────────────────────────────
-
+# ─── Debug endpoints ──────────────────────────────────────────────────────
 @app.route('/debug-videos', methods=['GET'])
 def debug_videos():
     """Debug: return all video metadata."""
@@ -567,20 +631,26 @@ def debug_jobs():
 @app.route('/clear-videos', methods=['POST'])
 def clear_videos():
     """Clear all uploaded videos (except the dummy one)."""
+    for video in videos:
+        if video.get('file_name') and video['file_name'] != 'sample.mp4':
+            file_path = os.path.join(UPLOAD_FOLDER, video['file_name'])
+            if os.path.exists(file_path):
+                os.remove(file_path)
     videos.clear()
     videos.append(dummy_project)
     chunk_storage.clear()
+    jobs.clear()
     return jsonify({'message': 'Cleared'}), 200
 
 
 # ─── Main ──────────────────────────────────────────────────────────────────
-
 if __name__ == '__main__':
-    # Suppress insecure request warnings (optional)
+    # Suppress insecure request warnings
     try:
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     except ImportError:
-        pass  # urllib3 not installed, continue anyway
+        pass
 
-    app.run(port=5000, debug=True)
+    logging.info("Starting merged server on http://localhost:5000")
+    app.run(host='0.0.0.0', port=5000, debug=True)
