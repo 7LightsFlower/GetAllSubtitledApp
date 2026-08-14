@@ -46,10 +46,10 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
     setState(() => _isFetching = true);
 
     try {
-      // Get the cookie token (not Bearer)
+      // Get cookie token
       final token = await InternalAuthService.getToken();
       if (token == null || token.isEmpty) {
-        throw Exception('Not connected to internal server. Please go back and connect.');
+        throw Exception('No token. Use "Manual Token" or "Connect".');
       }
 
       final response = await http.get(
@@ -79,7 +79,9 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
           }
         }
       } else if (response.statusCode == 401 || response.statusCode == 403) {
-        throw Exception('Authentication failed. Please reconnect.');
+        // Token expired – clear and redirect to login
+        await InternalAuthService.clearTokens();
+        throw Exception('Session expired. Please log in again.');
       } else {
         throw Exception('Failed to load job status (HTTP ${response.statusCode})');
       }
@@ -103,10 +105,6 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
     _pollTimer?.cancel();
     _pollTimer = null;
     _fetchStatus();
-  }
-
-  void _goBack() {
-    Navigator.pop(context);
   }
 
   @override
@@ -137,11 +135,6 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
                         onPressed: _manualRefresh,
                         child: const Text('Retry'),
                       ),
-                      const SizedBox(height: 8),
-                      TextButton(
-                        onPressed: _goBack,
-                        child: const Text('Go Back'),
-                      ),
                     ],
                   ),
                 )
@@ -158,7 +151,6 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Status
           Row(
             children: [
               Icon(
@@ -182,7 +174,6 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
           ),
           const SizedBox(height: 16),
 
-          // Progress bar
           if (status != 'completed') ...[
             LinearProgressIndicator(
               value: data['progress'] ?? 0.0,
@@ -197,7 +188,6 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
             const SizedBox(height: 16),
           ],
 
-          // Transcript
           if (data['transcript'] != null) ...[
             const Text(
               'Transcript',
@@ -218,7 +208,6 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
             const SizedBox(height: 16),
           ],
 
-          // Segments
           if (data['segments'] != null && data['segments'] is List) ...[
             const Text(
               'Segments',
@@ -241,7 +230,6 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
             const SizedBox(height: 16),
           ],
 
-          // Complete message
           if (status == 'completed')
             const Center(
               child: Text(

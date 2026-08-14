@@ -8,7 +8,6 @@ import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:mime/mime.dart';
 import 'package:asr_live_translator/screens/live_output_screen.dart';
 
 class JobConfigurationScreen extends StatefulWidget {
@@ -302,102 +301,67 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     required String smartChaptering,
     required String format,
   }) async {
-    // Use the proxy URL instead of direct internal server
-    // This avoids CORS issues because the proxy adds the CORS headers
-    const uploadUrl = '$authBaseUrl/upload-lecture';
-    
-    // Build fields as a Map (not list of tuples, since proxy expects standard form data)
-    final fields = <String, String>{
-      'path': '/home/$userEmail',
-      'name': sessionName,
-      'availability': availability,
-      'topicname': sessionName,
-      'date': DateTime.now().toIso8601String().split('T').first,
-      'speakername': 'Christian Huber',
-      'format': format,
-      'smartChaptering': smartChaptering,
-      'errorCorrection': 'None',
-      'ttsQualityMode': 'high_quality',
-    };
-    
-    // Input languages - use comma-separated or repeat with different keys
-    // Some proxies handle this differently, try both approaches
-    if (inputLanguages.isNotEmpty) {
-      // Approach 1: Comma-separated
-      fields['language'] = inputLanguages.join(',');
-      // Approach 2: Repeat the key (some proxies support this)
-      // for (int i = 0; i < inputLanguages.length; i++) {
-      //   fields['language_$i'] = inputLanguages[i];
-      // }
+    const uploadUrl = '$flaskServerUrl/upload';
+
+    // 1. Build FormData
+    final formData = html.FormData();
+
+    // Token (the Flask server expects this as a form field)
+    formData.append('token', token);
+
+    // Required fields (matching the HTML form)
+    formData.append('path', '/home/$userEmail');
+    formData.append('name', sessionName);
+    formData.append('availability', availability);
+    formData.append('topicname', sessionName);
+    formData.append('date', DateTime.now().toIso8601String().split('T').first);
+    formData.append('speakername', 'Christian Huber');
+    formData.append('format', format);
+    formData.append('smartChaptering', smartChaptering);
+    formData.append('errorCorrection', 'None');
+    formData.append('ttsQualityMode', 'high_quality');
+
+    // Multiple language fields
+    for (final lang in inputLanguages) {
+      formData.append('language', lang);
     }
-    
-    // Output languages (translation targets)
-    if (outputLanguages.isNotEmpty) {
-      fields['mtLanguage'] = outputLanguages.join(',');
+    // Multiple translation target fields
+    for (final lang in outputLanguages) {
+      formData.append('mtLanguage', lang);
     }
-    
-    // Audio languages (TTS targets)
-    if (audioLanguages.isNotEmpty) {
-      fields['audioLanguage'] = audioLanguages.join(',');
-    }
-    
-    // Checkbox-style flags
-    if (profanityFilter) fields['profanity'] = '1';
-    if (filterMusic) fields['filter_music'] = '1';
-    if (enableSummarization) fields['summarization'] = '1';
-    if (enableLiveNotes) fields['notes'] = '1';
-    if (enableAIAssistant) fields['aiassistant'] = '1';
-    if (enableDiarization) fields['saasr'] = '1';
-    
-    if (kDebugMode) {
-      print('📤 [DEBUG] Upload URL (via proxy): $uploadUrl');
-      print('📤 [DEBUG] File: $fileName (${videoBytes.length} bytes)');
-      print('📤 [DEBUG] Fields: $fields');
-      print('🔑 [DEBUG] Using token: $token');
-    }
-    
-    try {
-      // Use http.MultipartRequest for the upload
-      final request = http.MultipartRequest('POST', Uri.parse(uploadUrl));
-      
-      // IMPORTANT: For the proxy, we need to send the token differently
-      // The proxy likely expects it as a header or in the cookie
-      // Try both approaches:
-      request.headers['Cookie'] = '_forward_auth=$token';
-      // Also add as a header (some proxies prefer this)
-      request.headers['X-Forward-Auth'] = token;
-      // Or as a form field
-      request.fields['_forward_auth'] = token;
-      
-      // Add all other fields
-      request.fields.addAll(fields);
-      
-      // Add the video file
-      final mimeType = lookupMimeType(fileName) ?? 'video/mp4';
-      request.files.add(
-        http.MultipartFile.fromBytes(
-          'videofile',
-          videoBytes,
-          filename: fileName,
-          contentType: http.MediaType.parse(mimeType),
-        ),
-      );
-      
-      // Send the request
-      final streamedResponse = await request.send();
-      final response = await http.Response.fromStream(streamedResponse);
-      
-      if (kDebugMode) {
-        print('📥 [DEBUG] Upload response status: ${response.statusCode}');
-        print('📥 [DEBUG] Upload response headers: ${response.headers}');
-        print('📥 [DEBUG] Upload body preview: ${response.body.substring(0, response.body.length > 500 ? 500 : response.body.length)}');
-      }
-      
-      // Handle response
-      if (response.statusCode == 302 || response.statusCode == 303) {
-        final location = response.headers['location'];
-        if (location == null) throw Exception('Redirect location missing.');
-        final sessionId = Uri.parse(location).pathSegments.last;
+    // (We skip audioLanguages – not used by the Flask server HTML)
+
+    // Checkboxes – send '1' if enabled
+    if (profanityFilter) formData.append('profanity', '1');
+    if (filterMusic) formData.append('filter_music', '1');
+    if (enableSummarization) formData.append('summarization', '1');
+    if (enableLiveNotes) formData.append('notes', '1');
+    if (enableAIAssistant) formData.append('aiassistant', '1');
+    if (enableDiarization) formData.append('saasr', '1');
+
+    // Video file
+    final blob = html.Blob([videoBytes]);
+    formData.appendBlob('videofile', blob, fileName);
+
+    // 2. Send the request
+    final request = html.HttpRequest();
+    request.open('POST', uploadUrl);
+    // No need to set cookies or custom headers – token is in the form
+    request.send(formData);
+
+    await request.onLoadEnd.first;
+
+    // Guard against null status (should not happen after load end, but safe)
+    final status = request.status ?? 0;
+    final responseText = request.responseText;
+    final finalUrl = request.responseUrl; // final URL after any redirects
+
+    // 3. Handle response
+    if (status >= 200 && status < 300) {
+      // Check if we were redirected to a session page
+      if (finalUrl != null && finalUrl.contains('/session/')) {
+        final uri = Uri.parse(finalUrl);
+        final sessionId = uri.pathSegments.last;
         if (mounted) {
           Navigator.pushReplacement(
             context,
@@ -409,64 +373,33 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             ),
           );
         }
-      } else if (response.statusCode == 200) {
-        if (response.body.contains('dex') || response.body.contains('Log in')) {
-          throw Exception('Authentication failed. Please check your token.');
-        }
-        // Try to parse the response for session ID
-        try {
-          final data = jsonDecode(response.body);
-          if (data['session_id'] != null) {
-            final sessionId = data['session_id'].toString();
-            if (mounted) {
-              Navigator.pushReplacement(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => LiveOutputScreen(
-                    videoKey: widget.videoKey,
-                    jobId: sessionId,
-                  ),
-                ),
-              );
-            }
-            return;
-          }
-        } catch (_) {
-          // Not JSON, continue with error
-        }
-        throw Exception('Unexpected 200 response, expected redirect. Body: ${response.body}');
-      } else {
-        throw Exception('Upload failed (HTTP ${response.statusCode}). ${response.body}');
+        return;
       }
-    } catch (e) {
-      if (kDebugMode) print('❌ [DEBUG] Upload error: $e');
-      rethrow;
-    }
-  }
 
-  void _handleUploadResponse(int? status, String? location, String body) {
-    final effectiveStatus = status ?? 0;
-    if (effectiveStatus == 302 || effectiveStatus == 303) {
-      if (location == null) throw Exception('Redirect location missing.');
-      final sessionId = Uri.parse(location).pathSegments.last;
-      if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => LiveOutputScreen(
-              videoKey: widget.videoKey,
-              jobId: sessionId,
-            ),
-          ),
-        );
-      }
-    } else if (effectiveStatus == 200) {
-      if (body.contains('dex') || body.contains('Log in')) {
-        throw Exception('Authentication failed. Please log in again.');
-      }
-      throw Exception('Unexpected 200 response, expected redirect. Body: $body');
+      // Alternatively, the response might be JSON with a session_id
+      try {
+        final data = jsonDecode(responseText ?? '');
+        if (data['session_id'] != null) {
+          final sessionId = data['session_id'].toString();
+          if (mounted) {
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(
+                builder: (_) => LiveOutputScreen(
+                  videoKey: widget.videoKey,
+                  jobId: sessionId,
+                ),
+              ),
+            );
+          }
+          return;
+        }
+      } catch (_) {}
+
+      // If we get here, something unexpected happened
+      throw Exception('Unexpected response: $responseText');
     } else {
-      throw Exception('Upload failed (HTTP $effectiveStatus). $body');
+      throw Exception('Upload failed (HTTP $status): $responseText');
     }
   }
 

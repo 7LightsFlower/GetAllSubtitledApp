@@ -10,6 +10,7 @@ const String publicServerUrl = 'https://GetAllSubtitled.dataforlearningmachines.
 
 /// Internal backend server (all API calls except registration)
 const String internalServerUrl = 'https://lt2srv-sscherrer.isl.iar.kit.edu';
+const String flaskServerUrl = 'http://localhost:8081'; // adjust to your Flask host/port
 
 // ─── Environment mode (for local testing) ─────────────────────
 const bool isDevelopment = true;   // set false for production
