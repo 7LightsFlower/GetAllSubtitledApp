@@ -61,6 +61,13 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   final TextEditingController _tokenController = TextEditingController();
   String _tokenStatus = '';
 
+  // Response display state
+  String _responseMessage = '';
+  String _responseHtml = '';
+  String _sessionUrl = '';
+  String _sessionId = '';
+  bool _showResponse = false;
+
   // --- Constants ---
   static const List<String> _allInputLanguages = [
     'en', 'de', 'fr', 'es', 'it', 'ja', 'ko', 'zh', 'ru', 'ar',
@@ -334,14 +341,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     required double pause,
   }) async {
     const uploadUrl = '$flaskServerUrl/upload';
-      
-    // Debug: Print the URL being used
-    if (kDebugMode) {
-      print('🔍 UPLOAD URL: $uploadUrl');
-    }
-    if (kDebugMode) {
-      print('🔍 flaskServerUrl: $flaskServerUrl');
-    }
 
     final formData = html.FormData();
 
@@ -401,26 +400,38 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     final finalUrl = request.responseUrl;
 
     if (status >= 200 && status < 300) {
+      // Store the response for display
+      if (mounted) {
+        try {
+          final data = jsonDecode(responseText ?? '{}');
+          setState(() {
+            _responseMessage = data['data']?['raw_response'] ?? 
+                               data['data']?['message'] ?? 
+                               data['message'] ??
+                               'Upload successful!';
+            _responseHtml = data['html'] ?? '';
+            _sessionUrl = data['session_url'] ?? '';
+            _sessionId = data['session_id']?.toString() ?? '';
+            _showResponse = true;
+          });
+        } catch (_) {
+          setState(() {
+            _responseMessage = responseText ?? 'Upload successful!';
+            _showResponse = true;
+          });
+        }
+      }
+
+      // Check for session ID in redirect URL
       if (finalUrl != null && finalUrl.contains('/archivesession/')) {
         final sessionId = finalUrl.split('/archivesession/')[-1].split('/')[0];
         if (mounted) {
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (_) => LiveOutputScreen(
-                videoKey: widget.videoKey,
-                jobId: sessionId,
-              ),
-            ),
-          );
-        }
-        return;
-      }
-
-      try {
-        final data = jsonDecode(responseText ?? '');
-        if (data['session_id'] != null) {
-          final sessionId = data['session_id'].toString();
+          setState(() {
+            _sessionId = sessionId;
+            _sessionUrl = finalUrl;
+          });
+          // Show response for a moment before navigating
+          await Future.delayed(const Duration(seconds: 3));
           if (mounted) {
             Navigator.pushReplacement(
               context,
@@ -432,14 +443,324 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ),
             );
           }
+        }
+        return;
+      }
+
+      // Check for session ID in JSON response
+      try {
+        final data = jsonDecode(responseText ?? '');
+        if (data['session_id'] != null) {
+          final sessionId = data['session_id'].toString();
+          if (mounted) {
+            setState(() {
+              _sessionId = sessionId;
+              _sessionUrl = data['session_url'] ?? '';
+            });
+            // Show response for a moment before navigating
+            await Future.delayed(const Duration(seconds: 3));
+            if (mounted) {
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => LiveOutputScreen(
+                    videoKey: widget.videoKey,
+                    jobId: sessionId,
+                  ),
+                ),
+              );
+            }
+          }
           return;
         }
       } catch (_) {}
 
-      throw Exception('Unexpected response: $responseText');
+      // If no session ID, just show the response and stay on this screen
+      return;
     } else {
+      // Handle error
+      String errorMsg = 'Upload failed (HTTP $status)';
+      try {
+        final errorBody = jsonDecode(responseText ?? '{}');
+        errorMsg = errorBody['error'] ?? errorBody['message'] ?? errorMsg;
+      } catch (_) {}
+      
+      if (mounted) {
+        setState(() {
+          _responseMessage = '❌ Error: $errorMsg';
+          _showResponse = true;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(errorMsg), backgroundColor: Colors.red),
+        );
+      }
       throw Exception('Upload failed (HTTP $status): $responseText');
     }
+  }
+
+  // --- Response display widget ---
+  Widget _buildResponseDisplay() {
+    if (!_showResponse) return const SizedBox.shrink();
+    
+    return Container(
+      margin: const EdgeInsets.only(top: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.grey[50],
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.grey[300]!),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.info_outline, color: Colors.blue),
+              const SizedBox(width: 8),
+              const Text(
+                'Response from Server:',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+              ),
+              const Spacer(),
+              IconButton(
+                icon: const Icon(Icons.close, size: 20),
+                onPressed: () {
+                  setState(() {
+                    _showResponse = false;
+                  });
+                },
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          
+          // Session link if available
+          if (_sessionUrl.isNotEmpty) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.blue[50],
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.blue[200]!),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    '📎 Session Link:',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 4),
+                  InkWell(
+                    onTap: () {
+                      // Open in new tab
+                      html.window.open(_sessionUrl, '_blank');
+                    },
+                    child: Text(
+                      _sessionUrl,
+                      style: TextStyle(
+                        color: Colors.blue[700],
+                        decoration: TextDecoration.underline,
+                      ),
+                    ),
+                  ),
+                  if (_sessionId.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      'Session ID: $_sessionId',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey[600],
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
+          
+          // HTML content if available - show as formatted text with tap to view full
+          if (_responseHtml.isNotEmpty) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: Colors.grey[200]!),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Server Response:',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  // Show first 500 characters of the HTML (stripped of tags)
+                  Text(
+                    _stripHtmlTags(_responseHtml),
+                    style: const TextStyle(fontSize: 14),
+                    maxLines: 5,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 8),
+                  TextButton.icon(
+                    onPressed: () {
+                      _showFullResponseDialog();
+                    },
+                    icon: const Icon(Icons.open_in_full),
+                    label: const Text('View Full Response'),
+                  ),
+                ],
+              ),
+            ),
+          ] else if (_responseMessage.isNotEmpty) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: Colors.grey[200]!),
+              ),
+              child: Text(
+                _responseMessage,
+                style: const TextStyle(fontSize: 14),
+              ),
+            ),
+          ],
+          
+          // Action buttons
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            children: [
+              if (_sessionUrl.isNotEmpty)
+                ElevatedButton.icon(
+                  onPressed: () {
+                    html.window.open(_sessionUrl, '_blank');
+                  },
+                  icon: const Icon(Icons.open_in_new),
+                  label: const Text('Open Session'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.green,
+                    foregroundColor: Colors.white,
+                  ),
+                ),
+              ElevatedButton(
+                onPressed: () {
+                  setState(() {
+                    _showResponse = false;
+                  });
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.grey[300],
+                  foregroundColor: Colors.black,
+                ),
+                child: const Text('Close'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Helper method to strip HTML tags
+  String _stripHtmlTags(String html) {
+    return html.replaceAll(RegExp(r'<[^>]*>'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+  }
+
+  // Show full response in a dialog
+  void _showFullResponseDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Full Server Response'),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 400,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Show session link if available
+                if (_sessionUrl.isNotEmpty) ...[
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.blue[50],
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          '📎 Session Link:',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        InkWell(
+                          onTap: () {
+                            html.window.open(_sessionUrl, '_blank');
+                            Navigator.pop(context);
+                          },
+                          child: Text(
+                            _sessionUrl,
+                            style: TextStyle(
+                              color: Colors.blue[700],
+                              decoration: TextDecoration.underline,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+                // Show the full HTML response
+                const Text(
+                  'Response HTML:',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[50],
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: Colors.grey[300]!),
+                  ),
+                  child: SelectableText(
+                    _responseHtml.isNotEmpty ? _responseHtml : _responseMessage,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+          if (_sessionUrl.isNotEmpty)
+            TextButton.icon(
+              onPressed: () {
+                html.window.open(_sessionUrl, '_blank');
+                Navigator.pop(context);
+              },
+              icon: const Icon(Icons.open_in_new),
+              label: const Text('Open Session'),
+            ),
+        ],
+      ),
+    );
   }
 
   // --- Widget helpers ---
@@ -975,6 +1296,9 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                     ? const CircularProgressIndicator(color: Colors.white)
                     : const Text('Start Processing'),
               ),
+              
+              // Response display
+              _buildResponseDisplay(),
             ],
           ),
         ),
