@@ -66,6 +66,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   String _responseHtml = '';
   String _sessionUrl = '';
   String _sessionId = '';
+  String _videoKey = '';  // Add this - FIXED
   bool _showResponse = false;
 
   // --- Constants ---
@@ -412,13 +413,20 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             _responseHtml = data['html'] ?? '';
             _sessionUrl = data['session_url'] ?? '';
             _sessionId = data['session_id']?.toString() ?? '';
+            _videoKey = data['video_key'] ?? '';  // Extract video key - FIXED
             _showResponse = true;
           });
+          // Print to debug console
+          _printSessionLink();
         } catch (_) {
+          // If not JSON, parse the HTML directly
+          _parseHtmlResponse(responseText ?? '');
           setState(() {
             _responseMessage = responseText ?? 'Upload successful!';
             _showResponse = true;
           });
+          // Print to debug console
+          _printSessionLink();
         }
       }
 
@@ -498,6 +506,80 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     }
   }
 
+  // Add this helper method to parse HTML response
+  void _parseHtmlResponse(String html) {
+    // Extract session link
+    final RegExp linkRegex = RegExp(r'<a href="([^"]+)"[^>]*>([^<]+)</a>');
+    final linkMatch = linkRegex.firstMatch(html);
+    if (linkMatch != null) {
+      final url = linkMatch.group(1) ?? '';
+      if (url.isNotEmpty) {
+        // Clean up the URL - remove any extra characters
+        String cleanUrl = url.replaceAll(RegExp(r'\s+'), '');
+        // Fix common typos in the URL
+        cleanUrl = cleanUrl.replaceAll('ist.iar', 'isl.iar');
+        _sessionUrl = cleanUrl;
+        
+        // Extract session ID from URL
+        if (cleanUrl.contains('/archivesession/')) {
+          _sessionId = cleanUrl.split('/archivesession/')[-1].split('/')[0];
+          // Clean up session ID - remove any trailing characters
+          _sessionId = _sessionId.replaceAll(RegExp(r'\s+'), '');
+          _sessionId = _sessionId.split('"')[0];
+        }
+      }
+    }
+    
+    // Extract video key
+    final RegExp videoKeyRegex = RegExp(r'<strong>Video Key:</strong>\s*([^<]+)');
+    final videoMatch = videoKeyRegex.firstMatch(html);
+    if (videoMatch != null && videoMatch.groupCount >= 1) {
+      _videoKey = videoMatch.group(1)?.trim() ?? '';
+    }
+    
+    // Extract session ID if not already found
+    if (_sessionId.isEmpty) {
+      final RegExp sessionIdRegex = RegExp(r'<strong>Session ID:</strong>\s*([^<]+)');
+      final sessionMatch = sessionIdRegex.firstMatch(html);
+      if (sessionMatch != null && sessionMatch.groupCount >= 1) {
+        _sessionId = sessionMatch.group(1)?.trim() ?? '';
+      }
+    }
+    
+    // Store the HTML for display
+    _responseHtml = html;
+    
+    // Debug output
+    if (kDebugMode) {
+      print('🔍 [PARSED] Session URL: $_sessionUrl');
+      print('🔍 [PARSED] Session ID: $_sessionId');
+      print('🔍 [PARSED] Video Key: $_videoKey');
+    }
+  }
+
+  // Add this method to print session link to debug console
+  void _printSessionLink() {
+    if (_sessionUrl.isNotEmpty) {
+      if (kDebugMode) {
+        print('═══════════════════════════════════════════════════════════');
+        print('📎 SESSION LINK:');
+        print(_sessionUrl);
+        print('═══════════════════════════════════════════════════════════');
+      }
+
+    }
+    if (_sessionId.isNotEmpty) {
+      if (kDebugMode) {
+        print('🆔 SESSION ID: $_sessionId');
+      }
+    }
+    if (_videoKey.isNotEmpty) {
+      if (kDebugMode) {
+        print('🎬 VIDEO KEY: $_videoKey');
+      }
+    }
+  }
+
   // --- Response display widget ---
   Widget _buildResponseDisplay() {
     if (!_showResponse) return const SizedBox.shrink();
@@ -536,43 +618,116 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           ),
           const SizedBox(height: 8),
           
-          // Session link if available
+          // Success message
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.green[50],
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.green[200]!),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.green[700]),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '✅ Upload Successful!',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.green[700],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          
+          // Session link - EXTRACTED FROM HTML
           if (_sessionUrl.isNotEmpty) ...[
             Container(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(14),
               decoration: BoxDecoration(
                 color: Colors.blue[50],
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.blue[200]!),
+                border: Border.all(color: Colors.blue[300]!),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
-                    '📎 Session Link:',
-                    style: TextStyle(fontWeight: FontWeight.bold),
+                  const Row(
+                    children: [
+                      Icon(Icons.link, color: Colors.blue),
+                      SizedBox(width: 8),
+                      Text(
+                        '📎 Session Link:',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                          color: Colors.blue,
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 4),
-                  InkWell(
-                    onTap: () {
-                      // Open in new tab
-                      html.window.open(_sessionUrl, '_blank');
-                    },
-                    child: Text(
-                      _sessionUrl,
-                      style: TextStyle(
-                        color: Colors.blue[700],
-                        decoration: TextDecoration.underline,
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: InkWell(
+                      onTap: () {
+                        html.window.open(_sessionUrl, '_blank');
+                      },
+                      child: Text(
+                        _sessionUrl,
+                        style: TextStyle(
+                          color: Colors.blue[700],
+                          decoration: TextDecoration.underline,
+                          fontSize: 13,
+                        ),
+                        softWrap: true,
                       ),
                     ),
                   ),
                   if (_sessionId.isNotEmpty) ...[
-                    const SizedBox(height: 4),
-                    Text(
-                      'Session ID: $_sessionId',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.grey[600],
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.grey[100],
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.fingerprint, size: 14, color: Colors.grey),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Session ID:',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 11,
+                                    color: Colors.grey,
+                                  ),
+                                ),
+                                Text(
+                                  _sessionId,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.grey[700],
+                                  ),
+                                  softWrap: true,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ],
@@ -582,60 +737,71 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             const SizedBox(height: 8),
           ],
           
-          // HTML content if available - show as formatted text with tap to view full
-          if (_responseHtml.isNotEmpty) ...[
+          // Video Key if available
+          if (_videoKey.isNotEmpty) ...[
             Container(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: Colors.grey[100],
                 borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: Colors.grey[200]!),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              child: Row(
                 children: [
-                  const Text(
-                    'Server Response:',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 8),
-                  // Show first 500 characters of the HTML (stripped of tags)
-                  Text(
-                    _stripHtmlTags(_responseHtml),
-                    style: const TextStyle(fontSize: 14),
-                    maxLines: 5,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 8),
-                  TextButton.icon(
-                    onPressed: () {
-                      _showFullResponseDialog();
-                    },
-                    icon: const Icon(Icons.open_in_full),
-                    label: const Text('View Full Response'),
+                  const Icon(Icons.video_label, size: 16, color: Colors.grey),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Video Key: $_videoKey',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey[700],
+                      ),
+                    ),
                   ),
                 ],
               ),
             ),
-          ] else if (_responseMessage.isNotEmpty) ...[
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: Colors.grey[200]!),
-              ),
-              child: Text(
-                _responseMessage,
-                style: const TextStyle(fontSize: 14),
-              ),
-            ),
+            const SizedBox(height: 8),
           ],
           
+          // Show a preview of the response
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(color: Colors.grey[200]!),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Response Preview:',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[50],
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    _stripHtmlTags(_responseHtml),
+                    style: const TextStyle(fontSize: 12),
+                    maxLines: 5,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          
           // Action buttons
-          const SizedBox(height: 8),
+          const SizedBox(height: 16),
           Wrap(
             spacing: 8,
+            runSpacing: 8,
             children: [
               if (_sessionUrl.isNotEmpty)
                 ElevatedButton.icon(
@@ -649,16 +815,23 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                     foregroundColor: Colors.white,
                   ),
                 ),
-              ElevatedButton(
+              ElevatedButton.icon(
+                onPressed: () {
+                  _showFullResponseDialog();
+                },
+                icon: const Icon(Icons.open_in_full),
+                label: const Text('View Full Response'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue,
+                  foregroundColor: Colors.white,
+                ),
+              ),
+              OutlinedButton(
                 onPressed: () {
                   setState(() {
                     _showResponse = false;
                   });
                 },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.grey[300],
-                  foregroundColor: Colors.black,
-                ),
                 child: const Text('Close'),
               ),
             ],
@@ -668,80 +841,142 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     );
   }
 
-  // Helper method to strip HTML tags
+  // Helper method to properly strip HTML tags and decode HTML entities
   String _stripHtmlTags(String html) {
-    return html.replaceAll(RegExp(r'<[^>]*>'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+    // Remove HTML tags
+    String text = html.replaceAll(RegExp(r'<[^>]*>'), ' ');
+    
+    // Decode common HTML entities
+    text = text
+        .replaceAll('&nbsp;', ' ')
+        .replaceAll('&amp;', '&')
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll('&quot;', '"')
+        .replaceAll('&apos;', "'")
+        .replaceAll('&#39;', "'")
+        .replaceAll('&copy;', '©')
+        .replaceAll('&reg;', '®')
+        .replaceAll('&trade;', '™')
+        .replaceAll('&bull;', '•')
+        .replaceAll('&hellip;', '…');
+    
+    // Replace multiple spaces with single space
+    text = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    
+    return text;
+  }
+
+  // Extract video key from HTML response
+  String _extractVideoKey(String html) {
+    final RegExp regex = RegExp(r'<strong>Video Key:</strong>\s*([^<]+)');
+    final match = regex.firstMatch(html);
+    if (match != null && match.groupCount >= 1) {
+      return match.group(1)?.trim() ?? '';
+    }
+    return '';
   }
 
   // Show full response in a dialog
   void _showFullResponseDialog() {
+    final String cleanText = _stripHtmlTags(_responseHtml);
+    final String videoKey = _extractVideoKey(_responseHtml);
+    
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Full Server Response'),
+        title: const Row(
+          children: [
+            Icon(Icons.info_outline, color: Colors.blue),
+            SizedBox(width: 8),
+            Text('Full Server Response'),
+          ],
+        ),
         content: SizedBox(
           width: double.maxFinite,
-          height: 400,
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Show session link if available
-                if (_sessionUrl.isNotEmpty) ...[
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Colors.blue[50],
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          '📎 Session Link:',
-                          style: TextStyle(fontWeight: FontWeight.bold),
+          height: 500,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Show session link if available
+              if (_sessionUrl.isNotEmpty) ...[
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.blue[50],
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        '📎 Session Link:',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      InkWell(
+                        onTap: () {
+                          html.window.open(_sessionUrl, '_blank');
+                          Navigator.pop(context);
+                        },
+                        child: Text(
+                          _sessionUrl,
+                          style: TextStyle(
+                            color: Colors.blue[700],
+                            decoration: TextDecoration.underline,
+                          ),
                         ),
-                        InkWell(
-                          onTap: () {
-                            html.window.open(_sessionUrl, '_blank');
-                            Navigator.pop(context);
-                          },
-                          child: Text(
-                            _sessionUrl,
-                            style: TextStyle(
-                              color: Colors.blue[700],
-                              decoration: TextDecoration.underline,
-                            ),
+                      ),
+                      if (_sessionId.isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          'Session ID: $_sessionId',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey[600],
                           ),
                         ),
                       ],
-                    ),
+                    ],
                   ),
-                  const SizedBox(height: 16),
-                ],
-                // Show the full HTML response
-                const Text(
-                  'Response HTML:',
-                  style: TextStyle(fontWeight: FontWeight.bold),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 16),
+              ],
+              // Show video key if available
+              if (videoKey.isNotEmpty) ...[
                 Container(
                   padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[100],
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    'Video Key: $videoKey',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+              // Show the cleaned response text
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
                     color: Colors.grey[50],
                     borderRadius: BorderRadius.circular(4),
                     border: Border.all(color: Colors.grey[300]!),
                   ),
-                  child: SelectableText(
-                    _responseHtml.isNotEmpty ? _responseHtml : _responseMessage,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontFamily: 'monospace',
+                  child: SingleChildScrollView(
+                    child: SelectableText(
+                      cleanText.isNotEmpty ? cleanText : _responseMessage,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        height: 1.5,
+                      ),
                     ),
                   ),
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
         ),
         actions: [

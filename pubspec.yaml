@@ -35,7 +35,6 @@ dependencies:
   mime: ^2.0.0
   path: ^1.9.0
   flutter_html: ^3.0.0
-  webview_flutter: ^4.14.1
 
 dev_dependencies:
   flutter_test:
