@@ -4,11 +4,11 @@ import 'dart:async';
 import 'dart:html' as html;
 import 'dart:convert';
 import 'package:asr_live_translator/constants.dart';
+import 'package:asr_live_translator/screens/session_output_screen.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:asr_live_translator/screens/live_output_screen.dart';
 
 class JobConfigurationScreen extends StatefulWidget {
   final String videoKey;
@@ -66,8 +66,17 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   String _responseHtml = '';
   String _sessionUrl = '';
   String _sessionId = '';
-  String _videoKey = '';  // Add this - FIXED
+  String _videoKey = '';
   bool _showResponse = false;
+
+  // Output checking state
+  bool _hasSessionId = false;
+  String _savedSessionId = '';
+  String _savedSessionUrl = '';
+  bool _isCheckingOutput = false;
+  String _outputStatus = '';
+  bool _outputReady = false;
+  int _outputFileCount = 0;
 
   // --- Constants ---
   static const List<String> _allInputLanguages = [
@@ -225,6 +234,109 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
       throw Exception('Not connected to internal server. Please click "Connect" or set a manual token first.');
     }
     return token;
+  }
+
+  // --- Output checking methods ---
+  Future<void> _checkOutput() async {
+    if (_savedSessionId.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _outputStatus = '❌ No session ID available. Please upload a video first.';
+        });
+      }
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _isCheckingOutput = true;
+        _outputStatus = '🔄 Checking for output files...';
+        _outputReady = false;
+      });
+    }
+
+    try {
+      final token = await _getToken();
+      final url = '$flaskServerUrl/session_output/$_savedSessionId';
+      
+      final response = await http.get(
+        Uri.parse(url),
+        headers: {
+          'Authorization': 'Bearer $token',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final totalFiles = data['total_files'] ?? 0;
+
+        if (totalFiles > 0) {
+          if (mounted) {
+            setState(() {
+              _isCheckingOutput = false;
+              _outputReady = true;
+              _outputFileCount = totalFiles;
+              _outputStatus = '✅ Output is ready! Found $totalFiles files.';
+            });
+            
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('✅ Output ready! $totalFiles files available.'),
+                backgroundColor: Colors.green,
+                duration: const Duration(seconds: 3),
+              ),
+            );
+          }
+        } else {
+          if (mounted) {
+            setState(() {
+              _isCheckingOutput = false;
+              _outputReady = false;
+              _outputStatus = '⏳ Still processing... No output files found yet.\n'
+                            'Please wait a few more minutes and try again.';
+            });
+          }
+        }
+      } else {
+        if (mounted) {
+          setState(() {
+            _isCheckingOutput = false;
+            _outputStatus = '❌ Failed to check output: ${response.statusCode}';
+          });
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isCheckingOutput = false;
+          _outputStatus = '❌ Error checking output: $e';
+        });
+      }
+    }
+  }
+
+  void _viewOutput() {
+    if (_savedSessionId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No session available. Please upload a video first.'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => SessionOutputScreen(
+          sessionId: _savedSessionId,
+          sessionUrl: _savedSessionUrl.isNotEmpty 
+              ? _savedSessionUrl 
+              : 'https://lt2srv-sscherrer.isl.iar.kit.edu/archivesession/$_savedSessionId',
+        ),
+      ),
+    );
   }
 
   // --- Submit ---
@@ -407,25 +519,22 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           final data = jsonDecode(responseText ?? '{}');
           setState(() {
             _responseMessage = data['data']?['raw_response'] ?? 
-                               data['data']?['message'] ?? 
-                               data['message'] ??
-                               'Upload successful!';
+                              data['data']?['message'] ?? 
+                              data['message'] ??
+                              'Upload successful!';
             _responseHtml = data['html'] ?? '';
             _sessionUrl = data['session_url'] ?? '';
             _sessionId = data['session_id']?.toString() ?? '';
-            _videoKey = data['video_key'] ?? '';  // Extract video key - FIXED
+            _videoKey = data['video_key'] ?? '';
             _showResponse = true;
           });
-          // Print to debug console
           _printSessionLink();
         } catch (_) {
-          // If not JSON, parse the HTML directly
           _parseHtmlResponse(responseText ?? '');
           setState(() {
             _responseMessage = responseText ?? 'Upload successful!';
             _showResponse = true;
           });
-          // Print to debug console
           _printSessionLink();
         }
       }
@@ -437,20 +546,21 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           setState(() {
             _sessionId = sessionId;
             _sessionUrl = finalUrl;
+            _savedSessionId = sessionId;
+            _savedSessionUrl = finalUrl;
+            _hasSessionId = true;
+            _outputStatus = '✅ Upload complete! Session ID: $sessionId\n'
+                           'Click "Check Output" to see if processing is finished.';
+            _outputReady = false;
           });
-          // Show response for a moment before navigating
-          await Future.delayed(const Duration(seconds: 3));
-          if (mounted) {
-            Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(
-                builder: (_) => LiveOutputScreen(
-                  videoKey: widget.videoKey,
-                  jobId: sessionId,
-                ),
-              ),
-            );
-          }
+          
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('✅ Upload complete! Session ID: $sessionId'),
+              backgroundColor: Colors.green,
+              duration: const Duration(seconds: 4),
+            ),
+          );
         }
         return;
       }
@@ -458,26 +568,27 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
       // Check for session ID in JSON response
       try {
         final data = jsonDecode(responseText ?? '');
-        if (data['session_id'] != null) {
-          final sessionId = data['session_id'].toString();
+        final sessionId = data['session_id']?.toString();
+        if (sessionId != null && sessionId.isNotEmpty) {
           if (mounted) {
             setState(() {
               _sessionId = sessionId;
               _sessionUrl = data['session_url'] ?? '';
+              _savedSessionId = sessionId;
+              _savedSessionUrl = data['session_url'] ?? '';
+              _hasSessionId = true;
+              _outputStatus = '✅ Upload complete! Session ID: $sessionId\n'
+                             'Click "Check Output" to see if processing is finished.';
+              _outputReady = false;
             });
-            // Show response for a moment before navigating
-            await Future.delayed(const Duration(seconds: 3));
-            if (mounted) {
-              Navigator.pushReplacement(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => LiveOutputScreen(
-                    videoKey: widget.videoKey,
-                    jobId: sessionId,
-                  ),
-                ),
-              );
-            }
+            
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('✅ Upload complete! Session ID: $sessionId'),
+                backgroundColor: Colors.green,
+                duration: const Duration(seconds: 4),
+              ),
+            );
           }
           return;
         }
@@ -506,38 +617,30 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     }
   }
 
-  // Add this helper method to parse HTML response
   void _parseHtmlResponse(String html) {
-    // Extract session link
     final RegExp linkRegex = RegExp(r'<a href="([^"]+)"[^>]*>([^<]+)</a>');
     final linkMatch = linkRegex.firstMatch(html);
     if (linkMatch != null) {
       final url = linkMatch.group(1) ?? '';
       if (url.isNotEmpty) {
-        // Clean up the URL - remove any extra characters
         String cleanUrl = url.replaceAll(RegExp(r'\s+'), '');
-        // Fix common typos in the URL
         cleanUrl = cleanUrl.replaceAll('ist.iar', 'isl.iar');
         _sessionUrl = cleanUrl;
         
-        // Extract session ID from URL
         if (cleanUrl.contains('/archivesession/')) {
           _sessionId = cleanUrl.split('/archivesession/')[-1].split('/')[0];
-          // Clean up session ID - remove any trailing characters
           _sessionId = _sessionId.replaceAll(RegExp(r'\s+'), '');
           _sessionId = _sessionId.split('"')[0];
         }
       }
     }
     
-    // Extract video key
     final RegExp videoKeyRegex = RegExp(r'<strong>Video Key:</strong>\s*([^<]+)');
     final videoMatch = videoKeyRegex.firstMatch(html);
     if (videoMatch != null && videoMatch.groupCount >= 1) {
       _videoKey = videoMatch.group(1)?.trim() ?? '';
     }
     
-    // Extract session ID if not already found
     if (_sessionId.isEmpty) {
       final RegExp sessionIdRegex = RegExp(r'<strong>Session ID:</strong>\s*([^<]+)');
       final sessionMatch = sessionIdRegex.firstMatch(html);
@@ -546,10 +649,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
       }
     }
     
-    // Store the HTML for display
     _responseHtml = html;
     
-    // Debug output
     if (kDebugMode) {
       print('🔍 [PARSED] Session URL: $_sessionUrl');
       print('🔍 [PARSED] Session ID: $_sessionId');
@@ -557,23 +658,27 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     }
   }
 
-  // Add this method to print session link to debug console
   void _printSessionLink() {
-    if (_sessionUrl.isNotEmpty) {
+    if (_sessionUrl.isNotEmpty && kDebugMode) {
       if (kDebugMode) {
         print('═══════════════════════════════════════════════════════════');
+      }
+      if (kDebugMode) {
         print('📎 SESSION LINK:');
+      }
+      if (kDebugMode) {
         print(_sessionUrl);
+      }
+      if (kDebugMode) {
         print('═══════════════════════════════════════════════════════════');
       }
-
     }
-    if (_sessionId.isNotEmpty) {
+    if (_sessionId.isNotEmpty && kDebugMode) {
       if (kDebugMode) {
         print('🆔 SESSION ID: $_sessionId');
       }
     }
-    if (_videoKey.isNotEmpty) {
+    if (_videoKey.isNotEmpty && kDebugMode) {
       if (kDebugMode) {
         print('🎬 VIDEO KEY: $_videoKey');
       }
@@ -618,7 +723,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           ),
           const SizedBox(height: 8),
           
-          // Success message
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
@@ -642,9 +746,35 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ],
             ),
           ),
+          
+          if (_savedSessionId.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.blue[50],
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.info_outline, size: 16, color: Colors.blue),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Session ID: $_savedSessionId',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.blue[700],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          
           const SizedBox(height: 12),
           
-          // Session link - EXTRACTED FROM HTML
           if (_sessionUrl.isNotEmpty) ...[
             Container(
               padding: const EdgeInsets.all(14),
@@ -737,7 +867,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             const SizedBox(height: 8),
           ],
           
-          // Video Key if available
           if (_videoKey.isNotEmpty) ...[
             Container(
               padding: const EdgeInsets.all(8),
@@ -764,7 +893,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             const SizedBox(height: 8),
           ],
           
-          // Show a preview of the response
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
@@ -797,7 +925,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             ),
           ),
           
-          // Action buttons
           const SizedBox(height: 16),
           Wrap(
             spacing: 8,
@@ -816,9 +943,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                   ),
                 ),
               ElevatedButton.icon(
-                onPressed: () {
-                  _showFullResponseDialog();
-                },
+                onPressed: _showFullResponseDialog,
                 icon: const Icon(Icons.open_in_full),
                 label: const Text('View Full Response'),
                 style: ElevatedButton.styleFrom(
@@ -841,12 +966,99 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     );
   }
 
-  // Helper method to properly strip HTML tags and decode HTML entities
-  String _stripHtmlTags(String html) {
-    // Remove HTML tags
-    String text = html.replaceAll(RegExp(r'<[^>]*>'), ' ');
+  // --- Output check section widget ---
+  Widget _buildOutputCheckSection() {
+    if (!_hasSessionId) return const SizedBox.shrink();
     
-    // Decode common HTML entities
+    return Container(
+      margin: const EdgeInsets.only(top: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.blue[50],
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.blue[200]!),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.folder_outlined, color: Colors.blue),
+              SizedBox(width: 8),
+              Text(
+                'Session Output',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Session ID: $_savedSessionId',
+            style: const TextStyle(fontSize: 12),
+          ),
+          const SizedBox(height: 8),
+          if (_outputStatus.isNotEmpty)
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(
+                _outputStatus,
+                style: const TextStyle(fontSize: 13),
+              ),
+            ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: _isCheckingOutput ? null : _checkOutput,
+                  icon: _isCheckingOutput
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Icon(Icons.refresh),
+                  label: Text(
+                    _isCheckingOutput ? 'Checking...' : 'Check Output',
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue,
+                    foregroundColor: Colors.white,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              if (_outputReady)
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _viewOutput,
+                    icon: const Icon(Icons.folder_open),
+                    label: Text('View Output ($_outputFileCount files)'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green,
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _stripHtmlTags(String html) {
+    String text = html.replaceAll(RegExp(r'<[^>]*>'), ' ');
     text = text
         .replaceAll('&nbsp;', ' ')
         .replaceAll('&amp;', '&')
@@ -860,14 +1072,10 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         .replaceAll('&trade;', '™')
         .replaceAll('&bull;', '•')
         .replaceAll('&hellip;', '…');
-    
-    // Replace multiple spaces with single space
     text = text.replaceAll(RegExp(r'\s+'), ' ').trim();
-    
     return text;
   }
 
-  // Extract video key from HTML response
   String _extractVideoKey(String html) {
     final RegExp regex = RegExp(r'<strong>Video Key:</strong>\s*([^<]+)');
     final match = regex.firstMatch(html);
@@ -877,7 +1085,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     return '';
   }
 
-  // Show full response in a dialog
   void _showFullResponseDialog() {
     final String cleanText = _stripHtmlTags(_responseHtml);
     final String videoKey = _extractVideoKey(_responseHtml);
@@ -898,7 +1105,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Show session link if available
               if (_sessionUrl.isNotEmpty) ...[
                 Container(
                   padding: const EdgeInsets.all(8),
@@ -941,7 +1147,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                 ),
                 const SizedBox(height: 16),
               ],
-              // Show video key if available
               if (videoKey.isNotEmpty) ...[
                 Container(
                   padding: const EdgeInsets.all(8),
@@ -956,7 +1161,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                 ),
                 const SizedBox(height: 8),
               ],
-              // Show the cleaned response text
               Expanded(
                 child: Container(
                   padding: const EdgeInsets.all(12),
@@ -1531,6 +1735,9 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                     ? const CircularProgressIndicator(color: Colors.white)
                     : const Text('Start Processing'),
               ),
+              
+              // Output check section
+              _buildOutputCheckSection(),
               
               // Response display
               _buildResponseDisplay(),
