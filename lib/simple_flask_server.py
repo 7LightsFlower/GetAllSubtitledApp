@@ -12,10 +12,19 @@ import threading
 import time
 import uuid
 import zipfile
+import io
 
 import requests
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
+
+# Try to import BeautifulSoup for HTML parsing
+try:
+    from bs4 import BeautifulSoup
+    HAS_BS4 = True
+except ImportError:
+    HAS_BS4 = False
+    logging.warning("BeautifulSoup not installed. Export functions will be limited.")
 
 logging.basicConfig(level=logging.DEBUG)
 app = Flask(__name__)
@@ -37,7 +46,6 @@ CORS(
     expose_headers=["Location", "Content-Disposition"],
 )
 
-# ─── Configuration ─────────────────────────────────────────────────────────
 INTERNAL_SERVER_URL = "https://lt2srv-sscherrer.isl.iar.kit.edu"
 TARGET_URL = f"{INTERNAL_SERVER_URL}/upload_lecture"
 BASE_URL = INTERNAL_SERVER_URL
@@ -46,7 +54,6 @@ SESSION_FOLDER = os.path.join(os.path.dirname(__file__), "sessions")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(SESSION_FOLDER, exist_ok=True)
 
-# ─── Data stores ──────────────────────────────────────────────────────────
 users = {}
 videos = []
 chunk_storage = {}
@@ -162,7 +169,6 @@ def process_job(job_id):
             job["segments"] = generate_mock_segments()
 
 
-# ─── Dummy data ───────────────────────────────────────────────────────────
 dummy_project = {
     "key": "dummy-key-123",
     "name": "Sample Video",
@@ -187,251 +193,441 @@ users["testuser@example.com"] = {
 
 
 def download_session_files(session_id, token):
-    """Download ALL files from a session using requests."""
+    """
+    Download all files from a session using requests.
+    This is more reliable than curl for this purpose.
+    """
     session_dir = os.path.join(SESSION_FOLDER, session_id)
     os.makedirs(session_dir, exist_ok=True)
+
+    # Headers for authentication
     headers = {
         "X-Forward-Auth": token,
         "Authorization": f"Bearer {token}",
         "User-Agent": "Mozilla/5.0 (compatible; LT-Uploader/1.0)",
     }
     cookies = {"_forward_auth": token}
+
+    # First, get the main HTML page to see what's available
     base_url = f"{INTERNAL_SERVER_URL}/archivesession/{session_id}"
-    downloaded = 0
-    downloaded_files = set()
-
+    
     try:
-        # ─── 1. GET THE MAIN HTML PAGE ──────────────────────────────
+        # Download the main HTML page
         resp = requests.get(
-            base_url, headers=headers, cookies=cookies,
-            verify=False, allow_redirects=True, timeout=30
+            base_url,
+            headers=headers,
+            cookies=cookies,
+            verify=False,
+            allow_redirects=True,
+            timeout=30,
         )
-        if resp.status_code != 200:
-            logging.error("Failed to get session page: %s", resp.status_code)
-            return False
-
-        html_content = resp.text
-        html_path = os.path.join(session_dir, "index.html")
-        with open(html_path, "w", encoding="utf-8") as f:
-            f.write(html_content)
-        downloaded += 1
-        logging.info("Downloaded index.html")
-
-        # ─── 2. EXTRACT SESSION MEDIA URLS FROM HTML ──────────────
-        # Find the video source URL
-        video_src_match = re.search(r'<source src="([^"]+)"[^>]*>', html_content)
-        if video_src_match:
-            video_url = video_src_match.group(1)
-            if video_url.startswith("/"):
-                video_url = f"{INTERNAL_SERVER_URL}{video_url}"
-            try:
-                video_resp = requests.get(
-                    video_url, headers=headers, cookies=cookies,
-                    verify=False, timeout=120
-                )
-                if video_resp.status_code == 200 and len(video_resp.content) > 0:
-                    with open(os.path.join(session_dir, "video.mp4"), "wb") as f:
-                        f.write(video_resp.content)
-                    downloaded_files.add("video.mp4")
-                    downloaded += 1
-                    logging.info("Downloaded video.mp4 (%d bytes)", len(video_resp.content))
-            except requests.exceptions.RequestException as e:
-                logging.warning("Could not download video: %s", e)
-
-        # Find subtitle tracks
-        track_matches = re.findall(
-            r'<track label="([^"]+)" kind="subtitles" src="([^"]+)"',
-            html_content
-        )
-        for label, src in track_matches:
-            if src.startswith("/"):
-                src = f"{INTERNAL_SERVER_URL}{src}"
-            try:
-                track_resp = requests.get(
-                    src, headers=headers, cookies=cookies,
-                    verify=False, timeout=30
-                )
-                if track_resp.status_code == 200 and len(track_resp.content) > 0:
-                    filename = f"subtitles_{label}.vtt"
-                    with open(os.path.join(session_dir, filename), "wb") as f:
-                        f.write(track_resp.content)
-                    downloaded_files.add(filename)
-                    downloaded += 1
-                    logging.info("Downloaded %s (%d bytes)", filename, len(track_resp.content))
-            except requests.exceptions.RequestException as e:
-                logging.warning("Could not download subtitle %s: %s", label, e)
-
-        # Find audio sources
-        audio_matches = re.findall(
-            r'<source src="([^"]+)"[^>]*type="audio/', html_content
-        )
-        for src in audio_matches:
-            if src.startswith("/"):
-                src = f"{INTERNAL_SERVER_URL}{src}"
-            try:
-                audio_resp = requests.get(
-                    src, headers=headers, cookies=cookies,
-                    verify=False, timeout=60
-                )
-                if audio_resp.status_code == 200 and len(audio_resp.content) > 0:
-                    with open(os.path.join(session_dir, "audio.wav"), "wb") as f:
-                        f.write(audio_resp.content)
-                    downloaded_files.add("audio.wav")
-                    downloaded += 1
-                    logging.info("Downloaded audio.wav (%d bytes)", len(audio_resp.content))
-            except requests.exceptions.RequestException as e:
-                logging.warning("Could not download audio: %s", e)
-
-        # ─── 3. TRY ALL POSSIBLE FILE PATTERNS ──────────────────────
-        # All possible file types and extensions
-        file_types = [
-            "transcript", "summary", "notes", "slides", "media",
-            "subtitles", "chapters", "metadata", "session", "output",
-            "text", "document", "lecture", "recording", "video", "audio"
-        ]
-        extensions = [".rtf", ".doc", ".docx", ".pdf", ".txt", ".json",
-                      ".html", ".xml", ".csv", ".xls", ".xlsx", ".ppt",
-                      ".pptx", ".vtt", ".srt", ".mp4", ".webm", ".wav",
-                      ".mp3", ".flac", ".ogg", ".zip", ".tar", ".gz"]
-
-        # Try all combinations
-        for file_type in file_types:
-            for ext in extensions:
-                filename = f"{file_type}{ext}"
-                if filename in downloaded_files:
-                    continue
+        
+        if resp.status_code == 200:
+            html_path = os.path.join(session_dir, "index.html")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(resp.text)
+            logging.info("Downloaded index.html for session %s", session_id)
+            
+            # Parse HTML to find media files
+            html_content = resp.text
+            
+            # ─── 1. DOWNLOAD VIDEO ──────────────────────────────────────
+            video_match = re.search(r'<source src="([^"]+)"', html_content)
+            if video_match:
+                video_url = video_match.group(1)
+                if video_url.startswith("/"):
+                    video_url = f"{INTERNAL_SERVER_URL}{video_url}"
                 try:
-                    url = f"{base_url}/{filename}"
-                    file_resp = requests.get(
-                        url, headers=headers, cookies=cookies,
-                        verify=False, timeout=30
+                    video_resp = requests.get(
+                        video_url,
+                        headers=headers,
+                        cookies=cookies,
+                        verify=False,
+                        timeout=120,
                     )
-                    if file_resp.status_code == 200 and len(file_resp.content) > 0:
-                        file_path = os.path.join(session_dir, filename)
+                    if video_resp.status_code == 200 and len(video_resp.content) > 0:
+                        video_path = os.path.join(session_dir, "video.mp4")
+                        with open(video_path, "wb") as f:
+                            f.write(video_resp.content)
+                        logging.info("Downloaded video for session %s (%d bytes)", 
+                                   session_id, len(video_resp.content))
+                except requests.exceptions.RequestException as e:
+                    logging.warning("Could not download video: %s", e)
+            
+            # ─── 2. DOWNLOAD SUBTITLE TRACKS ────────────────────────────
+            track_matches = re.findall(
+                r'<track label="([^"]+)" kind="subtitles" src="([^"]+)"',
+                html_content
+            )
+            for label, src in track_matches:
+                if src.startswith("/"):
+                    src = f"{INTERNAL_SERVER_URL}{src}"
+                try:
+                    track_resp = requests.get(
+                        src,
+                        headers=headers,
+                        cookies=cookies,
+                        verify=False,
+                        timeout=30,
+                    )
+                    if track_resp.status_code == 200 and len(track_resp.content) > 0:
+                        track_path = os.path.join(session_dir, f"subtitles_{label}.vtt")
+                        with open(track_path, "wb") as f:
+                            f.write(track_resp.content)
+                        logging.info("Downloaded subtitles %s for session %s (%d bytes)", 
+                                   label, session_id, len(track_resp.content))
+                except requests.exceptions.RequestException as e:
+                    logging.warning("Could not download subtitles %s: %s", label, e)
+            
+            # ─── 3. DOWNLOAD AUDIO ──────────────────────────────────────
+            audio_match = re.search(
+                r'<source src="([^"]+)"[^>]*type="audio/', html_content
+            )
+            if audio_match:
+                audio_url = audio_match.group(1)
+                if audio_url.startswith("/"):
+                    audio_url = f"{INTERNAL_SERVER_URL}{audio_url}"
+                try:
+                    audio_resp = requests.get(
+                        audio_url,
+                        headers=headers,
+                        cookies=cookies,
+                        verify=False,
+                        timeout=120,
+                    )
+                    if audio_resp.status_code == 200 and len(audio_resp.content) > 0:
+                        audio_path = os.path.join(session_dir, "audio.wav")
+                        with open(audio_path, "wb") as f:
+                            f.write(audio_resp.content)
+                        logging.info("Downloaded audio for session %s (%d bytes)", 
+                                   session_id, len(audio_resp.content))
+                except requests.exceptions.RequestException as e:
+                    logging.warning("Could not download audio: %s", e)
+            
+            # ─── 4. TRY TO DOWNLOAD SRT/VTT FILES FROM SESSION ──────────
+            # Try to download subtitle files directly from the session
+            subtitle_files = [
+                "English.srt", "English.vtt",
+                "German.srt", "German.vtt",
+                "Russian.srt", "Russian.vtt",
+                "Transcript.srt", "Transcript.vtt",
+            ]
+            
+            for subtitle_file in subtitle_files:
+                file_path = os.path.join(session_dir, subtitle_file)
+                if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                    continue
+                    
+                # Try to download from the session URL
+                url = f"{base_url}/{subtitle_file}"
+                try:
+                    sub_resp = requests.get(
+                        url,
+                        headers=headers,
+                        cookies=cookies,
+                        verify=False,
+                        timeout=30,
+                    )
+                    if sub_resp.status_code == 200 and len(sub_resp.content) > 0:
                         with open(file_path, "wb") as f:
-                            f.write(file_resp.content)
-                        downloaded_files.add(filename)
-                        downloaded += 1
-                        logging.info("Downloaded %s (%d bytes)", filename, len(file_resp.content))
+                            f.write(sub_resp.content)
+                        logging.info("Downloaded %s for session %s (%d bytes)", 
+                                   subtitle_file, session_id, len(sub_resp.content))
                 except requests.exceptions.RequestException:
                     pass
-
-        # ─── 4. TRY WITH LANGUAGE SUFFIXES ──────────────────────────
-        languages = ["en", "de", "fr", "es", "it", "ja", "ko", "zh", "ru", "ar"]
-        for lang in languages:
-            for file_type in ["transcript", "summary", "notes", "subtitles"]:
-                for ext in [".rtf", ".doc", ".docx", ".pdf", ".txt", ".json", ".html", ".vtt", ".srt"]:
-                    filename = f"{file_type}_{lang}{ext}"
-                    if filename in downloaded_files:
-                        continue
-                    try:
-                        url = f"{base_url}/{filename}"
-                        file_resp = requests.get(
-                            url, headers=headers, cookies=cookies,
-                            verify=False, timeout=30
-                        )
-                        if file_resp.status_code == 200 and len(file_resp.content) > 0:
-                            file_path = os.path.join(session_dir, filename)
-                            with open(file_path, "wb") as f:
-                                f.write(file_resp.content)
-                            downloaded_files.add(filename)
-                            downloaded += 1
-                            logging.info("Downloaded %s (%d bytes)", filename, len(file_resp.content))
-                    except requests.exceptions.RequestException:
-                        pass
-
-        # ─── 5. TRY COMMON ENDPOINTS ────────────────────────────────
-        endpoints = [
-            "/transcript", "/summary", "/notes", "/slides",
-            "/vtt", "/media", "/files", "/download", "/export",
-            "/text", "/document", "/output", "/data"
-        ]
-        for endpoint in endpoints:
-            for ext in extensions:
-                filename = f"{endpoint.strip('/')}{ext}"
-                if filename in downloaded_files:
+            
+            # ─── 5. TRY TO DOWNLOAD AUDIO FILES ──────────────────────────
+            audio_files = [
+                "English Audio.wav",
+                "German Audio.wav",
+                "audio.wav",
+                "audio.raw"
+            ]
+            
+            for audio_file in audio_files:
+                file_path = os.path.join(session_dir, audio_file)
+                if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                     continue
+                    
+                # URL encode spaces
+                url_encoded = audio_file.replace(' ', '%20')
+                url = f"{base_url}/{url_encoded}"
                 try:
-                    url = f"{base_url}{endpoint}{ext}"
-                    file_resp = requests.get(
-                        url, headers=headers, cookies=cookies,
-                        verify=False, timeout=30
+                    audio_resp = requests.get(
+                        url,
+                        headers=headers,
+                        cookies=cookies,
+                        verify=False,
+                        timeout=120,
                     )
-                    if file_resp.status_code == 200 and len(file_resp.content) > 0:
-                        file_path = os.path.join(session_dir, filename)
+                    if audio_resp.status_code == 200 and len(audio_resp.content) > 0:
                         with open(file_path, "wb") as f:
-                            f.write(file_resp.content)
-                        downloaded_files.add(filename)
-                        downloaded += 1
-                        logging.info("Downloaded %s (%d bytes)", filename, len(file_resp.content))
+                            f.write(audio_resp.content)
+                        logging.info("Downloaded %s for session %s (%d bytes)", 
+                                   audio_file, session_id, len(audio_resp.content))
                 except requests.exceptions.RequestException:
                     pass
-
-        # ─── 6. TRY MEDIA WITH DIFFERENT EXTENSIONS ────────────────
-        media_extensions = [".mp4", ".webm", ".wav", ".mp3", ".vtt", ".srt", ".rtf", ".doc", ".pdf"]
-        for ext in media_extensions:
-            filename = f"media{ext}"
-            if filename in downloaded_files:
-                continue
-            try:
-                url = f"{base_url}/media{ext}"
-                file_resp = requests.get(
-                    url, headers=headers, cookies=cookies,
-                    verify=False, timeout=30
-                )
-                if file_resp.status_code == 200 and len(file_resp.content) > 0:
-                    file_path = os.path.join(session_dir, filename)
-                    with open(file_path, "wb") as f:
-                        f.write(file_resp.content)
-                    downloaded_files.add(filename)
-                    downloaded += 1
-                    logging.info("Downloaded %s (%d bytes)", filename, len(file_resp.content))
-            except requests.exceptions.RequestException:
-                pass
-
-        # ─── 7. TRY TO GET FILES FROM THE HTML PAGE LINKS ──────────
-        # Find all links in the HTML that might point to files
-        link_matches = re.findall(r'href="([^"]+)"', html_content)
-        for link in link_matches:
-            # Skip common web resources
-            if any(link.endswith(x) for x in ['.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico']):
-                continue
-            if link.startswith('/') and not link.startswith('//'):
-                full_url = f"{INTERNAL_SERVER_URL}{link}"
-            elif link.startswith('http'):
-                full_url = link
-            else:
-                continue
-
-            filename = link.split('/')[-1]
-            if not filename or '.' not in filename or filename in downloaded_files:
-                continue
-
-            try:
-                file_resp = requests.get(
-                    full_url, headers=headers, cookies=cookies,
-                    verify=False, timeout=30
-                )
-                if file_resp.status_code == 200 and len(file_resp.content) > 0:
-                    file_path = os.path.join(session_dir, filename)
-                    with open(file_path, "wb") as f:
-                        f.write(file_resp.content)
-                    downloaded_files.add(filename)
-                    downloaded += 1
-                    logging.info("Downloaded %s (%d bytes)", filename, len(file_resp.content))
-            except requests.exceptions.RequestException:
-                pass
-
-        # ─── 8. SUMMARY ──────────────────────────────────────────────
+            
+            # ─── 6. DOWNLOAD JSON FILES ──────────────────────────────────
+            json_files = [
+                "languages.json", "messages.json", "meta.json",
+                "access.json", "write_access.json", "sessionGraph"
+            ]
+            
+            for json_file in json_files:
+                file_path = os.path.join(session_dir, json_file)
+                if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                    continue
+                    
+                url = f"{base_url}/{json_file}"
+                try:
+                    json_resp = requests.get(
+                        url,
+                        headers=headers,
+                        cookies=cookies,
+                        verify=False,
+                        timeout=30,
+                    )
+                    if json_resp.status_code == 200 and len(json_resp.content) > 0:
+                        with open(file_path, "wb") as f:
+                            f.write(json_resp.content)
+                        logging.info("Downloaded %s for session %s (%d bytes)", 
+                                   json_file, session_id, len(json_resp.content))
+                except requests.exceptions.RequestException:
+                    pass
+            
+            # ─── 7. TRY TO DOWNLOAD DATA FILES ──────────────────────────
+            data_files = [
+                "asr:0", "mt:0", "mt:1",
+                "textstructurer:0_de", "textstructurer:0_en", "textstructurer:0_ru",
+                "summarizer:0_de", "summarizer:0_en", "summarizer:0_ru",
+                "tts:0", "tts:1", "user:0"
+            ]
+            
+            for data_file in data_files:
+                file_path = os.path.join(session_dir, data_file)
+                if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                    continue
+                    
+                url = f"{base_url}/{data_file}"
+                try:
+                    data_resp = requests.get(
+                        url,
+                        headers=headers,
+                        cookies=cookies,
+                        verify=False,
+                        timeout=30,
+                    )
+                    if data_resp.status_code == 200 and len(data_resp.content) > 0:
+                        with open(file_path, "wb") as f:
+                            f.write(data_resp.content)
+                        logging.info("Downloaded %s for session %s (%d bytes)", 
+                                   data_file, session_id, len(data_resp.content))
+                except requests.exceptions.RequestException:
+                    pass
+        
+        # ─── 8. SUMMARY ──────────────────────────────────────────────────
         files = os.listdir(session_dir)
+        files = [f for f in files if os.path.isfile(os.path.join(session_dir, f))]
+        
+        logging.info("=" * 60)
         logging.info("Session %s: Downloaded %s files total", session_id, len(files))
         logging.info("Files: %s", files)
-
+        
+        srt_files = [f for f in files if f.endswith('.srt')]
+        vtt_files = [f for f in files if f.endswith('.vtt')]
+        audio_files = [f for f in files if f.endswith(('.wav', '.mp3'))]
+        json_files = [f for f in files if f.endswith('.json')]
+        video_files = [f for f in files if f.endswith(('.mp4', '.webm'))]
+        
+        logging.info("SRT files: %s", srt_files if srt_files else "None")
+        logging.info("VTT files: %s", vtt_files if vtt_files else "None")
+        logging.info("Audio files: %s", audio_files if audio_files else "None")
+        logging.info("JSON files: %s", json_files if json_files else "None")
+        logging.info("Video files: %s", video_files if video_files else "None")
+        logging.info("=" * 60)
+        
         return len(files) > 0
 
     except requests.exceptions.RequestException as e:
         logging.error("Error downloading session %s: %s", session_id, e)
         return False
+
+
+# ─── EXPORT FUNCTIONS ──────────────────────────────────────────────────
+
+def extract_transcript_from_html(html_content):
+    """Extract transcript text from HTML content."""
+    if not HAS_BS4:
+        return []
+
+    soup = BeautifulSoup(html_content, 'html.parser')
+    transcripts = []
+
+    windows = soup.find_all('div', class_='window-content-structured')
+    for window in windows:
+        parent = window.parent
+        lang_name = "Unknown"
+        if parent and parent.get('id'):
+            lang_id = parent.get('id').replace('window-', '')
+            tab = soup.find('button', id=f'tab-{lang_id}')
+            if tab:
+                lang_name = tab.get_text(strip=True)
+
+        text = window.get_text(separator='\n', strip=True)
+        if text:
+            transcripts.append({
+                'language': lang_name,
+                'text': text
+            })
+
+    return transcripts
+
+
+def extract_all_text_from_html(html_content):
+    """Extract all text content from HTML."""
+    if not HAS_BS4:
+        return html_content
+
+    soup = BeautifulSoup(html_content, 'html.parser')
+
+    for script in soup(["script", "style"]):
+        script.decompose()
+
+    text = soup.get_text(separator='\n', strip=True)
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    return '\n'.join(lines)
+
+
+@app.route("/session_export/<session_id>", methods=["GET"])
+def session_export(session_id):
+    """Export all session data as a formatted DOCX document."""
+    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    if not os.path.exists(session_dir):
+        return jsonify({"error": "Session not found"}), 404
+
+    html_path = os.path.join(session_dir, "index.html")
+    if not os.path.exists(html_path):
+        return jsonify({"error": "Session HTML not found"}), 404
+
+    try:
+        from docx import Document  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        return jsonify({
+            "error": "python-docx not installed. Please install: pip install python-docx"
+        }), 500
+
+    with open(html_path, "r", encoding="utf-8") as f:
+        html_content = f.read()
+
+    doc = Document()
+    soup = BeautifulSoup(html_content, 'html.parser')
+    title = soup.find('h1', class_='sidebar-title')
+    if title:
+        doc.add_heading(title.get_text(strip=True), 0)
+    else:
+        doc.add_heading(f"Session: {session_id}", 0)
+
+    doc.add_paragraph(f"Session ID: {session_id}")
+    doc.add_paragraph(f"Export Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    doc.add_paragraph("")
+
+    transcripts = extract_transcript_from_html(html_content)
+    if transcripts:
+        for transcript in transcripts:
+            doc.add_heading(f"Language: {transcript['language']}", level=1)
+            doc.add_paragraph(transcript['text'])
+            doc.add_paragraph("")
+    else:
+        doc.add_paragraph("No transcript data available.")
+
+    doc_buffer = io.BytesIO()
+    doc.save(doc_buffer)
+    doc_buffer.seek(0)
+
+    return send_file(
+        doc_buffer,
+        mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        as_attachment=True,
+        download_name=f"session_{session_id}.docx"
+    )
+
+
+@app.route("/session_export_rtf/<session_id>", methods=["GET"])
+def session_export_rtf(session_id):
+    """Export all session data as a simple RTF document."""
+    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    if not os.path.exists(session_dir):
+        return jsonify({"error": "Session not found"}), 404
+
+    html_path = os.path.join(session_dir, "index.html")
+    if not os.path.exists(html_path):
+        return jsonify({"error": "Session HTML not found"}), 404
+
+    with open(html_path, "r", encoding="utf-8") as f:
+        html_content = f.read()
+
+    transcripts = extract_transcript_from_html(html_content)
+
+    rtf_lines = []
+    rtf_lines.append(r'{\rtf1\ansi\deff0')
+    rtf_lines.append(r'{\fonttbl{\f0\fnil\fcharset0 Arial;}}')
+    rtf_lines.append(r'\f0\fs24')
+
+    rtf_lines.append(f'\\b\\fs32 Session: {session_id}\\b0\\par\\par')
+    rtf_lines.append(
+        f'Export Date: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\\par\\par'
+    )
+
+    if transcripts:
+        for transcript in transcripts:
+            lang = transcript.get('language', 'Unknown')
+            text = transcript.get('text', '')
+
+            text_escaped = text.replace('\\', '\\\\').replace('{', '\\{').replace('}', '\\}')
+            text_escaped = text_escaped.replace('\n', '\\par ')
+
+            rtf_lines.append(f'\\b\\fs28 Language: {lang}\\b0\\par')
+            rtf_lines.append(f'{text_escaped}\\par\\par')
+    else:
+        rtf_lines.append('No transcript data available.\\par')
+
+    rtf_lines.append('}')
+    rtf_string = ''.join(rtf_lines)
+
+    return send_file(
+        io.BytesIO(rtf_string.encode('utf-8')),
+        mimetype='text/rtf',
+        as_attachment=True,
+        download_name=f"session_{session_id}.rtf"
+    )
+
+
+@app.route("/session_export_txt/<session_id>", methods=["GET"])
+def session_export_txt(session_id):
+    """Export all session data as plain text."""
+    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    if not os.path.exists(session_dir):
+        return jsonify({"error": "Session not found"}), 404
+
+    html_path = os.path.join(session_dir, "index.html")
+    if os.path.exists(html_path):
+        with open(html_path, "r", encoding="utf-8") as f:
+            html_content = f.read()
+        transcripts = extract_transcript_from_html(html_content)
+        text_parts = []
+        for t in transcripts:
+            text_parts.append(f"=== {t['language']} ===\n{t['text']}")
+        text_content = '\n\n'.join(text_parts) if text_parts else "No data available."
+    else:
+        text_content = "No HTML file found."
+
+    return send_file(
+        io.BytesIO(text_content.encode('utf-8')),
+        mimetype='text/plain',
+        as_attachment=True,
+        download_name=f"session_{session_id}.txt"
+    )
 
 
 # ─── Auth endpoints ──────────────────────────────────────────────────────
@@ -601,9 +797,14 @@ def job_status(job_id):
 def get_session_output(session_id):
     """Get the session output as a JSON response with file URLs."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
+
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
         token = request.cookies.get("_forward_auth", "")
+
+    if token:
+        logging.info("Downloading session %s from internal server", session_id)
+        download_session_files(session_id, token)
 
     files = []
     if os.path.exists(session_dir):
@@ -615,31 +816,6 @@ def get_session_output(session_id):
                     "size": os.path.getsize(file_path),
                     "url": f"/session_file/{session_id}/{file}",
                 })
-        if files:
-            return (
-                jsonify({
-                    "session_id": session_id,
-                    "files": files,
-                    "total_files": len(files),
-                    "session_url": f"{INTERNAL_SERVER_URL}/archivesession/{session_id}",
-                    "status": "ready",
-                    "cached": True,
-                }),
-                200,
-            )
-
-    if token:
-        logging.info("Downloading session %s from internal server", session_id)
-        download_session_files(session_id, token)
-        if os.path.exists(session_dir):
-            for file in os.listdir(session_dir):
-                file_path = os.path.join(session_dir, file)
-                if os.path.isfile(file_path) and os.path.getsize(file_path) > 0:
-                    files.append({
-                        "name": file,
-                        "size": os.path.getsize(file_path),
-                        "url": f"/session_file/{session_id}/{file}",
-                    })
 
     status = "ready" if files else "processing"
     return (
@@ -683,6 +859,7 @@ def download_session_zip(session_id):
         mimetype="application/zip",
     )
 
+
 # ─── Upload endpoint ────────────────────────────────────────────────────
 @app.route("/upload", methods=["POST", "OPTIONS"])
 def upload_lecture():
@@ -690,7 +867,9 @@ def upload_lecture():
     if request.method == "OPTIONS":
         response = jsonify({"message": "OK"})
         response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+        response.headers.add(
+            "Access-Control-Allow-Headers", "Content-Type,Authorization"
+        )
         response.headers.add("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
         return response, 200
 
@@ -707,7 +886,6 @@ def upload_lecture():
     session_name = request.form.get("name", file_storage.filename)
     file_storage.seek(0)
 
-    # ─── 1. SAVE LOCAL COPY ──────────────────────────────────────────
     local_filename = f"{uuid.uuid4()}_{file_storage.filename}"
     local_path = os.path.join(UPLOAD_FOLDER, local_filename)
     file_storage.save(local_path)
@@ -715,7 +893,6 @@ def upload_lecture():
     file_storage.seek(0)
     logging.info("Saved local copy: %s (%d bytes)", local_filename, file_size)
 
-    # ─── 2. CREATE PROJECT ENTRY ─────────────────────────────────────
     video_key = str(uuid.uuid4())
     project = {
         "key": video_key,
@@ -734,7 +911,6 @@ def upload_lecture():
     }
     videos.append(project)
 
-    # ─── 3. BUILD DATA DICT ──────────────────────────────────────────
     data = {}
     for key in request.form.keys():
         if key == "token":
@@ -744,17 +920,14 @@ def upload_lecture():
     if "path" not in data:
         data["path"] = "/home/admin@example.com"
 
-    # ─── 4. BUILD FILES DICT ─────────────────────────────────────────
     files = {}
     if "videofile" in request.files:
         file_obj = request.files["videofile"]
         if file_obj.filename:
-            # Read the file content to send
             file_obj.seek(0)
             file_content = file_obj.read()
             files["videofile"] = (file_obj.filename, file_content, file_obj.content_type)
 
-    # ─── 5. SETUP HEADERS AND COOKIES ────────────────────────────────
     headers = {
         "X-Forward-Auth": token,
         "Authorization": f"Bearer {token}",
@@ -762,12 +935,14 @@ def upload_lecture():
     }
     cookies = {"_forward_auth": token}
 
-    # ─── 6. SEND TO INTERNAL SERVER ──────────────────────────────────
     try:
         logging.info("Uploading to internal server: %s", TARGET_URL)
         logging.info("Data keys: %s", list(data.keys()))
-        logging.info("File: %s (%d bytes)", file_obj.filename if file_obj else 'None',
-                     len(file_content) if 'file_content' in locals() else 0)
+        logging.info(
+            "File: %s (%d bytes)",
+            file_obj.filename if file_obj else 'None',
+            len(file_content) if 'file_content' in locals() else 0
+        )
 
         resp = requests.post(
             TARGET_URL,
@@ -775,7 +950,7 @@ def upload_lecture():
             files=files,
             headers=headers,
             cookies=cookies,
-            timeout=(30, 3600),  # Extended timeout for large files
+            timeout=(30, 3600),
             verify=False,
             allow_redirects=True,
         )
@@ -786,7 +961,6 @@ def upload_lecture():
         final_url = resp.url
         session_id = None
 
-        # Extract session ID from redirect URL
         if "/archivesession/" in final_url:
             session_id = final_url.split("/archivesession/")[-1].split("/")[0]
             logging.info("Extracted session ID from URL: %s", session_id)
@@ -794,7 +968,6 @@ def upload_lecture():
             session_id = final_url.split("/session/")[-1].split("/")[0]
             logging.info("Extracted session ID from URL: %s", session_id)
 
-        # If not found, build it from form data (fallback)
         if not session_id and session_name:
             user_email = data.get("path", "/home/admin@example.com").strip("/").split("/")[-1]
             path = f"/home/{user_email}/{session_name}"
@@ -803,7 +976,6 @@ def upload_lecture():
 
         content = resp.text
 
-        # ─── 7. UPDATE PROJECT WITH SESSION INFO ──────────────────────
         if session_id:
             project["session_id"] = session_id
             project["session_url"] = f"{BASE_URL}/archivesession/{session_id}"
@@ -816,7 +988,6 @@ def upload_lecture():
             }
             logging.info("Session created: %s", session_id)
 
-            # Start background job
             job = {
                 "id": session_id,
                 "video_key": video_key,
@@ -830,7 +1001,6 @@ def upload_lecture():
             jobs[session_id] = job
             threading.Thread(target=process_job, args=(session_id,), daemon=True).start()
 
-        # ─── 8. RETURN RESPONSE ──────────────────────────────────────
         try:
             response_data = json.loads(content)
             if session_id:
@@ -852,9 +1022,8 @@ def upload_lecture():
                     "output_url": f"/session_output/{session_id}",
                     "download_url": f"/session_zip/{session_id}",
                     "message": "Upload successful!",
-                    "response": content[:500]  # Include first 500 chars for debugging
+                    "response": content[:500]
                 }), resp.status_code
-            # If no session ID, return the raw response for debugging
             return jsonify({
                 "status": "error",
                 "message": "No session ID received",
@@ -872,6 +1041,7 @@ def upload_lecture():
     except OSError as e:
         logging.error("Upload error: %s", str(e), exc_info=True)
         return jsonify({"error": f"Upload failed: {str(e)}"}), 500
+
 
 # ─── Proxy endpoints ────────────────────────────────────────────────────
 @app.route("/check-session", methods=["GET"])
@@ -967,7 +1137,6 @@ def clear_videos():
     return jsonify({"message": "Cleared"}), 200
 
 
-# ─── Main ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     try:
         import urllib3

@@ -1,0 +1,4791 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>KIT Lecture Translator</title>
+    <link rel="stylesheet" href="/static/css/structure.css">
+    <link rel="stylesheet" href="/static/css/theme.css">
+    <link rel="stylesheet" href="/static/css/loadingBar.css">
+    
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css">
+    <link rel="stylesheet" href="/static/css/confirmMessage.css">
+    <link rel="stylesheet" href="/static/css/notes_panel.css">
+    <script src="/static/js/notes_panel.js"></script>
+  </head>
+  <body>
+
+  <div id="customMenuArchive">
+    <button id="saasr-contextmenu-button">Speaker name</button>
+    <button id="contextbiasing-asr-contextmenuArchive-button">Define new words</button>
+  </div>
+
+  <iframe id="turn-setting" src="/runtime-spk-setting" style="position: fixed; background-color: #ffffff00; border-radius: 10px; border: 5px solid #ccc; padding: 0px; display: none; resize: both; width: 600px; height: 350px; z-index: 10000;"></iframe>
+  <iframe id="context-setting" src="/runtime-context-setting" style="position: fixed; background-color: #ffffff00; border-radius: 10px; border: 5px solid #ccc; padding: 0px; display: none; resize: both; width: 600px; height: 350px; z-index: 10000;"></iframe>
+
+  <div id="select_profile" style="position: fixed; background-color: white; border-radius: 10px; border: 5px solid #ccc; padding: 0px; display: none; resize: both; width: 500px; height: 200px; z-index: 10000;">
+    <h2 style="width: 100%">Which profile do you want to edit?</h2>
+    <div class="form-row">
+      <div class="form-column">
+        <select id="profile" name="profile">
+          
+            <option value="profile_1">Profile 1</option>
+          
+            <option value="profile_2">Profile 2</option>
+          
+            <option value="profile_3">Profile 3</option>
+          
+            <option value="profile_4">Profile 4</option>
+          
+            <option value="profile_5">Profile 5</option>
+          
+            <option value="profile_6">Profile 6</option>
+          
+            <option value="profile_7">Profile 7</option>
+          
+            <option value="profile_8">Profile 8</option>
+          
+            <option value="profile_9">Profile 9</option>
+          
+            <option value="profile_10">Profile 10</option>
+          
+        </select>
+      </div>
+    </div>
+    <br>
+    <button id="continueBtn">Continue</button>
+  </div>
+
+<header class="kit-header">
+  <div class="kit-header__container">
+    <div class="kit-header__content">
+      
+      
+      <link rel="stylesheet" href="/static/themes/kittheme/css/kit.css">
+
+<a href="/index/" class="kit-header__logo">
+  
+  <img src="/static/themes/kittheme/img/logo.png" alt="KIT Logo" class="kit-header__logo-image">
+  <h1 class="kit-header__title">KIT Lecture Translator</h1>
+</a>
+
+
+      <nav class="kit-header__nav">
+        <div class="user-menu">
+          <button class="user-menu__button" onclick="this.parentElement.classList.toggle('active')">
+            <img src="/static/img/user.png" alt="User" width="20" height="20">
+            <span>Menu</span>
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M2 4L6 8L10 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <div class="user-menu__dropdown">
+            <a href="/index/settings/" class="user-menu__item">
+              <img src="/static/img/settings.png" alt="Settings" width="16" height="16">
+              Settings
+            </a>
+            <div class="user-menu__divider"></div>
+            
+            <a href="/logout" class="user-menu__item">
+              <img src="/static/img/logout.png" alt="Logout" width="16" height="16">
+              Logout
+            </a>
+            
+          </div>
+        </div>
+      </nav>
+    </div>
+  </div>
+</header>
+
+
+<div id="DeleteDialog" class="modal">
+  <div class="modal-content">
+    <p>Are you sure you want to delete this recording? This can't be undone.</p>
+    <div class="modal-actions">
+      <button id="confirmBtnDelete" type="button" class="language-button">Delete</button>
+      <button id="cancelBtnDelete" type="button" class="language-button">Cancel</button>
+    </div>
+  </div>
+</div>
+
+
+<div class="app-layout app-layout--archive-session">
+  <aside class="sidebar sidebar--archive-session">
+    <div class="sidebar-header">
+      <h1 class="sidebar-title">IMG_2527 – 2026-08-16 00:05</h1>
+    </div>
+
+    <div class="archive-media archive-media--sidebar">
+      
+      <div class="resizable-video">
+        <video id="media">
+          <source src="/archivemedia/L2hvbWUvYWRtaW5AZXhhbXBsZS5jb20vSU1HXzI1Mjcg4oCTIDIwMjYtMDgtMTYgMDA6MDU=">
+          
+          <track label="English" kind="subtitles" src="/archivemedia/L2hvbWUvYWRtaW5AZXhhbXBsZS5jb20vSU1HXzI1Mjcg4oCTIDIwMjYtMDgtMTYgMDA6MDU=/vtt/English">
+          
+          <track label="German" kind="subtitles" src="/archivemedia/L2hvbWUvYWRtaW5AZXhhbXBsZS5jb20vSU1HXzI1Mjcg4oCTIDIwMjYtMDgtMTYgMDA6MDU=/vtt/German">
+          
+          Your browser does not support the video tag.
+        </video>
+      </div>
+      
+      <div id="customPlayer" class="custom-player">
+        <div class="custom-player__seekbar" id="playerSeekbar"></div>
+        <div class="custom-player__controls">
+          <button class="custom-player__btn" id="playerPlayPause" title="Play/Pause">
+            <i class="fas fa-play" id="playPauseIcon"></i>
+          </button>
+          <span class="custom-player__time" id="playerTime">0:00 / 0:00</span>
+          <div class="custom-player__spacer"></div>
+          <div class="custom-player__volume">
+            <button class="custom-player__btn" id="playerMute" title="Mute">
+              <i class="fas fa-volume-up" id="volumeIcon"></i>
+            </button>
+            <input type="range" class="custom-player__volume-slider" id="playerVolume"
+                   min="0" max="1" step="0.05" value="1">
+          </div>
+          <div class="custom-player__speed">
+            <button class="custom-player__btn" id="playerSpeed" title="Playback speed">1x</button>
+          </div>
+        </div>
+        <div class="custom-player__tooltip" id="playerTooltip"></div>
+      </div>
+      
+      <div class="archive-audio-source">
+        <label for="archiveAudioSourceSelect">Audio source</label>
+        <select id="archiveAudioSourceSelect" class="archive-audio-source__select">
+          <option value="original">Original audio</option>
+          
+          <option value="German Audio">German Audio</option>
+          
+        </select>
+      </div>
+      
+    </div>
+
+    <div class="sidebar__section-title">Table of Content</div>
+    <div id="tableOfContents" class="sidebar-toc"></div>
+
+    
+    <div class="archive-sidebar-footer">
+      <div class="archive-viewers-indicator" id="online_div">
+        <span id="online" class="live-count">Viewed by 0 user(s)</span>
+      </div>
+    </div>
+    
+  </aside>
+
+  <main class="main-content">
+    <div class="content-wrapper">
+      <div class="mobile-pane-selector" id="mobilePaneSelector" style="display: none;">
+        <div class="mobile-pane-tabs" id="mobilePaneTabs"></div>
+        <div class="sidebar-indicator" id="mobilePaneIndicator"></div>
+      </div>
+
+      <div class="language-selector-bar" id="languageSelectorBar">
+        <div class="control-bar-section language-controls-host" id="languageControlsHost">
+          <div class="language-controls" id="languageControlsLeft">
+            <div class="language-tabs-wrapper">
+              <div class="language-tabs" id="languageTabs"></div>
+              <div class="language-dropdown-wrapper" id="languageDropdownWrapper-left" style="display: none;">
+                <button class="language-dropdown-toggle" id="languageDropdownToggle-left">⋮</button>
+                <div class="language-dropdown-menu" id="languageDropdownMenu-left"></div>
+              </div>
+            </div>
+            <div class="control-group copy-controls-left">
+              <button class="control-button copy-language-button" id="copyLanguageLeft" title="Copy current language content">
+                <i class="fas fa-copy"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="control-bar-section global-controls">
+          <button class="control-button split-view-toggle" id="splitViewToggle" title="Enable split view to see two languages side by side">
+            <i class="fas fa-columns"></i>
+          </button>
+          
+          <div class="control-dropdown-wrapper">
+            <button class="control-button control-dropdown-toggle" id="viewControlsToggle" title="View controls">
+              <i class="fas fa-sliders-h"></i> View
+              <i class="fas fa-chevron-down dropdown-arrow"></i>
+            </button>
+            <div class="control-dropdown-menu" id="viewControlsMenu">
+              <button class="control-dropdown-item" id="maximizeButton">
+                <i class="fas fa-expand"></i> Maximize
+              </button>
+              <button class="control-dropdown-item" id="fontSizeIncrease">
+                <i class="fas fa-plus"></i> Increase Font Size
+              </button>
+              <button class="control-dropdown-item" id="fontSizeDecrease">
+                <i class="fas fa-minus"></i> Decrease Font Size
+              </button>
+            </div>
+          </div>
+
+          
+          <div class="control-dropdown-wrapper">
+            <button class="control-button control-dropdown-toggle admin-toggle" id="adminControlsToggle" title="Admin controls">
+              <i class="fas fa-user-shield"></i> Admin
+              <i class="fas fa-chevron-down dropdown-arrow"></i>
+            </button>
+            <div class="control-dropdown-menu" id="adminControlsMenu">
+              <button class="control-dropdown-item" id="configureArchiveButton">
+                <i class="fas fa-cog"></i> Configure
+              </button>
+              <button class="control-dropdown-item" id="deleteArchiveButton">
+                <i class="fas fa-trash"></i> Delete
+              </button>
+            </div>
+          </div>
+          
+        </div>
+      </div>
+
+      <div class="windows-container" id="audio-windows-container" style="display: none;"></div>
+
+      <div class="windows-layout single-pane" id="windowsLayout">
+        <div class="window-pane left-pane">
+          <div class="pane-header pane-header-left" id="paneHeaderLeft" style="display: none;"></div>
+          <div class="archive-media archive-media--mobile-pane" id="mobileMediaPane" style="display: none;"></div>
+          <div class="single-window-mode" id="windows-container"></div>
+        </div>
+
+        <div class="window-pane right-pane" style="display: none;">
+          <div class="pane-header" id="paneHeaderRight" style="display: none;">
+            <div class="language-tabs-wrapper-secondary">
+              <div class="language-tabs-secondary" id="languageTabsSecondary"></div>
+              <div class="language-dropdown-wrapper" id="languageDropdownWrapper-right" style="display: none;">
+                <button class="language-dropdown-toggle" id="languageDropdownToggle-right">⋮</button>
+                <div class="language-dropdown-menu" id="languageDropdownMenu-right"></div>
+              </div>
+            </div>
+            <div class="control-group copy-controls-right">
+              <button class="control-button copy-language-button" id="copyLanguageRight" title="Copy right pane language content">
+                <i class="fas fa-copy"></i>
+              </button>
+            </div>
+          </div>
+          <div class="single-window-mode" id="windows-container-secondary"></div>
+          
+        </div>
+      </div>
+
+      <div class="loading-wrapper">
+    <div id="loading-container">
+        <div id="loading-bar"></div>
+        <div id="loading-text">0%</div>
+    </div>
+</div>
+
+
+    <script>
+            const loadingWrapper = document.querySelector('.loading-wrapper');
+            loadingWrapper.classList.remove('hidden');
+            // Function to dynamically set the loading percentage
+        function setLoadingPercentage(percentage) {
+            const loadingBar = document.getElementById('loading-bar');
+            const loadingText = document.getElementById('loading-text');
+
+            // Ensure the percentage is clamped between 0 and 100
+            percentage = Math.min(100, Math.max(0, percentage));
+            loadingBar.style.width = `${percentage}%`;
+            loadingText.textContent = `${percentage}%`;
+        }
+    </script>
+    </div>
+  </main>
+</div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script>
+    window.__debugTTS = false;
+
+    const windowCompressionRate = {};
+
+    const blacklist = [
+        "Show", "Hide", "[-]", "[+]", "Original", "Shortened", ""
+      ];
+    const blacklistSet = new Set(blacklist);
+
+    window.globalContentFontSize = window.globalContentFontSize ?? null;
+
+    window.applyGlobalContentFontSize = function() {
+      if (window.globalContentFontSize == null) {
+        return;
+      }
+      const fontSize = window.globalContentFontSize + 'px';
+      document.querySelectorAll('.window-content, .window-content-structured').forEach((el) => {
+        el.style.fontSize = fontSize;
+      });
+      document.querySelectorAll('.chat-message p, .meeting-message p').forEach((el) => {
+        el.style.fontSize = fontSize;
+      });
+      document.querySelectorAll('.chat-messages').forEach((el) => {
+        el.style.fontSize = fontSize;
+      });
+    };
+
+    window.changeFontSizeWindow = function(increment) {
+      const minSize = 8;
+      const maxSize = 100;
+      if (window.globalContentFontSize == null) {
+        const baseEl = document.querySelector('.window-content, .chat-messages');
+        const baseSize = baseEl ? parseFloat(getComputedStyle(baseEl).fontSize) : 15;
+        window.globalContentFontSize = Number.isFinite(baseSize) ? baseSize : 15;
+      }
+      window.globalContentFontSize += increment * 4;
+      if (window.globalContentFontSize < minSize) {
+        window.globalContentFontSize = minSize;
+      } else if (window.globalContentFontSize > maxSize) {
+        window.globalContentFontSize = maxSize;
+      }
+      window.applyGlobalContentFontSize();
+    };
+
+    if (!window.__globalFontSizeHotkeysBound) {
+      document.addEventListener('keydown', (event) => {
+        if (event.altKey && event.key === '+') {
+          window.changeFontSizeWindow(2);
+        } else if (event.altKey && event.key === '-') {
+          window.changeFontSizeWindow(-2);
+        }
+      });
+      window.__globalFontSizeHotkeysBound = true;
+    }
+
+    function collectTextRecursively(node, result = []) {
+      // Ignore script/style entirely
+      if (
+        node.nodeType === Node.ELEMENT_NODE &&
+        ["SCRIPT", "STYLE", "NOSCRIPT"].includes(node.tagName)
+      ) {
+        return result;
+      }
+
+      if (
+        node.nodeType === Node.ELEMENT_NODE &&
+        window.getComputedStyle(node).display === "none" &&
+        !/^window-\d+$/.test(node.id)
+      ) {
+        return result;
+      }
+
+      // If node has one of the stop-classes, take innerText and stop
+      if (
+        node.nodeType === Node.ELEMENT_NODE &&
+        (node.classList.contains("summary") ||
+         node.classList.contains("text") ||
+         node.classList.contains("speaker-tag") ||
+         node.classList.contains("markup_transcript") ||
+         node.classList.contains("chapter-title") ||
+         node.classList.contains("window-header"))
+      ) {
+        const text =  node.innerText.trim()
+            .split("\n")
+            .filter(line => !blacklistSet.has(line.trim()))
+            .join("\n");
+
+        if (text || node.classList.contains("paragraph-break")) {
+          if(node.classList == "summary") {
+            result.push("<h3>Summary</h3>\n<ul>"+node.innerHTML+"</ul>");
+          } else if(node.classList == "speaker-tag") {
+            result.push("<br><b>"+text+"</b><br>");
+          } else if(node.classList.contains("markup_transcript")) {
+            const prefix = node.classList.contains("paragraph-break") ? "<br><br>" : "";
+            result.push(prefix + text.split("\n").join("<br>"));
+          } else if(node.classList == "text") {
+            result.push("<h3>Transcript</h3>\n");
+          } else if(node.classList == "chapter-title") {
+            const num = (node.querySelector('.chapter-title-number')?.textContent || '').trim();
+            const ttl = (node.querySelector('.chapter-title-text')?.textContent || '').trim();
+            result.push("<h2>Chapter "+num+(ttl ? ": "+ttl : "")+"</h2>");
+          } else if(node.classList == "window-header") {
+            var lines = text.split("\n");
+            result.push("<h2>"+lines[0]+"</h2>");
+          }
+        }
+
+        if(node.classList != "text") {
+            return result; // no recursion past this node
+        }
+      }
+
+      // Recurse into children
+      node.childNodes.forEach(child => {
+        collectTextRecursively(child, result);
+      });
+
+      return result;
+    }
+
+    function extractTextFromDiv(div) {
+      // show summary and transcript
+      div.querySelectorAll(".summary").forEach(el => {
+        el.style.display = "block"
+      });
+        div.querySelectorAll(".text").forEach(el => {
+        el.style.display = "block"
+      });
+      let result = collectTextRecursively(div, []).join("\n");
+      return result;
+    }
+
+    function addWindow(index, addWindowWikiSuggesterToWindow = true) {
+        //console.log("Add window",index);
+        console.log("Add window",lang_name[index.toString()]);
+        w = document.getElementById('window-content-' + index)
+        if (w != null) {
+            // Window already exists (e.g., loaded from pre-rendered cache).
+            // Player registration and button handlers live in JS memory and must be
+            // re-established on every page load even when the DOM is pre-built.
+            if (!lang_name[index.toString()].includes("Audio") && !lang_name[index.toString()].includes("Correction")) {
+                
+                
+                
+                
+                
+            }
+            return;
+        }
+        const windowElement = document.createElement('div');
+        windowElement.classList.add('window');
+        windowElement.id = "window-" + index
+
+        if(!(index.toString() in lang_name)) {
+            console.log("ERROR:", lang_name, index);
+            return;
+        }
+
+        if ((!lang_name[index.toString()].includes("Audio") && !lang_name[index.toString()].includes("Correction"))) {
+            
+            
+            
+            
+            
+
+            const plainButton = document.createElement("button")
+            plainButton.className = "plain-button"
+            plainButton.id = "toogleView-" + index
+            plainButton.style.display = "none"
+            plainButton.textContent = "Plain"
+            plainButton.setAttribute("onclick", `toggleView(${index}, this)`);
+            windowElement.appendChild(plainButton)
+
+            // Add the window to the windows container
+            windowsContainer.appendChild(windowElement);
+            //console.log("Number of windows:",numberOfWindows)
+            updateWindowWidth()
+        } else {
+            windowElement.style.display = 'none'
+            // Add the window to the audiowindows container
+            audioWindowsContainer.appendChild(windowElement)
+        }
+
+        const windowContent = document.createElement('div')
+        windowContent.className = "window-content"
+        windowContent.id = "window-content-" + index
+        windowContent.style.display = "block"
+        windowElement.append(windowContent)
+
+        const toc = document.createElement('div')
+        toc.className = "toc"
+        toc.id = "toc-" + index
+        toc_heading = document.createElement('h3')
+        toc_heading.textContent = "Table of Contents"
+        toc.append(toc_heading)
+        toc_list = document.createElement('ul')
+        toc.append(toc_list)
+        windowElement.append(toc)
+
+        const windowContentStructured = document.createElement('div')
+        windowContentStructured.className = "window-content-structured"
+        windowContentStructured.id = "window-content-structured-" + index
+        windowContentStructured.style.display = "none"
+        windowElement.append(windowContentStructured)
+        window.applyGlobalContentFontSize();
+
+        if (addWindowWikiSuggesterToWindow) {
+            addWindowWikiSuggester(windowElement, index);
+        }
+
+        
+        createChapterElement(index, 0, 0)
+
+        var lang = lang_name[index.toString()];
+
+        const windowContentAudio = document.createElement('div')
+        windowContentAudio.className = "window-content-audio"
+        windowContentAudio.id = "window-content-audio-" + index
+        windowContentAudio.style.display = "none"
+        windowContentAudio.innerHTML = ""
+    
+        
+          if ("German Audio".includes(lang_name[index.toString()])) {
+            windowContentAudio.innerHTML += `
+          <audio controls width="100%" height="100%">
+            <source src="/archivemediafile/L2hvbWUvYWRtaW5AZXhhbXBsZS5jb20vSU1HXzI1Mjcg4oCTIDIwMjYtMDgtMTYgMDA6MDU=/German Audio.wav">
+            Your browser does not support the video tag.
+          </audio>
+          `
+          }
+        
+
+        windowElement.append(windowContentAudio)
+
+        
+    }
+
+    
+
+    function get_spk(data) {
+        if (data.speakerName != null) {
+            const senderName = data.speakerName.split(":")
+            var spk = senderName[senderName.length - 1]
+            if (spk.startsWith("unk-")) {
+                spk = "Anonymous-" + spk.split("-")[1]
+            }
+        } else {
+            var spk = undefined
+        }
+        return spk
+    }
+    
+    function maybedownloadAudioChunk(lang_id, payload, isOpus = false) {
+        const ttsDebugEnabled = !!window.__debugTTS;
+        const logDebug = (...args) => {
+            if (ttsDebugEnabled) {
+                console.log("[TTS DEBUG]", ...args);
+            }
+        };
+
+        const toTargetPlayerId = (incomingLangId) => {
+            const candidate = String(incomingLangId);
+            if (manager.players && manager.players[candidate]) {
+                return candidate;
+            }
+            if (manager.activePlayerId != null && manager.players && manager.players[String(manager.activePlayerId)]) {
+                logDebug("Incoming lang has no player, falling back to active player", {
+                    incomingLangId: candidate,
+                    activePlayerId: String(manager.activePlayerId),
+                });
+                return String(manager.activePlayerId);
+            }
+            return null;
+        };
+
+        const decodeBase64ToFloat32 = (base64Data, targetPlayerId) => {
+            const normalizedBase64 = String(base64Data || "").replace(/^"+|"+$/g, "");
+            if (!normalizedBase64) {
+                logDebug("Received empty TTS base64 payload");
+                return;
+            }
+            const binaryString = atob(normalizedBase64);
+            const len = binaryString.length;
+            const buffer = new ArrayBuffer(len);
+            const view = new Uint8Array(buffer);
+            for (let i = 0; i < len; i++) {
+                view[i] = binaryString.charCodeAt(i);
+            }
+
+            const pcm16 = new Int16Array(buffer);
+            const float32 = new Float32Array(pcm16.length);
+            for (let i = 0; i < pcm16.length; i++) {
+                float32[i] = pcm16[i] / 32768;
+            }
+
+            logDebug("Enqueue decoded chunk", {
+                targetPlayerId,
+                samples: float32.length,
+            });
+            manager.enqueueToPlayer(targetPlayerId, float32);
+        };
+
+        const decodeOpusToFloat32 = async (base64Data, targetPlayerId) => {
+            const normalizedBase64 = String(base64Data || "").replace(/^"+|"+$/g, "");
+            if (!normalizedBase64) {
+                logDebug("Received empty TTS opus payload");
+                return;
+            }
+            if (typeof AudioDecoder === 'undefined') {
+                console.warn("AudioDecoder not available, cannot decode TTS opus");
+                return;
+            }
+
+            const binaryString = atob(normalizedBase64);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+
+            const collectedFrames = [];
+            let outputSampleRate = 16000;
+            const decoder = new AudioDecoder({
+                output: (audioData) => {
+                    outputSampleRate = audioData.sampleRate;
+                    const samples = new Float32Array(audioData.numberOfFrames);
+                    audioData.copyTo(samples, { planeIndex: 0, format: 'f32-planar' });
+                    audioData.close();
+                    collectedFrames.push(samples);
+                },
+                error: (e) => console.error("TTS AudioDecoder error:", e),
+            });
+            decoder.configure({ codec: 'opus', sampleRate: 16000, numberOfChannels: 1 });
+
+            let timestamp = 0;
+            let idx = 0;
+            while (idx + 2 <= bytes.length) {
+                const packetLen = (bytes[idx] << 8) | bytes[idx + 1];
+                idx += 2;
+                const packet = bytes.slice(idx, idx + packetLen);
+                idx += packetLen;
+                decoder.decode(new EncodedAudioChunk({
+                    type: 'key',
+                    timestamp: timestamp,
+                    data: packet,
+                }));
+                timestamp += 60000; // 60ms per frame (960 samples @ 16kHz) in microseconds
+            }
+            await decoder.flush();
+            decoder.close();
+
+            const totalLength = collectedFrames.reduce((sum, f) => sum + f.length, 0);
+            if (totalLength === 0) return;
+            const combined = new Float32Array(totalLength);
+            let offset = 0;
+            for (const frame of collectedFrames) {
+                combined.set(frame, offset);
+                offset += frame.length;
+            }
+            logDebug("Enqueue decoded opus chunk", { targetPlayerId, samples: combined.length, outputSampleRate });
+            manager.enqueueToPlayer(targetPlayerId, combined, outputSampleRate);
+        };
+
+        const targetPlayerId = toTargetPlayerId(lang_id);
+        if (!targetPlayerId) {
+            logDebug("Dropping TTS chunk: no target player available", {
+                incomingLangId: String(lang_id),
+                activePlayerId: manager.activePlayerId,
+                knownPlayers: Object.keys(manager.players || {}),
+            });
+            return;
+        }
+        if (String(manager.activePlayerId) !== String(targetPlayerId)) {
+            logDebug("Dropping TTS chunk: target player is not active", {
+                incomingLangId: String(lang_id),
+                targetPlayerId,
+                activePlayerId: String(manager.activePlayerId),
+            });
+            return;
+        }
+
+        const decode = isOpus ? decodeOpusToFloat32 : decodeBase64ToFloat32;
+
+        const payloadStr = String(payload || "");
+        const ltapiPos = payloadStr.indexOf("/ltapi");
+        if (ltapiPos >= 0) {
+            const ltapiPath = payloadStr.slice(ltapiPos);
+            const webapiPath = ltapiPath.replace("/ltapi", "/webapi");
+            fetch(webapiPath)
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error("Network response was not ok " + response.statusText);
+                    }
+                    return response.text();
+                })
+                .then(base64Data => {
+                    decode(base64Data, targetPlayerId);
+                })
+                .catch(error => {
+                    console.error("Could not download TTS chunk", error);
+                });
+            return;
+        }
+
+        // Some backends send inline base64 directly in b64_enc_pcm_s16le.
+        try {
+            decode(payloadStr, targetPlayerId);
+        } catch (error) {
+            console.error("Could not decode inline TTS chunk", error);
+            logDebug("Inline payload decode failed", {
+                payloadPreview: payloadStr.slice(0, 48),
+                targetPlayerId,
+            });
+        }
+    }
+
+class AudioQueuePlayer {
+    constructor(id, button, buttonMode, automaticPaused) {
+        this.id = id;
+        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        this.queue = [];
+        this.isPlaying = false;
+        this.modeConsecutive = false;
+        this.automaticPaused = automaticPaused;
+        this.manualPaused = false;
+        this.currentSource = null;
+        this.currentBuffer = null;
+        this.startTime = 0; // when playback started
+        this.pauseTime = 0; // how far into the audio we paused
+        this.button = button;
+        this.buttonMode = buttonMode;
+        this.uiState = null;
+    }
+
+    updateUiState(state) {
+        if (this.uiState === state) {
+            return;
+        }
+        this.uiState = state;
+        window.dispatchEvent(new CustomEvent('tts-player-state-changed', {
+            detail: {
+                audioLangIndex: this.id,
+                state: state
+            }
+        }));
+    }
+
+    logo_waiting() {
+        this.updateUiState('waiting');
+        if(this.button) {
+            this.button.innerHTML = "<i class=\"fa fa-spinner fa-spin\"></i>";
+        }
+    }
+    logo_playing() {
+        this.updateUiState('playing');
+        if(this.button) {
+            this.button.innerHTML = "<i class=\"fas fa-pause\"></i>";
+        }
+    }
+    logo_stopped() {
+        this.updateUiState('stopped');
+        if(this.button) {
+            this.button.innerHTML = "<i class=\"fas fa-play\"></i>";
+        }
+    }
+    logo_mic() {
+        this.updateUiState('listening');
+        if(this.button) {
+            this.button.innerHTML = "<i class=\"fas fa-microphone\"></i>";
+        }
+    }
+
+    // Play the next audio in the queue
+    play() {
+        if (this.queue.length === 0) {
+            this.logo_waiting();
+            return;
+        }
+
+        const { data, sampleRate } = this.queue.shift();
+        const buffer = this.audioContext.createBuffer(1, data.length, sampleRate);
+        buffer.copyToChannel(data, 0);
+
+        const source = this.audioContext.createBufferSource();
+        source.buffer = buffer;
+        source.connect(this.audioContext.destination);
+
+        this.currentSource = source;
+        this.currentBuffer = buffer;
+        this.startTime = this.audioContext.currentTime - this.pauseTime; // track start time
+        this.isPlaying = true;
+
+        this.logo_playing();
+
+        source.onended = () => {
+            if (!this.isPlaying) return; // ignore if stopped/paused
+            this.currentSource = null;
+            this.currentBuffer = null;
+            this.isPlaying = false;
+            this.pauseTime = 0;
+            this.updateState();
+        };
+
+        //source.start(0, this.pauseTime);
+        source.start(0, 0); // Start playing current segment from beginning instead where it was paused
+    }
+
+    // Stop current playback and clear queue
+    stop() {
+        if (this.currentSource) {
+            this.currentSource.stop();
+            this.currentSource = null;
+            this.currentBuffer = null;
+        }
+        this.queue = [];
+        this.isPlaying = false;
+        this.pauseTime = 0;
+        this.logo_stopped();
+    }
+
+    // Resume playback from pause
+    // Pause current playback
+    pause() {
+        if (this.currentSource && this.isPlaying) {
+            // Re-insert the current buffer at the front of the queue
+            this.queue.unshift({
+                data: this.currentBuffer.getChannelData(0),
+                sampleRate: this.currentBuffer.sampleRate,
+            });
+            this.pauseTime = this.audioContext.currentTime - this.startTime;
+            this.currentSource.stop();
+            this.currentSource = null;
+            this.isPlaying = false;
+        } else {
+            this.pauseTime = 0;
+        }
+    }
+
+    // Add audio to the queue
+    enqueue(float32Array, sampleRate=16000) {
+        this.queue.push({ data: float32Array, sampleRate });
+        this.updateState();
+    }
+
+    updateState() {
+        if(this.manualPaused) {
+            this.pause();
+            this.logo_stopped();
+            return;
+        } else if(this.automaticPaused && this.modeConsecutive) {
+            this.pause();
+            this.logo_mic();
+            return;
+        } else if(this.isPlaying) {
+            return;
+        }
+        this.play();
+    }
+
+    setAutomaticPaused(val, active) {
+        this.automaticPaused = val;
+        if(active) {
+            this.updateState();
+        }
+    }
+
+    changeMode() {
+        this.modeConsecutive = !this.modeConsecutive;
+        if (this.buttonMode) {
+            if(this.modeConsecutive) {
+                this.buttonMode.textContent = "Consecutive Mode"
+            } else {
+                this.buttonMode.textContent = "Simultaneous Mode"
+            }
+        }
+        window.dispatchEvent(new CustomEvent('tts-mode-changed', {
+            detail: {
+                audioLangIndex: this.id,
+                modeConsecutive: this.modeConsecutive
+            }
+        }));
+        this.updateState();
+    }
+
+    clickButton() {
+        this.manualPaused = !this.manualPaused;
+        if (!this.manualPaused && this.audioContext.state === 'suspended') {
+            this.audioContext.resume();
+        }
+        this.updateState();
+    }
+
+    activatePlayer() {
+        this.manualPaused = false;
+        if (this.audioContext.state === 'suspended') {
+            this.audioContext.resume();
+        }
+        this.updateState();
+    }
+}
+
+class AudioManager {
+    constructor() {
+        this.players = {}; // id -> AudioQueuePlayer
+        this.activePlayerId = null;
+        this.automaticPaused = false;
+    }
+
+    // Add a new player with a unique id
+    addPlayer(id, button, buttonMode) {
+        if (this.players[id]) {
+            console.warn(`Player with id "${id}" already exists.`);
+            return;
+        }
+        this.players[id] = new AudioQueuePlayer(id, button, buttonMode, this.automaticPaused);
+        //console.log("Added player with id "+id);
+    }
+
+    // Activate a player: stop all others
+    activatePlayer(id) {
+        if (!this.players[id]) {
+            console.warn(`Player with id "${id}" does not exist.`);
+            return;
+        }
+
+        // Stop all other players
+        for (const [otherId, player] of Object.entries(this.players)) {
+            if (otherId !== id) {
+                player.stop();
+            }
+        }
+
+        this.activePlayerId = id;
+        this.players[id].activatePlayer();
+    }
+
+    // Convenience method to enqueue audio to a specific player
+    enqueueToPlayer(id, float32Array, sampleRate=16000) {
+        if (!this.players[id]) {
+            console.warn(`Player with id "${id}" does not exist.`);
+            return;
+        }
+        this.players[id].enqueue(float32Array, sampleRate);
+    }
+
+    // Pause active player
+    pauseActivePlayer() {
+        this.automaticPaused = true;
+        for (const [otherId, player] of Object.entries(this.players)) {
+            player.setAutomaticPaused(true, otherId == this.activePlayerId);
+        }
+    }
+
+    // Resume active player
+    resumeActivePlayer() {
+        this.automaticPaused = false;
+        for (const [otherId, player] of Object.entries(this.players)) {
+            player.setAutomaticPaused(false, otherId == this.activePlayerId);
+        }
+    }
+
+    clickButton(id) {
+        if(this.activePlayerId === null) {
+            this.activatePlayer(id);
+        } else if(id == this.activePlayerId) {
+            this.players[id].clickButton();
+        } else {
+            this.activatePlayer(id);
+        }
+    }
+
+    clickModeButton(id) {
+        if(this.activePlayerId != id) {
+            this.activatePlayer(id);
+        }
+        this.players[id].changeMode();
+    }
+}
+
+const manager = new AudioManager();
+window.manager = manager;
+
+    function scrollLanguageWindowToEnd(lang_id) {
+        const id = String(lang_id);
+        const plain = document.getElementById(`window-content-${id}`);
+        const structured = document.getElementById(`window-content-structured-${id}`);
+        if (plain) {
+            plain.scrollTop = plain.scrollHeight;
+        }
+        if (structured) {
+            structured.scrollTop = structured.scrollHeight;
+        }
+    }
+
+    window.scrollLanguageWindowToEnd = scrollLanguageWindowToEnd;
+
+    function addMessage(lang_id, data, sender_id, old = false, scrolling = 1) {
+        let action = "action" in data ? data.action : "add";
+        //console.log(" sender_id:",sender_id, " sender:",data)
+        const w = document.getElementById(`window-content-` + lang_id)
+
+        //console.log("lang_id: ",lang_id)
+        //.replace(" Audio", ""))
+        // const audio = document.getElementById('TTS-audio')
+        const wMarkup = document.getElementById(`window-content-structured-` + lang_id);
+
+        if(w == null || wMarkup == null) {
+            return;
+        }
+
+        const wAtBottom = w.scrollHeight - w.clientHeight <= w.scrollTop + 1;
+        const wMarkupAtBottom = wMarkup.scrollHeight - wMarkup.clientHeight <= wMarkup.scrollTop + 1;
+
+        if ("mode" in data && data["sender"].startsWith("textstructurer")) {
+            //console.log("Setting mode to: ",data["mode"])
+            if (data["mode"] == "online_model" || data["mode"] == "offline_model") {
+                //console.log("Adding button")
+                button = w.parentElement.querySelector(".plain-button")
+                if (button) {
+                    button.style.display = "block"
+                    button.textContent = "Markup";
+                }
+                w.style.display = button.textContent === "Plain" ? "block" : "none"
+                wMarkup.style.display = button.textContent === "Markup" ? "block" : "none"
+            }
+        }
+
+        if ("signal" in data && data.sender.startsWith("asr")) {
+            if (data["signal"]=="speech_segment_start") {
+                manager.pauseActivePlayer();
+            }
+            if (data["signal"]=="speech_segment_end") {
+                manager.resumeActivePlayer();
+            }
+        }
+
+        if ("seq" in data && data.words != null && data.sender.startsWith("asr") && w.style.display === "none") {
+            console.log("Showing markup from asr check")
+            button = w.parentElement.querySelector(".plain-button")
+            if (button && button.style.display == "none") {
+                button.style.display = "block"
+                button.textContent = "Markup";
+            }
+            w.style.display = button.textContent === "Plain" ? "block" : "none"
+            wMarkup.style.display = button.textContent === "Markup" ? "block" : "none"
+        }
+
+        // ignore messages from mt with spk tag, since those are just meant for the summarizer etc.
+        if ("refined_sentence_cluster" in data && (!data.sender.startsWith("mt") || !data.sender.includes("spk"))) {
+            console.log("Refined sentence cluster:", data)
+            const sentence_word_id = data["sentence_word_id"]
+            var spk = data["refined_sentence_cluster"]
+            if (spk.startsWith("unk-")) {
+                spk = "Anonymous-" + spk.split("-")[1]
+            }
+
+            let refined_span = null;
+            if (data.sender.startsWith("asr")) {
+                const all_span_has_word_order = wMarkup.querySelectorAll('span.word[word-order]');
+                // only care about span has word_order in sentence_word_id
+                refined_span = Array.from(all_span_has_word_order).filter(span => {
+                    const wordOrder = Number(span.getAttribute('word-order'));
+                    return sentence_word_id.includes(wordOrder);
+                });
+                refined_span.forEach(span => {
+                    const parent = span.parentElement;
+                    if (parent) {
+                        parent.setAttribute('speaker-title', spk);
+                    }
+                });
+            } else {
+                // find all affected translation spans
+                const textSpans = wMarkup.getElementsByClassName("markup_transcript");
+                refined_span = [];
+                for (let i = 0; i < textSpans.length; i++) {
+                    const el = textSpans[i];
+                    const sourceWords = (el.getAttribute("sourceWords") ?? "").split(",").map(x => Number(x));
+                    const sourceWordSet = new Set(sourceWords);
+                    // check whether intersection between transcript word IDs
+                    // and translation source word IDs is non-empty
+                    if (sentence_word_id.some(item => sourceWordSet.has(item))) {
+                        refined_span.push(el);
+                    }
+                }
+                refined_span.forEach(span => {
+                    span.setAttribute('speaker-title', spk);
+                });
+            }
+
+            update_speaker_tag(wMarkup)
+            remove_reduntant_speaker_tag(wMarkup)
+        }
+
+        if ("seq" in data && !data.sender.startsWith("tts") && !("refined_sentence_cluster" in data)) {
+            const start = parseFloat(data.start)
+            const end = parseFloat(data.end)
+            if (data.unstable == false) {
+                //console.log("Got stable data:", data)
+                if (!("markup" in data) || data["markup"] == "paragraphBreak") {
+                    const additionalClasses = [];
+
+                    if (data["markup"] == "paragraphBreak") {
+                        //console.log("Stable Paragraph Break", data)
+                        additionalClasses.push('paragraph-break');
+                    }
+                    unstable = document.getElementById(`unstable-` + sender_id)
+                    if (unstable != null) {
+                        unstable.display = "none"
+                        unstable.remove()
+                    }
+                    unstable = document.getElementById(`unstable-structured` + sender_id)
+                    if (unstable != null) {
+                        unstable.display = "none"
+                        unstable.remove()
+                    }
+
+                    const startwithspace = data.seq[0] !== " ";
+                    if (data.words != null && data.sender.startsWith("asr")) {
+                        new_seq = ""
+                        const word_stream_id = data.sender.split(":")[1];
+                        const word_session_id = data.session;
+                        for (var i = 0; i < data.words.length; i++) {
+                            new_seq += ` <span class='word' word-order='${data.word_id[i]}' word-stream-id='${word_stream_id}' word-session-id='${word_session_id}'>${data.words[i]}</span>`
+                            //new_seq += `<span class='word' word-order='${data.word_id[i]}' speaker-title="${spk}"> ${data.words[i]}</span>`
+                        }
+                        if (startwithspace) {
+                            new_seq = new_seq.slice(1);
+                        }
+                        data.seq = new_seq
+                    } else if (data.unstable == false && data.sender.startsWith("asr")) {
+                        new_seq = ""
+                        const word_stream_id = data.sender.split(":")[1];
+                        const word_session_id = data.session;
+                        data.seq.split(" ").forEach((word, i) => {
+                            new_seq += ` <span class='word' word-order='${i}' word-stream-id='${word_stream_id}' word-session-id='${word_session_id}'>${word}</span>`
+                        });
+                        if (startwithspace) {
+                            new_seq = new_seq.slice(1);
+                        }
+                        data.seq = new_seq
+                    }
+
+                    const spk = get_spk(data)
+
+                    let newSpan = show_text(w, data.seq, start, end, ...[,], action, undefined, additionalClasses.concat(["plain_transcript"]));
+                    let newSpanMarkup = show_markup_text(wMarkup, data.seq, start, end, lang_id, action, spk, additionalClasses.concat(["markup_transcript"]));
+
+                    if ("sourceTokens" in data) {
+                        if (newSpan != null) {
+                            newSpan.setAttribute("sourceWords", data.sourceTokens);
+                        }
+                        if (newSpanMarkup != null) {
+                            newSpanMarkup.setAttribute("sourceWords", data.sourceTokens);
+                        }
+                    }
+
+                    if (data["markup"] == "paragraphBreak") {
+                        const relevantChapter = findRelevantChapter(wMarkup, data.start);
+                        insertParagraphBreakIntoAllRates(relevantChapter, data.start, data.end, lang_id);
+                    }
+
+                    if (data.words != null && data.sender.startsWith("asr")) {
+                        add_selecting_word_action(wMarkup)
+                    } else if (data.unstable == false && data.sender.startsWith("asr")) {
+                        add_selecting_word_action(wMarkup)
+                    } else if (data.unstable == false && data.sender.startsWith("mt") && "sourceTokens" in data && newSpanMarkup != null) {
+                        addTranslationHover(newSpanMarkup, data);
+                    }
+
+                    if (spk != undefined) {
+                        update_speaker_tag(wMarkup)
+                    }
+
+                } else if (data["markup"] == "chapterBreak") {
+                    createChapterElement(lang_id, wMarkup.querySelectorAll('.chapter').length, start)
+                    update_speaker_tag(wMarkup)
+                    if (window.NotesPanel && typeof window.NotesPanel.onChapterBreak === 'function') {
+                        // Pass the break start so NotesPanel can retroactively move
+                        // any already-buffered notes with start >= break into the new
+                        // chapter (the textstructurer can decide chapter boundaries
+                        // after notes for that content have already been emitted).
+                        window.NotesPanel.onChapterBreak(lang_id, start);
+                    }
+                    console.log("ChapterBreak")
+                } else if (data["markup"] == "heading") {
+                    addChapterHeading(wMarkup, data.seq, start, end, old = old)
+                    const tocElement = createTocElement(data.seq, wMarkup.querySelectorAll('.chapter')[wMarkup.querySelectorAll('.chapter').length - 1])
+                    const toc = document.getElementById(`toc-` + lang_id)
+                    const toc_list = toc.querySelector('ul')
+                    toc_list.appendChild(tocElement)
+                    if (window.NotesPanel && typeof window.NotesPanel.onChapterHeading === 'function') {
+                        window.NotesPanel.onChapterHeading(lang_id, data.seq, data.start);
+                    }
+                    console.log("Add heading:", data)
+                } else if (data["markup"] == "summary") {
+                    //console.log("Add summary:",start,end,data.seq)
+                    show_summary(wMarkup, data.seq, start, end, action);
+                } else if (data["markup"] == "postedited") {
+                    const compressionRate = data.sender.split(':')[1].split('_')[0];
+                    const relevantChapter = findRelevantChapter(wMarkup, data.start);
+
+                    const spk = get_spk(data)
+
+                    createOrUpdatePostEditedContent(
+                        relevantChapter,
+                        compressionRate,
+                        data.seq,
+                        data.start,
+                        data.end,
+                        spk
+                    );
+
+                    relevantChapter.setAttribute("postedited", 1);
+                    relevantChapter.setAttribute(`postedited-${compressionRate}`, 1);
+                    updateToggleButton(relevantChapter);
+                } else if (data["markup"] == "notes") {
+                    if (window.NotesPanel && typeof window.NotesPanel.appendNote === 'function') {
+                        window.NotesPanel.appendNote(lang_id, data.seq, data.start, data.end, data.nested_level, data.chapter_index);
+                    }
+                } else if (data["markup"] == "global_summary") {
+                    if (window.NotesPanel && typeof window.NotesPanel.showGlobalSummary === 'function') {
+                        window.NotesPanel.showGlobalSummary(lang_id, data.seq);
+                    }
+                }
+            } else {
+                if (!("markup" in data) || data["markup"] == "paragraphBreak") {
+                    if (data["markup"] == "paragraphBreak") {
+                        //console.log("Stable Paragraph Break")
+                        //console.log(data)
+                    }
+                    unstable = document.getElementById(`unstable-` + sender_id)
+                    if (unstable != null) {
+                        unstable.style.display = "inline"
+                        unstable.innerHTML = data.seq
+                        w.appendChild(unstable);
+
+                    } else {
+                        unstable = document.createElement("div");
+                        unstable.style.display = "inline"
+                        unstable.style.color = "grey";
+                        unstable.id = `unstable-` + sender_id; // Set the ID of the new element
+                        unstable.innerHTML = data.seq
+                        w.appendChild(unstable);
+                    }
+                    unstable = document.getElementById(`unstable-structured` + sender_id)
+                    if (unstable != null) {
+                        unstable.style.display = "inline"
+                        unstable.innerHTML = data.seq
+                        const field = wMarkup.querySelectorAll(`.text-original`)
+                        field[field.length - 1].appendChild(unstable);
+
+                    } else {
+                        unstable = document.createElement("div");
+                        unstable.style.display = "inline"
+                        unstable.style.color = "grey";
+                        unstable.id = `unstable-structured` + sender_id; // Set the ID of the new element
+                        unstable.innerHTML = data.seq
+                        const field = wMarkup.querySelectorAll(`.text-original`)
+                        field[field.length - 1].appendChild(unstable);
+                    }
+                }
+            }
+
+            if (scrolling && wAtBottom && action !== "replace" && action !== "remove") {
+                //console.log("SCROLL");
+                w.scrollTop = w.scrollHeight;
+            }
+
+            if (scrolling && wMarkupAtBottom && action !== "replace" && action !== "remove") {
+                wMarkup.scrollTop = wMarkup.scrollHeight;
+            }
+
+        } else if ((data["sender"].startsWith("lip")) || (data["sender"].startsWith("tts"))) {
+            const ttsDebugEnabled = !!window.__debugTTS;
+            if (ttsDebugEnabled) {
+                console.log("[TTS DEBUG] Received TTS/LIP message", {
+                    sender: data["sender"],
+                    langId: String(lang_id),
+                    activePlayerId: manager.activePlayerId,
+                    hasChunk: "b64_enc_pcm_s16le" in data || "b64_enc_opus" in data,
+                    isOpus: "b64_enc_opus" in data,
+                    keys: Object.keys(data || {}),
+                    payloadPreview:
+                        typeof data["b64_enc_opus"] === "string"
+                            ? data["b64_enc_opus"].slice(0, 80)
+                            : typeof data["b64_enc_pcm_s16le"] === "string"
+                            ? data["b64_enc_pcm_s16le"].slice(0, 80)
+                            : null,
+                });
+            }
+            if (data["b64_enc_opus"] != null) {
+                maybedownloadAudioChunk(lang_id, data["b64_enc_opus"], true);
+            } else {
+            const chunkPayload =
+                data["b64_enc_pcm_s16le"] ??
+                data["b64"] ??
+                data["audio"] ??
+                data["audio_chunk"] ??
+                data["chunk"] ??
+                null;
+            if (chunkPayload != null) {
+                maybedownloadAudioChunk(lang_id, chunkPayload);
+            } else if (ttsDebugEnabled) {
+                console.log("[TTS DEBUG] No known chunk field in TTS message", {
+                    sender: data["sender"],
+                    keys: Object.keys(data || {}),
+                });
+            }
+            }
+        } else if ("controll" in data && data["controll"] === "CLEAR") {
+            unstable = document.getElementById(`unstable-` + sender_id)
+            if (unstable != null) {
+                unstable.display = "none"
+            }
+            w.innerHTML = ""
+            clearMarkupWindow(lang_id)
+        } else if ("memory_words" in data) {
+            var memory_button = document.getElementById('update_memory');
+            var memory = document.getElementById("memory");
+            var extract_button = document.getElementById('extract_memory');
+            memory.value = data["memory_words"].join("\n");
+            memory_button.disabled = false;
+            extract_button.disabled = false;
+        } else if ("correction" in data) {
+            const [s,e_,w1,w2] = data["position"];
+            const replacement = data["replacement"].split(" ");
+            const parent = document.getElementById("window-content-structured-"+lang_id);
+            const textElements = parent.querySelectorAll(".text-original");
+            //console.log("got correction",data);
+            textElements.forEach((el, index) => {
+                get_selected_text(el,s,e_,w1,w2,replacement);
+            });
+        }//till here
+    }
+
+    function clearMarkupWindow(index) {
+        const wMarkup = document.getElementById(`window-content-structured-` + index);
+        wMarkup.innerHTML = "";
+        createChapterElement(index, 0, 0)
+        toggleText(index, 0)
+        const toc = document.getElementById(`toc-` + index)
+        const toc_list = toc.querySelector('ul')
+        toc_list.innerHTML = "";
+    }
+
+    // Function to close a window
+    function closeWindowNotViaButton(index) {
+        // numberOfWindows = numberOfWindows - 1
+        // updateWindowWidth();
+        id = index.replace("window-", "")
+        // console.log("ID:", id)
+        for (worker in sender_ids) {
+            if (lang_index[sender[worker]] == id) {
+                console.log("Try closing:", worker, sender[worker])
+                console.log("Reset")
+                sender_ids[worker] = -1;
+            }
+        }
+        var element = document.getElementById(index);
+        console.log('element to delete', element)
+        element.remove();
+    }
+
+    // Function to mute an audio player
+    function muteControlAudioPlayer(index, isMuted) {
+        //console.log('index: ', index)
+        const iframe = document.getElementById(index);
+        //console.log('iframe: ', iframe)
+        if (iframe != null) {
+            // Send a message to the iframe to mute/unmute
+            iframe.contentWindow.postMessage({ action: 'setMute', muted: isMuted }, '*');
+        }
+    }
+
+    // Function to close a window
+    function toggleToAudioButton(index, styles) {
+        var ttsButton = document.getElementById(index);
+        var icon = ttsButton.querySelector('i');
+        if (icon.classList.contains('fa-spinner')) {
+            icon.classList.remove('fa');
+            icon.classList.remove('fa-spinner');
+            icon.classList.remove('fa-spin');
+            // Add each style to the icon
+            styles.forEach(style => {
+                icon.classList.add(style);
+            });
+        } else if (icon.classList.contains('fa-pause')) {
+            icon.classList.remove('fa-pause');
+            icon.classList.remove('fas');
+            // Add each style to the icon
+            styles.forEach(style => {
+                icon.classList.add(style);
+            });
+        } else {
+            icon.classList.remove('fa-play');
+            icon.classList.remove('fas');
+            // Add each style to the icon
+            styles.forEach(style => {
+                icon.classList.add(style);
+            });
+        }
+    }
+
+    // Function to close a window
+      function closeWindow(closeButton) {
+        const windowElement = closeButton.parentElement.parentElement.parentElement;
+        const langIndex = windowElement && windowElement.id ? windowElement.id.replace("window-", "") : null;
+        if (langIndex && typeof window.deactivateTTSForLang === 'function') {
+            window.deactivateTTSForLang(langIndex);
+        }
+        if(closeButton.parentElement.parentElement.parentElement.style.display === "none") {
+            return;
+        }
+        closeButton.parentElement.parentElement.parentElement.style.display = "none";
+        numberOfWindows = numberOfWindows -1;
+        updateWindowWidth();
+        
+      }
+/*
+    // Function to close a window
+    function closeWindow(closeButton) {
+        numberOfWindows = numberOfWindows - 1
+        //console.log("Number of windows:",numberOfWindows)
+        updateWindowWidth();
+
+        id = closeButton.parentElement.parentElement.parentElement.id.replace("window-", "")
+        console.log("ID:", id)
+        for (worker in sender_ids) {
+            console.log("Check:", worker, sender[worker])
+            if (lang_index[sender[worker]] == id) {
+                console.log("Reset")
+                sender_ids[worker] = -1;
+            }
+        }
+
+        if (closeButton.classList.contains("close2-button")) {
+            closeButton.parentElement.parentElement.parentElement.remove();
+        } else { // close the memory window
+            memoryWindowOpen = 0;
+            closeButton.parentElement.parentElement.remove();
+        }
+
+        audio_id = lang_index[lang_name[id] + " Audio"]
+        //console.log("when closing the text window check also the audio: ", audio_id)
+        muteControlAudioPlayer('video-iframe-' + audio_id, true)
+        //closeWindowNotViaButton(audio_id)
+    }
+*/
+    function show_text(w, seq, start, end, type = 'span', action = "add", spk = undefined, additionalClasses = []) {
+        //console.log("Show text:", seq, start, end, type, action)
+
+        const spans = w.getElementsByTagName('span');
+
+        if (action === 'remove') {
+            for (let i = 0; i < spans.length; i++) {
+                if (parseFloat(spans[i].getAttribute("start")) === start && parseFloat(spans[i].getAttribute("end")) === end) {
+                    spans[i].remove();
+                    return;
+                }
+            }
+            return;
+        } else if (action === 'replace') {
+            if (isMouseDown) {
+                let show_text_arguments = {
+                    w: w,
+                    seq: seq,
+                    start: start,
+                    end: end,
+                    type: type,
+                    action: action,
+                    spk: spk,
+                    additionalClasses: additionalClasses
+                };
+                bufferedReplaceActions.push(show_text_arguments);
+                return;
+            }
+            const spans = w.getElementsByTagName('span');
+            for (let i = 0; i < spans.length; i++) {
+                if (parseFloat(spans[i].getAttribute("start")) === start && parseFloat(spans[i].getAttribute("end")) === end) {
+                    const regex_span_highlight = /<span-highlight>/;
+                    if (regex_span_highlight.test(seq)) {
+                        document.getSelection().removeAllRanges();
+                    }
+                    spans[i].innerHTML = seq + " ";
+                    return;
+                }
+            }
+        }
+
+        const newSpan = document.createElement(type)
+        newSpan.innerHTML = seq
+        newSpan.setAttribute("start", start)
+        newSpan.setAttribute("end", end)
+        newSpan.setAttribute("speaker-title", spk)
+        additionalClasses.forEach(c => newSpan.classList.add(c));
+
+        if (newSpan.innerHTML.trim() === "") {
+            return;
+        }
+
+        var l = spans.length;
+        if (l == 0) {
+            w.appendChild(newSpan)
+        } else {
+            last = 0
+            for (var i = 0; i < l; i++) {
+                if (parseFloat(spans[i].getAttribute("start")) < start) {
+                    last = i;
+                }
+            }
+            spans[last].after(newSpan)
+        }
+        return newSpan;
+    }
+
+    function remove_reduntant_speaker_tag(w) {
+        // find all div that has class name is chapter
+        const allChapters = w.querySelectorAll('div.chapter');
+
+        // For each chapter, find all span that contain speaker-title
+        for (let i_chapter = 0; i_chapter < allChapters.length; i_chapter++) {
+            const chapter = allChapters[i_chapter];
+
+            // Skip the chapter that does not contain any speaker-title
+            if (chapter.querySelectorAll('span[speaker-title]:not([speaker-title="undefined"])').length === 0) {
+                continue;
+            }
+
+            // find all span that contain speaker-title
+            const speakerTagsRedunt = chapter.querySelectorAll('span[speaker-title]');
+            // remove all speaker title that not need
+            for (let i = 0; i < speakerTagsRedunt.length - 1; i++) {
+                if (speakerTagsRedunt[i].getAttribute('speaker-tag') != null && speakerTagsRedunt[i + 1].getAttribute('speaker-tag') != null) {
+                    // remove the redundant speaker tag
+                    speakerTagsRedunt[i].remove();
+                }
+            }
+        }
+    }
+
+    function update_speaker_tag(w) {
+        // find all div that has class name is chapter
+        const allChapters = w.querySelectorAll('div.chapter');
+
+        // For each chapter, update speaker tags for both original and post-edited sections
+        for (let i_chapter = 0; i_chapter < allChapters.length; i_chapter++) {
+            const chapter = allChapters[i_chapter];
+            updateSpeakerTagsForSection(chapter);
+        }
+    }
+
+    function findTextOriginalParent(node) {
+      // If it's a text node, move to its parent element
+      if (node.nodeType === Node.TEXT_NODE) {
+        node = node.parentElement;
+      }
+
+      // Use closest if available
+      if (node && node.closest) {
+        return node.closest('div.text-original');
+      }
+
+      // Fallback manual traversal
+      while (node) {
+        if (
+          node.nodeType === Node.ELEMENT_NODE &&
+          node.matches &&
+          node.matches('div.text-original')
+        ) {
+          return node;
+        }
+        node = node.parentNode;
+      }
+
+      return null;
+    }
+
+    function get_selected_text(start_node,s,e_,w1,w2,replacement=[]) {
+        const replace = replacement.length > 0;
+        //console.log("SN",start_node);
+        words = [];
+        var replacementValue;
+        for (let child of start_node.children) {
+            if(!child.classList.contains("markup_transcript")) {
+                continue;
+            }
+            const s_ = parseFloat(child.attributes["start"].value);
+            if(s_ < s) {
+                continue;
+            }
+            const e__ = parseFloat(child.attributes["end"].value);
+            if(e__ > e_) {
+                break;
+            }
+            //console.log(s_,s,e__,e_);
+            const is_first = s_ === s;
+            const is_last = e__ === e_;
+            //console.log(child);
+            for (let child2 of child.children) {
+                if(is_first) {
+                    const word_order = parseFloat(child2.attributes["word-order"].value);
+                    if(word_order < w1) {
+                        continue;
+                    }
+                }
+                const word_order = parseFloat(child2.attributes["word-order"].value);
+                if(is_last) {
+                    if(word_order > w2) {
+                        break;
+                    }
+                }
+                words.push(child2.innerHTML);
+                if(replace) {
+                    if (replacement.length > 0) {
+                        if(is_last && word_order == w2) {
+                            replacementValue = replacement.join(" ");
+                        } else {
+                            replacementValue = replacement.shift();
+                        }
+                    } else {
+                        replacementValue = "";
+                    }
+                    child2.innerHTML = replacementValue;
+                }
+                //console.log(child2);
+            }
+        }
+        return words;
+    }
+
+    function updateSpeakerTagsForSection(chapter) {
+        const sections = [
+            chapter.querySelector('.text-original'),
+            chapter.querySelector('.text-post-90'),
+            chapter.querySelector('.text-post-70'),
+            chapter.querySelector('.text-post-50')
+        ].filter(Boolean);
+
+        let globalFirstSpeaker = null;
+
+        sections.forEach((section, index) => {
+            if (!section) return;
+
+            // Remove all existing speaker tags
+            section.querySelectorAll('span[speaker-tag]').forEach(tag => tag.remove());
+
+            const spans = section.querySelectorAll('span[start]');
+            let currentSpeaker = null;
+
+            spans.forEach((span, spanIndex) => {
+                const speakerTitle = span.getAttribute('speaker-title');
+                if (!speakerTitle || speakerTitle === 'undefined') return;
+
+                if (index === 0 && spanIndex === 0) {
+                    globalFirstSpeaker = speakerTitle;
+                }
+
+                if (speakerTitle !== currentSpeaker) {
+                    const newSpan = document.createElement('span');
+                    newSpan.setAttribute('speaker-tag', speakerTitle);
+                    newSpan.setAttribute('speaker-title', speakerTitle);
+
+                    const displayTitle = speakerTitle.startsWith("Anonymous-") ? "Unknown" : speakerTitle;
+                    newSpan.innerHTML = `<br/><div class="speaker-tag" speaker-title="${speakerTitle}" speaker-title-display="${displayTitle}"><span class="speaker-tag-text">${displayTitle}:</span></div>`;
+
+                    span.before(newSpan);
+                    currentSpeaker = speakerTitle;
+                }
+            });
+
+            if (globalFirstSpeaker && spans.length > 0) {
+                const firstSpan = spans[0];
+                const existingTag = firstSpan.previousElementSibling;
+                if (!existingTag || !existingTag.hasAttribute('speaker-tag')) {
+                    const newSpan = document.createElement('span');
+                    newSpan.setAttribute('speaker-tag', globalFirstSpeaker);
+                    newSpan.setAttribute('speaker-title', globalFirstSpeaker);
+
+                    const displayTitle = globalFirstSpeaker.startsWith("Anonymous-") ? "Unknown" : globalFirstSpeaker;
+                    newSpan.innerHTML = `<div class="speaker-tag" speaker-title="${globalFirstSpeaker}" speaker-title-display="${displayTitle}"><span class="speaker-tag-text">${displayTitle}:</span></div>`;
+
+                    firstSpan.before(newSpan);
+                }
+            }
+        });
+    }
+
+    const customMenu = document.getElementById('customMenu') || document.getElementById('customMenuArchive');
+    document.addEventListener('click', () => {
+	if(customMenu !== null) {
+            customMenu.style.display = 'none';
+	}
+    });
+
+    var post_message = "";
+    var word_ = null;
+
+    const saasrButton = document.getElementById('saasr-contextmenu-button');
+    if(saasrButton) {
+        saasrButton.addEventListener('click', (e) => {
+            customMenu.style.display = 'none';
+
+            var turnSettingWindow = document.getElementById('turn-setting');
+
+            const wordPosition = word_.getBoundingClientRect();
+            const turnSettingWindowHeight = 350;
+            const turnSettingWindowWidth = 600;
+            const top = Math.min(wordPosition.top, window.innerHeight - turnSettingWindowHeight);
+            turnSettingWindow.style.top = `${top}px`;
+            turnSettingWindow.style.left = `${wordPosition.left}px`;
+            turnSettingWindow.style.height = `${turnSettingWindowHeight}px`;
+            turnSettingWindow.style.width = `${turnSettingWindowWidth}px`;
+            turnSettingWindow.style.display = 'block';
+
+            // Send message to iframe
+            turnSettingWindow.contentWindow.postMessage(post_message, '*');
+            
+            e.stopPropagation();
+        });
+    }
+    
+    const cbasrButton = document.getElementById('contextbiasing-asr-contextmenu-button');
+    if(cbasrButton) {
+        cbasrButton.addEventListener('click', (e) => {
+            customMenu.style.display = 'none';
+
+            var contextSettingWindow = document.getElementById('context-setting');
+
+            const wordPosition = word_.getBoundingClientRect();
+            const contextSettingWindowHeight = 350;
+            const contextSettingWindowWidth = 600;
+            const top = Math.min(wordPosition.top, window.innerHeight - contextSettingWindowHeight);
+            contextSettingWindow.style.top = `${top}px`;
+            contextSettingWindow.style.left = `${wordPosition.left}px`;
+            contextSettingWindow.style.height = `${contextSettingWindowHeight}px`;
+            contextSettingWindow.style.width = `${contextSettingWindowWidth}px`;
+            contextSettingWindow.style.display = 'block';
+
+            // Send message to iframe
+            contextSettingWindow.contentWindow.postMessage(post_message, '*');
+
+            e.stopPropagation();
+        });
+    }
+
+    const correctionasrButton = document.getElementById('correction-asr-contextmenu-button');
+    if(correctionasrButton) {
+        correctionasrButton.addEventListener('click', (e) => {
+            customMenu.style.display = 'none';
+
+            const selection = window.getSelection();
+
+            var s1,s2,e1,e2,o1,o2;
+
+            const anchor = selection.anchorNode;
+            if(anchor.nextElementSibling === null) {
+                s1 = parseFloat(anchor.parentElement.parentElement.attributes["start"].value);
+                e1 = parseFloat(anchor.parentElement.parentElement.attributes["end"].value);
+                o1 = parseFloat(anchor.parentElement.attributes["word-order"].value);
+            } else {
+                s1 = parseFloat(anchor.nextElementSibling.parentElement.attributes["start"].value);
+                e1 = parseFloat(anchor.nextElementSibling.parentElement.attributes["end"].value);
+                o1 = parseFloat(anchor.nextElementSibling.attributes["word-order"].value);
+            }
+            const focus = selection.focusNode;
+            if(focus.nextElementSibling === null) {
+                s2 = parseFloat(focus.parentElement.parentElement.attributes["start"].value);
+                e2 = parseFloat(focus.parentElement.parentElement.attributes["end"].value);
+                o2 = parseFloat(focus.parentElement.attributes["word-order"].value);
+            } else {
+                s2 = parseFloat(focus.nextElementSibling.parentElement.attributes["start"].value);
+                e2 = parseFloat(focus.nextElementSibling.parentElement.attributes["end"].value);
+                o2 = parseFloat(focus.nextElementSibling.attributes["word-order"].value);
+            }
+
+            var s,e_,w1,w2;
+            var start_node;
+
+            if(s1<s2 || (s1 == s2 && o1 <= o2)) {
+                s = s1;
+                e_ = e2;
+                w1 = o1;
+                w2 = o2;
+                start_node = findTextOriginalParent(anchor);
+            } else {
+                s = s2;
+                e_ = e1;
+                w1 = o2;
+                w2 = o1;
+                start_node = findTextOriginalParent(focus);
+            }
+
+            var text = get_selected_text(start_node,s,e_,w1,w2);
+            text = text
+              .filter(str => str !== "")  // remove empty strings
+              .join(" ");
+            //console.log(text);
+
+            var contextSettingWindow = document.getElementById('correction-setting');
+
+            const wordPosition = word_.getBoundingClientRect();
+            const contextSettingWindowHeight = 350;
+            const contextSettingWindowWidth = 600;
+            const top = Math.min(wordPosition.top, window.innerHeight - contextSettingWindowHeight);
+            contextSettingWindow.style.top = `${top}px`;
+            contextSettingWindow.style.left = `${wordPosition.left}px`;
+            contextSettingWindow.style.height = `${contextSettingWindowHeight}px`;
+            contextSettingWindow.style.width = `${contextSettingWindowWidth}px`;
+            contextSettingWindow.style.display = 'block';
+
+            // Send message to iframe
+            const session_id = word_.getAttribute('word-session-id')
+            const server = "/webapi";
+            post_message = { server, session_id, s, e_, w1, w2, text };
+            contextSettingWindow.contentWindow.postMessage(post_message, '*');
+
+            e.stopPropagation();
+        });
+    }
+
+    function add_selecting_word_action(w) {
+        if (w === null) {
+            return;
+        }
+
+        if (document.getElementById('turn-setting') === null && document.getElementById('context-setting') === null && document.getElementById('correction-setting') === null) {
+            return;
+        }
+
+        const words = w.querySelectorAll('.word');
+        words.forEach(word => {
+            if (word.eventListenersAdded) {
+                return;
+            }
+
+            //console.log("Adding selecting word action", word)
+            word.addEventListener('mouseover', () => {
+                if (!highlightedWord) {
+                    word.classList.add('highlight');
+                }
+            });
+            word.addEventListener('mouseout', () => {
+                if (!highlightedWord || highlightedWord !== word) {
+                    word.classList.remove('highlight');
+                }
+            });
+            word.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                customMenu.style.display = 'block';
+                customMenu.style.left = `${e.pageX}px`;
+                customMenu.style.top = `${e.pageY}px`;
+
+                const wordOrder = word.getAttribute('word-order');
+                const text = word.innerText;
+                const session_id = word.getAttribute('word-session-id');
+                const stream_id = word.getAttribute('word-stream-id');
+                const all_words = Array.from(document.querySelectorAll('.word')).filter(word => {
+                    const wordSessionId = word.getAttribute('word-session-id');
+                    const wordStreamId = word.getAttribute('word-stream-id');
+                    return wordSessionId === session_id && wordStreamId === stream_id;
+                });
+                const word_order = Array.from(all_words).map(word => word.getAttribute('word-order'));
+                const minOrder = Math.min(...word_order);
+                const maxOrder = Math.max(...word_order);
+                const all_word_order = [minOrder, maxOrder];
+                const profileSelect = document.getElementById("profile");
+                const profile_id = "" || (profileSelect ? profileSelect.value : "");
+
+                // Remove highlight from previously highlighted word
+                if (highlightedWord) {
+                    highlightedWord.classList.remove('highlight');
+                }
+
+                highlightedWord = word;
+                word.classList.add('highlight');
+
+                post_message = { text, wordOrder, session_id, stream_id, all_word_order, profile_id };
+                word_ = word;
+            });
+            word.eventListenersAdded = true;
+        });
+    }
+
+    /**
+     * Given a list of transcript word IDs, return the list of spans in the
+     * transcript window that contain the words.
+     *
+     * @param {Array} Source IDs to match
+     * @returns List of matching spans
+     */
+    function getTransriptSpansFromSourceIDs(sourceIds) {
+        const asrWindowIndex = lang_index[sender["asr:0"]];
+        const asrWindow = document.getElementById(`window-content-structured-${asrWindowIndex}`);
+        const all_span_has_word_order = asrWindow.querySelectorAll('span.word[word-order]');
+        const asr_spans = Array.from(all_span_has_word_order).filter(span => {
+            const wordOrder = Number(span.getAttribute('word-order'));
+            return sourceIds.includes(wordOrder);
+        });
+        return asr_spans;
+    }
+
+    showWordAlignment = false;
+    function addTranslationHover(span, data) {
+        const sentence_word_id = data.sourceTokens;
+        span.addEventListener('mouseover', () => {
+            if (showWordAlignment) {
+                const asr_spans = getTransriptSpansFromSourceIDs(sentence_word_id);
+                span.classList.add('highlight-segment');
+                asr_spans.forEach(span => {
+                    span.classList.add('highlight-segment');
+                });
+
+                const time = span.getAttribute("start");
+                if (!(time in alignmentCache)) {
+                    alignmentCache[time] = 1;
+                    getAlignment([span], asr_spans);
+                }
+            }
+        });
+
+        span.addEventListener('mouseleave', () => {
+            if (showWordAlignment) {
+                const asr_spans = getTransriptSpansFromSourceIDs(sentence_word_id);
+                span.classList.remove('highlight-segment');
+                asr_spans.forEach(span => {
+                    span.classList.remove('highlight-segment');
+                });
+            }
+        });
+    }
+
+    function findRelevantChapter(w, start) {
+        const chapters = w.querySelectorAll('.chapter');
+        let i = 1;
+        while (i < chapters.length && parseFloat(chapters[i].getAttribute("start")) < start) {
+            i++;
+        }
+        return chapters[i - 1];
+    }
+
+    function insertParagraphBreakIntoAllRates(chapterElement, start, end, lang_id) {
+        const textPost = chapterElement.querySelector('.text-post');
+        if (!textPost) return;
+
+        const compressionRates = ['90', '70', '50'];
+        compressionRates.forEach(rate => {
+            const rateDiv = textPost.querySelector(`.text-post-${rate}`);
+            if (rateDiv) {
+                show_text(rateDiv, '<br /><br />', start, end, 'span', "add", undefined, ['paragraph-break']);
+            }
+        });
+    }
+
+
+    function createOrUpdatePostEditedContent(chapterElement, compressionRate, content, start, end, speakerTitle, type = 'span', additionalClasses = []) {
+        let textPost = chapterElement.querySelector('.text-post');
+        if (!textPost) {
+            textPost = document.createElement("div");
+            textPost.className = "text-post";
+            chapterElement.querySelector('.text-div').appendChild(textPost);
+        }
+
+        let rateDiv = textPost.querySelector(`.text-post-${compressionRate}`);
+        if (!rateDiv) {
+            rateDiv = document.createElement("div");
+            rateDiv.className = `text-post-${compressionRate}`;
+            rateDiv.style.display = "none";
+            textPost.appendChild(rateDiv);
+        }
+
+        const newSpan = show_text(rateDiv, content, start, end, type, "add", speakerTitle, additionalClasses);
+
+        updateSpeakerTagsForSection(chapterElement);
+
+        return newSpan;
+    }
+
+    function show_markup_text(w, seq, start, end, language, action = "add", spk = undefined, additionalClasses = []) {
+
+        chapters = w.querySelectorAll('.chapter')
+        //console.log("Number of chapters:",chapters.length)
+        i = 1
+        while (i < chapters.length && parseFloat(chapters[i].getAttribute("start")) < start) {
+            i++;
+        }
+        return show_text(chapters[i - 1].querySelector('.text-original'), seq, start, end, ...[,], action, spk, additionalClasses);
+    }
+
+    function updateToggleButton(chapterElement) {
+        const readTextButton = chapterElement.querySelector('.read-text-button');
+        const toggleTextButton = chapterElement.querySelector('.toggle-text-button');
+        const compressionRates = Array.from(chapterElement.querySelectorAll('.text-post > div'))
+            .map(el => el.className.replace('text-post-', ''))
+            .sort((a, b) => parseInt(b) - parseInt(a));
+
+        toggleTextButton.setAttribute('data-compression-rates', JSON.stringify(['100', ...compressionRates]));
+        toggleTextButton.style.display = readTextButton.textContent === "Show" ? "none" : "inline-block";
+
+        if (!toggleTextButton.querySelector('.compression-type')) {
+            toggleTextButton.innerHTML = '<span class="compression-type">Original</span><span class="compression-value">100%</span>';
+        }
+    }
+
+
+    document.addEventListener('click', (event) => {
+        // Only remove the highlights if the click is outside the highlighted elements
+        const isClickInsideHighlighted = event.target.closest('.highlighted');
+        const isClickInsideSummary = event.target.closest('.summary');
+
+        if (!isClickInsideHighlighted && !isClickInsideSummary) {
+            removeSummaryHighlights();
+        }
+        hideTurnSetting('turn-setting');
+        hideTurnSetting('context-setting');
+        hideTurnSetting('correction-setting');
+    });
+
+    function hideTurnSetting(id) {
+        const turnSettingWindow = document.getElementById(id);
+        // if (turnSettingWindow != null && !turnSettingWindow.contains(event.target)) {
+        if (turnSettingWindow != null) {
+            turnSettingWindow.style.display = 'none';
+            if (highlightedWord) {
+                highlightedWord.classList.remove('highlight');
+                highlightedWord = null;
+            }
+        }
+    }
+
+    function extractSpansForChapter(chapter) {
+        if (!chapter) {
+            console.error(`Chapter with index ${index} not found.`);
+            return [];
+        }
+
+        // Select all the span elements within the chapter element
+        const spans = chapter.querySelectorAll('.text .text-original span.markup_transcript');
+
+        // Map the spans to an array of objects
+        const spanObjects = Array.from(spans).map(span => {
+            return {
+                text: span.textContent,
+                start: parseFloat(span.getAttribute('start')),
+                end: parseFloat(span.getAttribute('end'))
+            };
+        });
+
+        return spanObjects;
+    }
+
+    function removeSummaryHighlights() {
+        Array.from(document.querySelectorAll('.highlighted')).forEach(
+            (el) => el.classList.remove('highlighted')
+        );
+    }
+
+    function fetchSummaryLinks(data) {
+        return fetch('/get_summary_links', {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(data),
+        })
+    }
+
+    function highlightSummaryLinks(chapter, links, summary_item) {
+        summary_item.classList.add('highlighted');
+
+        let first_start_span = null;
+        links.forEach(link => {
+            const { start, end, score } = link;
+            if (score == 0) {
+                return;
+            }
+
+            // highlight each link with background color
+            // find the span elements that correspond to the start and end times
+            const spans = chapter.querySelectorAll('.text .text-original span');
+            // consider that the spans are sorted by start time and that link's start and end times don't necessarily match the spans' start and end times
+            let startSpan = null;
+            let endSpan = null;
+            let withinSpans = [];
+            for (let j = 0; j < spans.length; j++) {
+                const span = spans[j];
+                const spanStart = parseFloat(span.getAttribute('start'));
+                const spanEnd = parseFloat(span.getAttribute('end'));
+
+                // exact match or starts before and ends after start
+                if (spanStart <= start && spanEnd >= start) {
+                    startSpan = span;
+                }
+
+                // exact match or starts before the end and ends after or at the end
+                if (spanStart <= end && spanEnd >= end) {
+                    endSpan = span;
+                }
+
+                if (startSpan && !endSpan) {
+                    withinSpans.push(span);
+                }
+            }
+
+            // highlight the spans
+            if (startSpan && endSpan) {
+                [startSpan, endSpan, ...withinSpans].forEach(span => {
+                    span.classList.add('highlighted');
+                });
+            }
+
+            if (first_start_span == null && startSpan != null) {
+                //console.log("Set first start span");
+                first_start_span = startSpan;
+            }
+
+        });
+
+        //console.log(first_start_span);
+        if (first_start_span != null) {
+            document.ignoreTimeUpdate = true;
+            const media = document.getElementById("media");
+            if (media) {
+                media.currentTime = parseFloat(first_start_span.getAttribute("start"));
+            }
+            setTimeout(() => { document.ignoreTimeUpdate = false; }, 7500);
+
+            let element = first_start_span
+            let container = element.closest('.window-content-structured');
+
+            // Calculate the scroll position to center the element vertically within the container
+            let containerTop = container.getBoundingClientRect().top;
+            let elementTop = element.getBoundingClientRect().top;
+            let offset = elementTop - containerTop - (container.clientHeight - element.clientHeight) / 2;
+
+            // Scroll the container to the calculated position
+            container.scrollTo({
+                top: container.scrollTop + offset,
+                behavior: 'smooth'
+            });
+        }
+    }
+
+    
+
+    function createTocElement(headline, elementToJumpTo) {
+        const tocElement = document.createElement('li')
+        const tocLink = document.createElement('a')
+        tocLink.textContent = headline
+        tocLink.href = "#"
+        tocLink.onclick = () => {
+            let element = elementToJumpTo
+            let container = element.closest('.window-content-structured');
+            let containerTop = container.getBoundingClientRect().top;
+            let elementTop = element.getBoundingClientRect().top;
+            let offset = elementTop - containerTop - (container.clientHeight - element.clientHeight) / 2;
+            container.scrollTo({
+                top: container.scrollTop + offset,
+                behavior: 'smooth'
+            });
+        }
+        tocElement.appendChild(tocLink)
+        return tocElement
+    }
+
+    function show_summary(window, seq, start, end, action = "add") {
+
+        chapters = window.querySelectorAll('.chapter')
+        let i = 1
+        while (i < chapters.length && parseFloat(chapters[i].getAttribute("start")) < start) {
+            i++;
+        }
+        const chapter = chapters[i - 1]
+        const summary_item = show_text(chapter.querySelector('.summary'), applyMD(seq.trim()), start, end, 'li', action);
+        chapter.querySelector(".expand-button").style.display = "block"
+
+        summary_item.addEventListener('click', () => {
+            removeSummaryHighlights();
+
+            console.log("Clicked on a summary");
+            const segment_texts = extractSpansForChapter(chapter)
+            console.log(segment_texts);
+
+            const summaryText = summary_item.textContent;
+            console.log("Summary text:", summaryText);
+
+            data = {
+                "segment_texts": segment_texts,
+                "summary_text": summaryText
+            }
+
+            fetchSummaryLinks(data)
+                .then(response => response.json())
+                .then(data => {
+                    const links = data.links;
+                    console.log("Links:", links);
+                    highlightSummaryLinks(chapter, links, summary_item);
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                });
+        });
+
+    }
+
+    function notifyChapterHeadingUpdated(w) {
+        if (!w || !w.id) {
+            return;
+        }
+        const langId = String(w.id).replace('window-content-structured-', '');
+        window.dispatchEvent(new CustomEvent('lt:chapter-heading-updated', {
+            detail: { langId: langId }
+        }));
+    }
+
+    function addChapterHeading(w, seq, start, end, old = false) {
+        const chapters = w.querySelectorAll('.chapter');
+        let i = 1;
+        while (i < chapters.length && parseFloat(chapters[i].getAttribute("start")) < start) {
+            i++;
+        }
+
+        //console.log(chapters.length);
+
+        const title = chapters[i - 1].querySelector('.chapter-title-text');
+
+        if (old) {
+            title.innerHTML += seq
+            notifyChapterHeadingUpdated(w);
+        } else {
+            const existingText = title.innerHTML;
+            const newText = existingText + seq;
+            let index = existingText.length;
+
+            function appendCharacter() {
+                if (index < newText.length) {
+                    title.innerHTML += newText.charAt(index);
+                    index++;
+                    setTimeout(appendCharacter, 20);
+                } else {
+                    notifyChapterHeadingUpdated(w);
+                }
+            }
+
+            appendCharacter();
+
+        }
+    }
+
+    function sendApiRequest(server) {
+        const request = new XMLHttpRequest();
+        request.open('POST', server, false);  // `false` makes the request synchronous
+        request.setRequestHeader("Content-Type", "application/json;charset=UTF-8");
+        request.send();
+
+        if (request.status !== 200) {
+            console.error("getgraph Request failed with status:", request.status);
+            return; // exit the function
+        }
+        return JSON.parse(request.responseText);
+    }
+
+    function getGraph() {
+        var server = '/webapi/&lt;NullSession {}&gt;'
+        var graph = sendApiRequest(server+'/getgraph');
+        if(!graph) { // used during generation of cache page
+            server = 'http://ltapi:5000/ltapi/&lt;NullSession {}&gt;';
+            graph = sendApiRequest(server+'/getgraph');
+        }
+        return [graph, server];
+    }
+
+    function updateAllWindows() {
+        [graph, server] = getGraph();
+        for (let i = 0; i < Object.keys(lang_index).length; i++) {
+            console.log("Interation",i+1);
+            updateWindowContent(String(i+1),graph,server);
+        }
+    }
+
+    // Function to update the window content
+    function updateWindowContent(index, graph, server) {
+        // Make sure lang_visible reflects the currently-active panes BEFORE the
+        // synchronous replay below \u2014 otherwise downstream consumers (like the
+        // notes panel) that gate on lang_visible will silently drop replayed
+        // messages because lang_visible flips to 1 only AFTER the replay finishes.
+        if (typeof syncLangVisible === 'function') {
+            syncLangVisible();
+        }
+        if(!graph) {
+            [graph, server] = getGraph();
+        }
+        const request = new XMLHttpRequest();
+        for (var worker in graph) {
+            if (graph[worker].includes("api")) {
+                const stream = worker.split(":")[1]
+                if (!sender[worker]) {
+                    request.open('POST', server + '/' + stream + '/get_output_language_component', false);  // `false` makes the request synchronous
+                    request.setRequestHeader("Content-Type", "application/json;charset=UTF-8");
+                    request.send(JSON.stringify(JSON.stringify({ "component": worker })));
+
+                    if (request.status !== 200) {
+                        console.error("get_output_language_component with stream "+stream+" Request failed with status:", request.status);
+                        continue;
+                    }
+                    sender[worker] = request.responseText
+                }
+                if (lang_index[sender[worker]] == index) {
+                    sender_number[worker] = Object.keys(sender).length
+                    get_previous_messages(worker, server + '/get_previous_messages');
+                }
+            }
+        }
+    }
+
+    function get_previous_messages(worker, server="") {
+
+        if (!(worker in sender_ids)) {
+            sender_ids[worker] = -1;
+        }
+        //First message for this language, but there have been previous languages
+        const request = new XMLHttpRequest();
+        if(!server) {
+            server = '/webapi/&lt;NullSession {}&gt;/get_previous_messages';
+        }
+        request.open('POST', server, false);  // `false` makes the request synchronous
+        request.setRequestHeader("Content-Type", "application/json;charset=UTF-8");
+        request.send(JSON.stringify(JSON.stringify({ "component": worker, "begin": sender_ids[worker] + 1 })));
+        //console.log("Request list:",JSON.stringify(JSON.stringify({ "component": worker,"begin":sender_ids[worker] + 1})))
+        //console.log(request.responseText)
+
+        if (request.status !== 200) {
+            console.error("get_previous_messages with worker "+worker+" Request failed with status:", request.status);
+            return;
+        }
+
+        var messages = JSON.parse(request.responseText)
+        const window = document.getElementById(`window-` + lang_index[sender[worker]])
+        const dis = window.style.display;
+        window.style.display = "none";
+        messages.forEach(function (item, index) {
+            old_data = JSON.parse(item)
+            //console.log("WHO data: ", old_data)
+            //console.log("WHO:", sender[worker])
+            //console.log("Index:",lang_index[sender[worker]])
+            w = document.getElementById(`window-content-` + lang_index[sender[worker]])
+            //console.log("Window:",w)
+            if (w != null) {
+                //console.log("Unstable",old_data.unstable)
+                if (!("unstable" in old_data) || old_data.unstable == false || old_data.controll == "START") {
+                    //console.log("WHO Add messasge")
+                    addMessage(lang_index[sender[old_data.sender]], old_data, sender[old_data.sender], old = true);
+                }
+            }
+            sender_ids[worker] = parseInt(old_data["message_id"])
+
+        });
+        window.style.display = dis;
+        scrollLanguageWindowToEnd(lang_index[sender[worker]]);
+
+    }
+
+    function toggleView(index, button) {
+        //console.log(index)
+        const content = document.getElementById(`window-content-${index}`);
+        //console.log(`window-content-${index}`)
+        //console.log(content)
+
+        const contentStructured = document.getElementById(`window-content-structured-${index}`);
+        button.textContent = button.textContent === "Plain" ? "Markup" : "Plain";
+        content.style.display = button.textContent === "Plain" ? "block" : "none"
+        contentStructured.style.display = button.textContent === "Markup" ? "block" : "none"
+
+
+        
+
+        if (button.textContent == "Plain") {
+            langType[index] = "plain_transcript"
+            langWindow[index] = document.getElementById(`window-content-${index}`)
+        } else {
+            langType[index] = "markup_transcript"
+            langWindow[index] = document.getElementById(`window-content-structured-${index}`)
+        }
+        langText[index] = langWindow[index].getElementsByClassName(langType[index])[0]
+        langIndex[index] = 0
+
+        
+
+    }
+
+    // Function to create a chapter element
+    function createChapterElement(language, index, start) {
+        const chapterDiv = document.createElement("div");
+        chapterDiv.className = "chapter";
+        chapterDiv.setAttribute("start", start)
+        chapterDiv.setAttribute("index", index)
+        chapterDiv.setAttribute("postedited", 0)
+
+        const chapterHeader = document.createElement("div");
+        chapterHeader.className = "chapter-header";
+        chapterDiv.appendChild(chapterHeader);
+
+
+        const titleDiv = document.createElement("div");
+        titleDiv.className = "chapter-title";
+        const display_index = index + 1;
+        titleDiv.innerHTML = `<span class="chapter-title-number">${display_index} </span><span class="chapter-title-text"></span>`;
+        titleDiv.setAttribute('data-chapter-number', display_index);
+        if (display_index.toString().length > 1) {
+            titleDiv.style.paddingLeft = '1.75em';
+        }
+        chapterHeader.appendChild(titleDiv);
+
+        const buttonsContainer = document.createElement("div");
+        buttonsContainer.className = "chapter-buttons-container";
+
+        const toggleTextButton = document.createElement("button");
+        toggleTextButton.className = "toggle-text-button";
+        toggleTextButton.innerHTML = '<span class="compression-type">Original</span><span class="compression-value">100%</span>';
+        toggleTextButton.setAttribute("onclick", `toggleTextVersion('${language}', ${index})`);
+        toggleTextButton.style.display = "none"; // Initially hidden
+        buttonsContainer.appendChild(toggleTextButton);
+
+        const readTextButton = document.createElement("button");
+        readTextButton.className = "read-text-button";
+        readTextButton.textContent = "Show";
+        readTextButton.setAttribute("onclick", `toggleText('${language}', ${index})`);
+        buttonsContainer.appendChild(readTextButton);
+
+
+        const expandButton = document.createElement("button");
+        expandButton.className = "expand-button";
+        expandButton.textContent = "[+]";
+        expandButton.setAttribute("onclick", `toggleSummary('${language}', ${index})`);
+        expandButton.style.display = "none";
+        buttonsContainer.appendChild(expandButton);
+
+        chapterHeader.appendChild(buttonsContainer);
+
+        const summaryDiv = document.createElement("div");
+        const summaryDiv2 = document.createElement("ul");
+        summaryDiv2.className = "summary";
+        summaryDiv.appendChild(summaryDiv2)
+        chapterDiv.appendChild(summaryDiv);
+
+        const textDiv = document.createElement("div");
+        textDiv.className = "text";
+        chapterDiv.appendChild(textDiv);
+
+        const textOrig = document.createElement("div");
+        textOrig.className = "text-original";
+        textDiv.appendChild(textOrig);
+
+        const textPost = document.createElement("div");
+        textPost.className = "text-post";
+        textPost.style.display = "block";
+        textDiv.appendChild(textPost);
+
+        // Create divs for different compression rates
+        const compressionRates = ['100', '90', '70', '50'];
+        compressionRates.forEach(rate => {
+            if (rate === '100') return;
+            const rateDiv = document.createElement("div");
+            rateDiv.className = `text-post-${rate}`;
+            rateDiv.style.display = "none"; // Initially hidden
+            textPost.appendChild(rateDiv);
+        });
+
+        toggleTextButton.setAttribute('data-compression-rates', JSON.stringify(compressionRates));
+
+
+        const content = document.getElementById(`window-content-structured-${language}`);
+        content.appendChild(chapterDiv)
+
+        if (index != 0) {
+            moveElements(start, content.querySelectorAll('.summary')[index - 1], summaryDiv2)
+            moveElements(start, content.querySelectorAll('.text-original')[index - 1], textOrig)
+
+            compressionRates.forEach(rate => {
+                const prevRateDiv = content.querySelectorAll('.chapter')[index - 1].querySelector(`.text-post-${rate}`);
+                const currentRateDiv = textPost.querySelector(`.text-post-${rate}`);
+                if (prevRateDiv && currentRateDiv) {
+                    moveElements(start, prevRateDiv, currentRateDiv);
+                }
+            });
+
+            chapters = content.querySelectorAll('.chapter')
+
+            if (chapters[index - 1].querySelector('.read-text-button').textContent == "Hide") {
+                toggleText(language, index - 1)
+            }
+
+            
+            if (chapters[index].querySelector('.read-text-button').textContent == "Hide") {
+                toggleText(language, index)
+            }
+            
+
+            if (chapters[index].querySelector('.summary').hasChildNodes()) {
+                chapters[index].querySelector(".expand-button").style.display = "block"
+            }
+            if (chapters[index].querySelector('.text-post').hasChildNodes()) {
+                chapters[index].setAttribute("postedited", 1);
+                const readTextButtons = chapters[index].querySelector('.read-text-button');
+                const toggleTextButtons = chapters[index].querySelector('.toggle-text-button');
+                toggleTextButtons.style.display = readTextButtons.textContent === "Show" ? "none" : "inline-block";
+                chapters[index].querySelector('.text-post').style.display = "block";
+            }
+
+            
+        } else {
+            chapters = content.querySelectorAll('.chapter')
+            if (chapters[index].querySelector('.read-text-button').textContent == "Hide") {
+                toggleText(language, index)
+            }
+            
+        }
+
+        if (windowCompressionRate[language]) {
+            const desired = windowCompressionRate[language];
+            const btn = chapterDiv.querySelector('.toggle-text-button');
+            if (btn) {
+                const rates = JSON.parse(btn.getAttribute('data-compression-rates'));
+
+                const hasContent = (rate) => rate === '100'
+                    ? true
+                    : (chapterDiv.querySelector(`.text-post-${rate}`)?.textContent.trim().length > 0);
+
+                let effective = desired;
+
+                btn.querySelector('.compression-type').textContent = (effective === '100') ? 'Original' : 'Shortened';
+                btn.querySelector('.compression-value').textContent = `${effective}%`;
+
+                chapterDiv.querySelector('.text-original').style.display = "none";
+                chapterDiv.querySelectorAll('.text-post > div').forEach(el => el.style.display = "none");
+                if (effective === '100') {
+                    chapterDiv.querySelector('.text-original').style.display = "block";
+                } else {
+                    const el = chapterDiv.querySelector(`.text-post-${effective}`);
+                    if (el) el.style.display = "block";
+                }
+            }
+        }
+
+    }
+
+
+    function moveElements(startTime, input, output) {
+        for (var i = input.children.length - 1; i >= 0; i--) {
+            child = input.children[i]
+            //console.log("Compare ",child.getAttribute("start")," ",parseFloat(startTime))
+            if (parseFloat(child.getAttribute("start")) > startTime) {
+                //console.log("Move elements with start time",child.getAttribute("start")," to chapter with start time",startTime)
+                input.removeChild(child)
+                output.prepend(child)
+            }
+        }
+    }
+
+    // Function to toggle the visibility of summary
+    function getFullWords(text, selectionStart, selectionEnd) {
+        let startIndex = selectionStart;
+        let endIndex = selectionEnd;
+
+        // Find the start of the first word
+        while (startIndex > 0 && !/\s/.test(text[startIndex - 1])) {
+            startIndex--;
+        }
+
+        // Find the end of the last word
+        while (endIndex < text.length && !/\s/.test(text[endIndex])) {
+            endIndex++;
+        }
+
+        return text.slice(startIndex, endIndex);
+    }
+
+    const global_bubble = document.createElement('div');
+    global_bubble.className = 'bubble';
+    document.body.appendChild(global_bubble);
+
+    function updateBubble(data, bubbleElement) {
+        const wikiLink = data.link;
+        bubbleElement.innerHTML = `<a href="${wikiLink}" target="_blank">
+            <img src="https://upload.wikimedia.org/wikipedia/commons/5/5a/Wikipedia%27s_W.svg" alt="Wikipedia" width="16" height="16" />
+            ${data.term}
+        </a>`;
+    }
+
+    function addWindowWikiSuggester(windowElement, language) {
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        windowElement.appendChild(bubble);
+
+        //console.log(language);
+        windowElement.addEventListener('mouseup', function (event) {
+            const selection = window.getSelection();
+            //console.log("Wiki Select", selection);
+            if (selection.rangeCount > 0) {
+                const range = selection.getRangeAt(0);
+                const selectedText = range.toString().trim();
+
+                //console.log("Selected text:", selectedText)
+
+                if (selectedText) {
+                    const fullText = windowElement.textContent;
+
+                    //console.log("Full text:", fullText);
+
+                    const preSelectionRange = range.cloneRange();
+                    preSelectionRange.selectNodeContents(windowElement);
+                    preSelectionRange.setEnd(range.startContainer, range.startOffset);
+                    const start = preSelectionRange.toString().length;
+
+                    let fullWords = getFullWords(fullText, start, start + selectedText.length);
+                    fullWords = fullWords.replace(/[^a-zA-Z0-9\s]/g, '');
+
+                    if (fullWords.length > 300) {
+                        global_bubble.style.display = 'none';
+                        bubble.style.display = 'none';
+                        return;
+                    }
+
+                    fetchWikiLink(fullWords)
+                        .then(response => response.json())
+                        .then(data => {
+                            //console.log(data);
+                            if (data.term) {
+                                updateBubble(data, bubble);
+                                updateBubble(data, global_bubble);
+
+                                // if fullscreen mode
+                                if (!document.fullscreenElement) {
+                                    global_bubble.style.display = 'block';
+                                    global_bubble.style.left = `${event.pageX}px`;
+                                    global_bubble.style.top = `${event.pageY + 20}px`;
+                                } else {
+                                    const rect = windowElement.getBoundingClientRect();
+                                    const scrollLeft = windowElement.scrollLeft || document.documentElement.scrollLeft;
+                                    const scrollTop = windowElement.scrollTop || document.documentElement.scrollTop;
+
+                                    const left = event.clientX - rect.left + scrollLeft;
+                                    const top = event.clientY - rect.top + scrollTop;
+
+                                    // Position the bubble
+                                    bubble.style.left = `${left}px`;
+                                    bubble.style.top = `${top + 12}px`;
+
+                                    // Ensure the bubble stays within the window element
+                                    const bubbleRect = bubble.getBoundingClientRect();
+                                    if (bubbleRect.right > rect.right) {
+                                        bubble.style.left = `${rect.width - bubbleRect.width}px`;
+                                    }
+                                    if (bubbleRect.bottom > rect.bottom) {
+                                        bubble.style.top = `${top - bubbleRect.height - 10}px`;
+                                    }
+                                    bubble.style.display = 'block';
+                                }
+                            } else {
+                                global_bubble.style.display = 'none';
+                                bubble.style.display = 'none';
+                            }
+                        })
+                        .catch(error => {
+                            console.error('Error:', error);
+                        });
+                } else {
+                    bubble.style.display = 'none';
+                }
+            }
+        });
+
+        window.addEventListener('mousedown', function (event) {
+            if (event.target !== bubble && !bubble.contains(event.target) && event.target !== global_bubble && !global_bubble.contains(event.target)) {
+                bubble.style.display = 'none';
+                global_bubble.style.display = 'none';
+            }
+        });
+
+        window.addEventListener('scroll', function () {
+            bubble.style.display = 'none';
+            global_bubble.style.display = 'none';
+        });
+
+        document.getElementById(`window-content-structured-${language}`).addEventListener('scroll', function () {
+            bubble.style.display = 'none';
+            global_bubble.style.display = 'none';
+        });
+    }
+
+    function fetchWikiLink(term) {
+        return fetch('/get_wiki_suggestion', {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ "term": term, "lang": "en" }),
+        })
+    }
+
+    function toggleSummary(language, index) {
+        const content = document.getElementById(`window-content-structured-${language}`);
+        const expandButton = content.querySelectorAll('.expand-button')[index];
+        const summary = content.querySelectorAll('.summary')[index];
+        expandButton.textContent = expandButton.textContent === "[+]" ? "[-]" : "[+]";
+        summary.style.display = expandButton.textContent === "[+]" ? "none" : "block";
+
+    }
+
+    // Function to toggle the visibility of text
+    function toggleText(language, index) {
+        const content = document.getElementById(`window-content-structured-${language}`);
+        const text = content.querySelectorAll('.text')[index];
+        const chapter = content.querySelectorAll('.chapter')[index];
+        const readTextButtons = content.querySelectorAll('.read-text-button')[index];
+        const toggleTextButtons = content.querySelectorAll('.toggle-text-button')[index];
+
+        readTextButtons.textContent = readTextButtons.textContent === "Show" ? "Hide" : "Show";
+        text.style.display = readTextButtons.textContent === "Show" ? "none" : "block";
+        if (chapter.getAttribute("postedited") == 1) {
+            toggleTextButtons.style.display = readTextButtons.textContent === "Show" ? "none" : "inline-block";
+        }
+    }
+
+    // Function to toggle between original and post-edited text
+    function toggleTextVersion(language, index) {
+        const content = document.getElementById(`window-content-structured-${language}`);
+        const chapter = content.querySelectorAll('.chapter')[index];
+        const toggleTextButton = chapter.querySelector('.toggle-text-button');
+        const compressionRates = JSON.parse(toggleTextButton.getAttribute('data-compression-rates'));
+
+        const compressionType = toggleTextButton.querySelector('.compression-type').textContent;
+        const compressionValue = toggleTextButton.querySelector('.compression-value').textContent;
+
+        let currentRate = compressionType === 'Original' ? '100' : compressionValue.replace('%', '');
+        let currentIndex = compressionRates.indexOf(currentRate);
+
+        const hasContent = (div) => div && div.textContent.trim().length > 0;
+
+        let newRate;
+        let newIndex;
+        for (let i = 1; i <= compressionRates.length; i++) {
+            newIndex = (currentIndex + i) % compressionRates.length;
+            newRate = compressionRates[newIndex];
+
+            if (newRate === '100' || hasContent(chapter.querySelector(`.text-post-${newRate}`))) {
+                break;
+            }
+        }
+
+        const newCompressionType = newRate === '100' ? 'Original' : 'Shortened';
+        const newCompressionValue = `${newRate}%`;
+
+        toggleTextButton.querySelector('.compression-type').textContent = newCompressionType;
+        toggleTextButton.querySelector('.compression-value').textContent = newCompressionValue;
+
+        windowCompressionRate[language] = newRate;
+
+        const chaptersAll = content.querySelectorAll('.chapter');
+        chaptersAll.forEach((ch) => {
+            const btn = ch.querySelector('.toggle-text-button');
+            if (!btn) return;
+
+            const rates = JSON.parse(btn.getAttribute('data-compression-rates'));
+
+            const prefers = windowCompressionRate[language] || '100';
+            const hasContent = (rate) => rate === '100'
+                ? true
+                : (ch.querySelector(`.text-post-${rate}`)?.textContent.trim().length > 0);
+
+            let effective = prefers;
+            if (!hasContent(effective)) {
+                effective = rates.find(r => hasContent(r)) || '100';
+            }
+
+            btn.querySelector('.compression-type').textContent = (effective === '100') ? 'Original' : 'Shortened';
+            btn.querySelector('.compression-value').textContent = `${effective}%`;
+
+            ch.querySelector('.text-original').style.display = "none";
+            ch.querySelectorAll('.text-post > div').forEach(el => el.style.display = "none");
+            if (effective === '100') {
+                ch.querySelector('.text-original').style.display = "block";
+            } else {
+                const el = ch.querySelector(`.text-post-${effective}`);
+                if (el) el.style.display = "block";
+            }
+        });
+
+        chapter.querySelector('.text-original').style.display = "none";
+        chapter.querySelectorAll('.text-post > div').forEach(el => {
+            el.style.display = "none";
+        });
+
+        if (newRate === '100') {
+            chapter.querySelector('.text-original').style.display = "block";
+        } else {
+            const textPost = chapter.querySelector(`.text-post-${newRate}`);
+            if (textPost) {
+                textPost.style.display = "block";
+            }
+        }
+    }
+
+    function toggleFullScreen(elementId) {
+        const element = document.getElementById(elementId);
+
+        if (!document.fullscreenElement) {
+            // If no element is in full-screen, make this one full-screen
+            element.requestFullscreen().catch(err => {
+                console.error(`Error attempting to enable full-screen mode: ${err.message}`);
+            });
+        } else {
+            // If an element is in full-screen, exit full-screen
+            document.exitFullscreen().catch(err => {
+                console.error(`Error attempting to exit full-screen mode: ${err.message}`);
+            });
+        }
+    }
+
+    function updateWindowWidth() {
+
+        console.log("Update width with for ", numberOfWindows, "windows")
+        
+        if (orientation == "portrait") {
+
+            [...document.getElementsByClassName('window')].forEach(el => {
+                // Do something with each element
+                el.style.width = "95%"
+            })
+            return;
+        }
+        
+
+        if (numberOfWindows == 1) {
+            [...document.getElementsByClassName('window')].forEach(el => {
+                // Do something with each element
+                el.style.width = "95%"
+            })
+        } else {
+            [...document.getElementsByClassName('window')].forEach(el => {
+                // Do something with each element
+                el.style.width = "45%"
+            })
+        }
+    }
+
+    function applyMD(text) {
+        return marked.parseInline(text);
+
+    }
+
+    function alignToTranscript(windowId, targetTime, markup) {
+        var wins = document.getElementsByClassName("window");
+        var win = wins[windowId];
+        //var [textEl] = win.getElementsByClassName("text-original");
+        const windowContentId = markup ? "window-content-structured" : "window-content";
+        var [textEl] = win.getElementsByClassName(windowContentId);
+        const transcriptId = markup ? "markup_transcript" : "plain_transcript";
+        var textSpans = textEl.getElementsByClassName(transcriptId);
+        var alignTo = null;
+        var prevT = null;
+        for (let i = 0; i < textSpans.length; i++) {
+            const el = textSpans[i];
+            var t = el.getAttribute("start");
+            console.log(`${i}: ${t} > ${targetTime} ?`);
+            //console.log(el);
+            if (t > targetTime) {
+                var diff = t - targetTime;
+                //alignTo = prevT != null && diff < targetTime - prevT ? i : i - 1;
+                alignTo = prevT == null ? i : i - 1;
+                break;
+            }
+            prevT = t;
+        }
+        console.log(`found ${alignTo}: at ${t}`);
+
+        var alignedSpan = textSpans[alignTo];
+        console.log(alignedSpan);
+        return alignedSpan;
+    }
+
+    function removeHighlight(windowId, targetTime, span, markup) {
+        span.classList.remove('highlight-segment');
+        let alignedSpan = alignToTranscript(0, targetTime, markup);
+        alignedSpan.classList.remove('highlight-segment');
+        for (const sspan of findSentenceBoundaries(span)) {
+            sspan.classList.remove('highlight-segment');
+        }
+        for (const sspan of findSentenceBoundaries(alignedSpan)) {
+            sspan.classList.remove('highlight-segment');
+        }
+    }
+
+    function findSentenceBoundaries(span) {
+        let spans = [];
+        let prevSpan = span;
+        while (prevSpan.previousSibling != null) {
+            prevSpan = prevSpan.previousSibling;
+            if (/[.?!]/.test(prevSpan.textContent)) {
+                break;
+            }
+            //spans.push(prevSpan);
+            spans.unshift(prevSpan);
+        }
+        if (span.nextSibling == null) {
+            spans.push(span);
+        } else {
+            let nextSpan = span;
+            while (nextSpan.nextSibling != null) {
+                spans.push(nextSpan);
+                if (/[.?!]/.test(nextSpan.textContent)) {
+                    break;
+                }
+                nextSpan = nextSpan.nextSibling;
+            }
+        }
+        return spans;
+    }
+
+    function tokenToHtmlTagAlignment(tokens, spans) {
+        //alignment = {};
+        //for (let i = 0; i < tokens.length; i++) {
+        //    const tok = tokens[i];
+        //    for (let j = 0; j < spans.length; j++) {
+        //        const sp = spans[j];
+        //        let k = 0;
+        //        const curWordSpan = sp.firstChild;
+        //        while (true) {
+        //            //alignment[i] = [j, k];
+        //            alignment[i] = curWordSpan;
+        //            k += 1;
+        //        }
+        //    }
+        //}
+        //return alignment;
+        let alignment = [];
+        //const wordSpans = spans.flatMap(sp => [...sp.getElementsByClassName("word")]);
+        const wordSpans = spans;
+        let cursor = 0;
+        for (let i = 0; i < tokens.length; i++) {
+            const tok = tokens[i];
+            // skip over whitespace and <br> tags
+            while (cursor < wordSpans.length && wordSpans[cursor].textContent.indexOf(tok) == -1) {
+                console.log(`skipping "${wordSpans[cursor].textContent}"`)
+                cursor += 1;
+            }
+            //while (cursor < wordSpans.length) {
+            //    const sp = spans[cursor];
+            //    if (sp.textContent.startsWith(tok)) {
+            //        cursor += 1;
+            //        break;
+            //    }
+            //}
+            let sp = wordSpans[cursor];
+            alignment.push(sp);
+            console.log(`matched "${tok}" -> "${sp.textContent}"`)
+            if (sp.textContent.trim().endsWith(tok)) {
+                cursor += 1;
+            }
+        }
+        return alignment;
+    }
+
+    async function getAlignment(sourceSpans, targetSpans) {
+        //let sourceSentence = sourceSpans.map(x => x.textContent).join(" ");
+        //let targetSentence = targetSpans.map(x => x.textContent).join(" ");
+        let sourceSentence = "";
+        let sourceSpanOffset = [];
+        for (let i = 0; i < sourceSpans.length; i++) {
+            const span = sourceSpans[i];
+            sourceSpanOffset[i] = sourceSentence.length;
+            sourceSentence += span.textContent;
+        }
+        sourceSpanOffset[sourceSpans.length] = sourceSentence.length;
+        let targetSentence = "";
+        let targetSpanOffset = [];
+        for (let i = 0; i < targetSpans.length; i++) {
+            const span = targetSpans[i];
+            targetSpanOffset[i] = targetSentence.length;
+            targetSentence += span.textContent;
+            targetSentence += " ";
+        }
+        targetSpanOffset[targetSpans.length] = targetSentence.length;
+
+        const response = await fetch('https://wordalign.isl.iar.kit.edu/align', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            //body: JSON.stringify({ source_sentence: sourceSentence, target_sentence: targetSentence })
+            // need to swap source and target here, because server returns alignments from target to source words
+            body: JSON.stringify({ source_sentence: targetSentence.trim(), target_sentence: sourceSentence.trim() })
+        });
+
+        if (response.ok) {
+            const {
+                source_words: targetTokens,
+                target_words: sourceTokens,
+                alignment: alignment,
+                source_position_map: targetPositionMap,
+                target_position_map: sourcePositionMap,
+            } = await response.json();
+            //for (const span of targetSpans) {
+            //    const start = span.getAttribute("start");
+            //    alignmentCache[start] = {
+            //        sourceWords: source_words,
+            //        targetWords: target_words,
+            //        alignment: alignment
+            //    };
+            //}
+            console.log("got alignment:");
+            console.log(sourceTokens);
+            console.log(targetTokens);
+            console.log(alignment);
+            //const targetSpansFlat = targetSpans.flatMap(sp => [...sp.getElementsByClassName("word")])
+            const targetSpansFlat = tokenToHtmlTagAlignment(targetTokens, targetSpans)
+            for (let sp of sourceSpans) {
+                sp.innerHTML = "";
+            }
+            for (let i = 0; i < sourceTokens.length; i++) {
+                const token = sourceTokens[i];
+                let wordSpan = document.createElement("span");
+                wordSpan.textContent = token;
+                const threshold = 1.0;
+                wordSpan.addEventListener("mouseover", (e) => {
+                    wordSpan.classList.add('highlight-word');
+                    //let alignedWord = getAlignedWord(sourceTokens, targetTokens, i, alignment);
+                    //let alignedWords = [];
+                    for (let j = 0; j < targetTokens.length; j++) {
+                        const val = alignment[i][j];
+                        if (val >= threshold) {
+                            //alignedWords.push(targetTokens[j]);
+                            targetSpansFlat[j].classList.add('highlight-word');
+                        }
+                    }
+                });
+                wordSpan.addEventListener("mouseleave", (e) => {
+                    wordSpan.classList.remove('highlight-word');
+
+                    for (let j = 0; j < targetTokens.length; j++) {
+                        const val = alignment[i][j];
+                        if (val >= threshold) {
+                            //alignedWords.push(targetTokens[j]);
+                            targetSpansFlat[j].classList.remove('highlight-word');
+                        }
+                    }
+                });
+                // find which original span the current token maps to
+                // and append new tag to that span
+                let span = null;
+                for (let j = 0; j < sourceSpanOffset.length; j++) {
+                    const start = sourceSpanOffset[j];
+                    if (start > sourcePositionMap[i]) {
+                        span = sourceSpans[j - 1];
+                    }
+                }
+                span.appendChild(wordSpan);
+                if (sourcePositionMap[i + 1] === undefined // insert space after each segment
+                  || token.length < sourcePositionMap[i + 1] - sourcePositionMap[i]) {
+                    span.appendChild(document.createTextNode(" "));
+                }
+            }
+        } else {
+            console.log("Error aligning:", response.status);
+        }
+    }
+
+    let alignmentCache = {};
+
+    function activateAlignmentForWindow(windowId) {
+        let wins = document.getElementsByClassName("window");
+        const w = wins[windowId];
+        //var visible = w.checkVisibility();
+        console.log(w);
+        var [textEl] = w.getElementsByClassName("window-content");
+        var textSpans = textEl.getElementsByTagName("span");
+        for (const span of textSpans) {
+            const time = span.getAttribute("start");
+            span.addEventListener('mouseover', () => {
+                span.classList.add('highlight-segment');
+                let alignedSpan = alignToTranscript(0, time, false);
+                alignedSpan.classList.add('highlight-segment');
+                let sourceSpans = findSentenceBoundaries(span);
+                for (const sspan of sourceSpans) {
+                    sspan.classList.add('highlight-segment');
+                }
+                let targetSpans = findSentenceBoundaries(alignedSpan);
+                for (const sspan of targetSpans) {
+                    sspan.classList.add('highlight-segment');
+                }
+                // alignment
+                if (!(time in alignmentCache)) {
+                    for (const ssp of sourceSpans) {
+                        const t = ssp.getAttribute("start"); 
+                        // TODO separate alignemnt cache for markup and plain transcript
+                        alignmentCache[t] = 1;
+                    }
+                    //alignmentCache[time] = 1;
+                    getAlignment(sourceSpans, targetSpans);
+                }
+            });
+            span.addEventListener('mouseleave', () => {
+                removeHighlight(0, time, span, false);
+            });
+        }
+    }
+
+    window.addEventListener('message', (event) => {
+        if (event.data && event.data.type === 'speaker_update') {
+            const { speaker_name, word_ids, stream_id } = event.data;
+            document.querySelectorAll('.window-content-structured').forEach(wMarkup => {
+                const allWords = wMarkup.querySelectorAll('span.word[word-order]');
+                const matchingSpans = Array.from(allWords).filter(span => {
+                    return word_ids.includes(Number(span.getAttribute('word-order')))
+                        && span.getAttribute('word-stream-id') === stream_id;
+                });
+                matchingSpans.forEach(span => {
+                    const parent = span.parentElement;
+                    if (parent) {
+                        parent.setAttribute('speaker-title', speaker_name);
+                    }
+                });
+                if (matchingSpans.length > 0) {
+                    update_speaker_tag(wMarkup);
+                    remove_reduntant_speaker_tag(wMarkup);
+                }
+            });
+        }
+    });
+
+</script>
+
+    
+<script src="/static/js/eventsource-polyfill.js"></script>
+    <script>
+      // User menu toggle
+      document.addEventListener('click', function(e) {
+        const userMenu = document.querySelector('.user-menu');
+        if (!userMenu) return;
+        
+        if (!userMenu.contains(e.target)) {
+          userMenu.classList.remove('active');
+        }
+      });
+
+      let highlightedWord = null;
+
+      var lang_index = {};
+      var lang_name = {};
+      var langText = {};
+      var langIndex = {};
+      var langType = {};
+      var langWindow = {};
+      var numberOfWindows = 0;
+      var orientation = "landscape";
+
+      let splitViewEnabled = false;
+      let chatEnabled = false;
+      let currentLeftIndex = null;
+      let currentRightIndex = null;
+      const isMobileArchive = window.matchMedia("(max-width: 767px)").matches;
+      const hasChatFeature = false;
+      let mobileArchiveModeInitialized = false;
+      let mobilePaneOrder = [];
+      let currentMobilePane = null;
+      let mobileTouchStartX = 0;
+      let mobileTouchStartY = 0;
+
+      const windowsContainer = document.getElementById('windows-container');
+      const secondaryContainer = document.getElementById('windows-container-secondary');
+      const audioWindowsContainer = document.getElementById('audio-windows-container');
+      const mobilePaneSelector = document.getElementById('mobilePaneSelector');
+      const mobilePaneTabs = document.getElementById('mobilePaneTabs');
+      const mobilePaneIndicator = document.getElementById('mobilePaneIndicator');
+      const mobileMediaPane = document.getElementById('mobileMediaPane');
+
+      function getLanguageIndices() {
+        return Object.keys(lang_name).filter(idx => {
+          const name = lang_name[idx];
+          return !name.includes("Audio") && !name.includes("Correction");
+        });
+      }
+
+      function getAlternativeLanguageIndex(excludedIndices = []) {
+        const excluded = new Set(excludedIndices.filter(Boolean).map(String));
+        const candidate = getLanguageIndices().find(idx => !excluded.has(String(idx)));
+        return candidate || null;
+      }
+
+      function renderLanguageWindowInPane(index, pane) {
+        const paneContainer = pane === 'right' ? secondaryContainer : windowsContainer;
+        if (!paneContainer) {
+          return null;
+        }
+
+        paneContainer.querySelectorAll('.window').forEach(win => {
+          win.classList.remove('active');
+          win.style.display = 'none';
+        });
+
+        if (!index) {
+          return null;
+        }
+
+        const element = document.getElementById(`window-${index}`);
+        if (!element) {
+          return null;
+        }
+
+        if (element.parentElement !== paneContainer) {
+          paneContainer.appendChild(element);
+        }
+        element.classList.add('active');
+        element.style.display = "flex";
+
+        return element;
+      }
+
+      function focusLanguageWindowEnd(index) {
+        if (!index || typeof window.scrollLanguageWindowToEnd !== 'function') {
+          return;
+        }
+        requestAnimationFrame(() => window.scrollLanguageWindowToEnd(index));
+      }
+
+      function showWindow(index) {
+        const targetIndex = String(index);
+        const element = document.getElementById(`window-${targetIndex}`);
+        if (!element) {
+          return;
+        }
+
+        if (splitViewEnabled && currentRightIndex === targetIndex) {
+          const previousLeftIndex = currentLeftIndex;
+          const replacementRight = previousLeftIndex && previousLeftIndex !== targetIndex
+            ? previousLeftIndex
+            : getAlternativeLanguageIndex([targetIndex]);
+          currentLeftIndex = targetIndex;
+          currentRightIndex = replacementRight;
+        } else {
+          currentLeftIndex = targetIndex;
+          if (splitViewEnabled && currentRightIndex === currentLeftIndex) {
+            currentRightIndex = getAlternativeLanguageIndex([currentLeftIndex]);
+          }
+        }
+
+        renderLanguageWindowInPane(currentLeftIndex, 'left');
+        if (splitViewEnabled) {
+          renderLanguageWindowInPane(currentRightIndex, 'right');
+        }
+
+        numberOfWindows = splitViewEnabled ? 2 : 1;
+        updateWindowWidth();
+
+        document.querySelectorAll('#languageTabs .language-tab').forEach(tab => {
+          tab.classList.toggle('active', tab.id === `tab-${currentLeftIndex}`);
+        });
+
+        if (!isMobileArchive) {
+          buildTableOfContents(currentLeftIndex);
+        }
+        buildChapterSeekbar(currentLeftIndex);
+        focusLanguageWindowEnd(currentLeftIndex);
+        if (splitViewEnabled && currentRightIndex) {
+          focusLanguageWindowEnd(currentRightIndex);
+        }
+        buildLanguageTabs();
+        if (splitViewEnabled) {
+          buildSecondaryLanguageTabs();
+        }
+      }
+
+      function showWindowSecondary(index) {
+        if (!splitViewEnabled) {
+          showWindow(index);
+          return;
+        }
+
+        const targetIndex = String(index);
+        const primary = document.getElementById(`window-${targetIndex}`);
+        if (!primary || !secondaryContainer) {
+          return;
+        }
+
+        if (currentLeftIndex === targetIndex) {
+          const previousRightIndex = currentRightIndex;
+          const replacementLeft = previousRightIndex && previousRightIndex !== targetIndex
+            ? previousRightIndex
+            : getAlternativeLanguageIndex([targetIndex]);
+          currentRightIndex = replacementLeft ? targetIndex : null;
+          currentLeftIndex = replacementLeft || targetIndex;
+        } else {
+          currentRightIndex = targetIndex;
+          if (currentRightIndex === currentLeftIndex) {
+            currentLeftIndex = getAlternativeLanguageIndex([currentRightIndex]);
+          }
+        }
+
+        renderLanguageWindowInPane(currentLeftIndex, 'left');
+        renderLanguageWindowInPane(currentRightIndex, 'right');
+
+        numberOfWindows = 2;
+        updateWindowWidth();
+
+        document.querySelectorAll('#languageTabsSecondary .language-tab').forEach(tab => {
+          tab.classList.toggle('active', tab.id === `tab-secondary-${currentRightIndex}`);
+        });
+
+        if (!isMobileArchive && currentLeftIndex) {
+          buildTableOfContents(currentLeftIndex);
+        }
+        if (currentLeftIndex) {
+          buildChapterSeekbar(currentLeftIndex);
+          focusLanguageWindowEnd(currentLeftIndex);
+        }
+        if (currentRightIndex) {
+          focusLanguageWindowEnd(currentRightIndex);
+        }
+        buildLanguageTabs();
+        buildSecondaryLanguageTabs();
+      }
+
+      function buildLanguageTabs() {
+        const languageTabs = document.getElementById('languageTabs');
+        const dropdownWrapper = document.getElementById('languageDropdownWrapper-left');
+        const dropdownMenu = document.getElementById('languageDropdownMenu-left');
+        if (!languageTabs || !dropdownWrapper || !dropdownMenu) {
+          return;
+        }
+
+        languageTabs.innerHTML = '';
+        dropdownMenu.innerHTML = '';
+
+        const allLangs = Object.entries(lang_name).filter(([, langName]) =>
+          !langName.includes("Audio") && !langName.includes("Correction")
+        );
+
+        const maxVisibleTabs = splitViewEnabled ? 2 : 4;
+        const visibleIndices = [];
+
+        if (currentLeftIndex && !visibleIndices.includes(currentLeftIndex)) {
+          visibleIndices.push(currentLeftIndex);
+        }
+
+        allLangs.forEach(([index]) => {
+          if (visibleIndices.length < maxVisibleTabs && !visibleIndices.includes(index)) {
+            visibleIndices.push(index);
+          }
+        });
+
+        visibleIndices.forEach(index => {
+          const tab = document.createElement('button');
+          tab.className = 'language-tab';
+          if (currentLeftIndex === index) tab.classList.add('active');
+          tab.id = `tab-${index}`;
+          tab.textContent = lang_name[index];
+          tab.addEventListener('click', () => showWindow(index));
+          languageTabs.appendChild(tab);
+        });
+
+        const remainingLangs = allLangs.filter(([index]) => !visibleIndices.includes(index));
+        if (remainingLangs.length > 0) {
+          dropdownWrapper.style.display = 'flex';
+          remainingLangs.forEach(([index, langName]) => {
+            const item = document.createElement('button');
+            item.className = 'language-dropdown-item';
+            item.textContent = langName;
+            item.addEventListener('click', () => {
+              showWindow(index);
+              document.getElementById('languageDropdownToggle-left').classList.remove('active');
+              dropdownMenu.classList.remove('active');
+            });
+            dropdownMenu.appendChild(item);
+          });
+        } else {
+          dropdownWrapper.style.display = 'none';
+        }
+      }
+
+      function buildSecondaryLanguageTabs() {
+        const languageTabsSecondary = document.getElementById('languageTabsSecondary');
+        const dropdownWrapper = document.getElementById('languageDropdownWrapper-right');
+        const dropdownMenu = document.getElementById('languageDropdownMenu-right');
+        if (!languageTabsSecondary || !dropdownWrapper || !dropdownMenu) {
+          return;
+        }
+
+        languageTabsSecondary.innerHTML = '';
+        dropdownMenu.innerHTML = '';
+
+        const allLangs = Object.entries(lang_name).filter(([, langName]) =>
+          !langName.includes("Audio") && !langName.includes("Correction")
+        );
+
+        const visibleIndices = [];
+        if (currentRightIndex && !visibleIndices.includes(currentRightIndex)) {
+          visibleIndices.push(currentRightIndex);
+        }
+
+        allLangs.forEach(([index]) => {
+          if (visibleIndices.length < 2 && !visibleIndices.includes(index)) {
+            visibleIndices.push(index);
+          }
+        });
+
+        visibleIndices.forEach(index => {
+          const tab = document.createElement('button');
+          tab.className = 'language-tab';
+          if (currentRightIndex === index) tab.classList.add('active');
+          tab.id = `tab-secondary-${index}`;
+          tab.textContent = lang_name[index];
+          tab.addEventListener('click', () => showWindowSecondary(index));
+          languageTabsSecondary.appendChild(tab);
+        });
+
+        const remainingLangs = allLangs.filter(([index]) => !visibleIndices.includes(index));
+        if (remainingLangs.length > 0) {
+          dropdownWrapper.style.display = 'flex';
+          remainingLangs.forEach(([index, langName]) => {
+            const item = document.createElement('button');
+            item.className = 'language-dropdown-item';
+            item.textContent = langName;
+            item.addEventListener('click', () => {
+              showWindowSecondary(index);
+              document.getElementById('languageDropdownToggle-right').classList.remove('active');
+              dropdownMenu.classList.remove('active');
+            });
+            dropdownMenu.appendChild(item);
+          });
+        } else {
+          dropdownWrapper.style.display = 'none';
+        }
+      }
+
+      function buildTableOfContents(windowIndex) {
+        const toc = document.getElementById('tableOfContents');
+        const windowContent = document.getElementById(`window-content-structured-${windowIndex}`);
+        if (!toc || !windowContent) {
+          return;
+        }
+
+        const chapters = windowContent.querySelectorAll('.chapter');
+        toc.innerHTML = '';
+
+        if (!chapters.length) {
+          return;
+        }
+
+        chapters.forEach((chapter, idx) => {
+          const tocItem = document.createElement('div');
+          tocItem.className = 'toc-item';
+          const chapterTitle = chapter.querySelector('.chapter-title-text');
+          let text = chapterTitle ? chapterTitle.textContent : `Chapter ${idx + 1}`;
+          text = text.trim();
+          if (text.length > 60) text = text.substring(0, 57) + '...';
+          tocItem.textContent = text;
+          tocItem.addEventListener('click', () => {
+            chapter.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            chapter.classList.add('highlight');
+            setTimeout(() => chapter.classList.remove('highlight'), 2000);
+          });
+          toc.appendChild(tocItem);
+        });
+      }
+
+      window.addEventListener('lt:chapter-heading-updated', function (event) {
+        const langId = event && event.detail && event.detail.langId ? String(event.detail.langId) : null;
+        if (!langId) {
+          return;
+        }
+        if (currentLeftIndex === langId) {
+          buildTableOfContents(langId);
+          buildChapterSeekbar(langId);
+        }
+      });
+
+      // ── Custom Player ──────────────────────────────────────────────
+      const playerPlayPause = document.getElementById('playerPlayPause');
+      const playPauseIcon = document.getElementById('playPauseIcon');
+      const playerTime = document.getElementById('playerTime');
+      const playerSeekbar = document.getElementById('playerSeekbar');
+      const playerMute = document.getElementById('playerMute');
+      const volumeIcon = document.getElementById('volumeIcon');
+      const playerVolume = document.getElementById('playerVolume');
+      const playerSpeed = document.getElementById('playerSpeed');
+      const playerTooltip = document.getElementById('playerTooltip');
+
+      function formatTime(seconds) {
+        if (!Number.isFinite(seconds)) return '0:00';
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = Math.floor(seconds % 60);
+        const pad = (s < 10 ? '0' : '') + s;
+        return h > 0 ? h + ':' + (m < 10 ? '0' : '') + m + ':' + pad : m + ':' + pad;
+      }
+
+      // Called after `media` is assigned (further down in the script)
+      function initCustomPlayer() {
+        if (!media || !playerPlayPause) return;
+
+        // Play / Pause
+        playerPlayPause.addEventListener('click', () => {
+          if (media.paused) media.play(); else media.pause();
+        });
+        media.addEventListener('play', () => {
+          playPauseIcon.className = 'fas fa-pause';
+        });
+        media.addEventListener('pause', () => {
+          playPauseIcon.className = 'fas fa-play';
+        });
+
+        // Time display + seekbar progress
+        media.addEventListener('timeupdate', () => {
+          playerTime.textContent = formatTime(media.currentTime) + ' / ' + formatTime(media.duration);
+          updateSeekbarProgress();
+        });
+
+        // Duration display once metadata loaded
+        media.addEventListener('loadedmetadata', () => {
+          playerTime.textContent = formatTime(media.currentTime) + ' / ' + formatTime(media.duration);
+        });
+
+        // Volume
+        playerVolume.addEventListener('input', () => {
+          media.volume = parseFloat(playerVolume.value);
+          media.muted = false;
+          volumeIcon.className = media.volume === 0 ? 'fas fa-volume-mute' : 'fas fa-volume-up';
+        });
+        playerMute.addEventListener('click', () => {
+          media.muted = !media.muted;
+          volumeIcon.className = media.muted ? 'fas fa-volume-mute' : 'fas fa-volume-up';
+        });
+
+        // Speed cycling
+        const speeds = [1, 1.25, 1.5, 2, 0.5, 0.75];
+        let speedIdx = 0;
+        playerSpeed.addEventListener('click', () => {
+          speedIdx = (speedIdx + 1) % speeds.length;
+          media.playbackRate = speeds[speedIdx];
+          playerSpeed.textContent = speeds[speedIdx] + 'x';
+        });
+      }
+
+      // ── Chapter Seekbar ────────────────────────────────────────────
+      function buildChapterSeekbar(windowIndex) {
+        if (!playerSeekbar || !media) return;
+
+        const duration = media.duration;
+        if (!Number.isFinite(duration) || duration <= 0) {
+          // Defer until metadata is ready
+          media.addEventListener('loadedmetadata', function onMeta() {
+            media.removeEventListener('loadedmetadata', onMeta);
+            buildChapterSeekbar(windowIndex);
+          });
+          return;
+        }
+
+        playerSeekbar.innerHTML = '';
+
+        // Get chapters for active language window
+        const windowContent = document.getElementById('window-content-structured-' + windowIndex);
+        const chapters = windowContent ? windowContent.querySelectorAll('.chapter') : [];
+
+        // Build chapter data with computed end times
+        const chapterData = [];
+        if (chapters.length > 0) {
+          chapters.forEach((ch, idx) => {
+            const start = parseFloat(ch.getAttribute('start')) || 0;
+            const titleEl = ch.querySelector('.chapter-title-text');
+            const title = titleEl ? titleEl.textContent.trim() : ('Chapter ' + (idx + 1));
+            chapterData.push({ start: start, title: title });
+          });
+          chapterData.forEach((ch, idx) => {
+            ch.end = idx < chapterData.length - 1 ? chapterData[idx + 1].start : duration;
+          });
+        } else {
+          // No chapters: single segment spanning entire duration
+          chapterData.push({ start: 0, end: duration, title: '' });
+        }
+
+        // Create segment elements
+        chapterData.forEach((ch) => {
+          const segDuration = Math.max(0, ch.end - ch.start);
+          const pct = (segDuration / duration) * 100;
+
+          const seg = document.createElement('div');
+          seg.className = 'custom-player__segment';
+          seg.style.flexBasis = pct + '%';
+          seg.dataset.start = ch.start;
+          seg.dataset.end = ch.end;
+
+          const fill = document.createElement('div');
+          fill.className = 'custom-player__fill';
+          seg.appendChild(fill);
+
+          // Tooltip on hover (only if chapter has a title)
+          if (ch.title) {
+            seg.addEventListener('mouseenter', () => {
+              playerTooltip.textContent = ch.title;
+              playerTooltip.classList.add('visible');
+            });
+            seg.addEventListener('mousemove', (e) => {
+              const barRect = playerSeekbar.getBoundingClientRect();
+              let x = e.clientX - barRect.left;
+              const tipWidth = playerTooltip.offsetWidth;
+              x = Math.max(tipWidth / 2, Math.min(x, barRect.width - tipWidth / 2));
+              playerTooltip.style.left = x + 'px';
+            });
+            seg.addEventListener('mouseleave', () => {
+              playerTooltip.classList.remove('visible');
+            });
+          }
+
+          // Click to seek within segment
+          seg.addEventListener('click', (e) => {
+            const rect = seg.getBoundingClientRect();
+            const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+            media.currentTime = ch.start + ratio * (ch.end - ch.start);
+          });
+
+          playerSeekbar.appendChild(seg);
+        });
+
+        updateSeekbarProgress();
+      }
+
+      function updateSeekbarProgress() {
+        if (!playerSeekbar || !media) return;
+        const currentTime = media.currentTime;
+        const segments = playerSeekbar.querySelectorAll('.custom-player__segment');
+
+        segments.forEach((seg) => {
+          const start = parseFloat(seg.dataset.start);
+          const end = parseFloat(seg.dataset.end);
+          const fill = seg.querySelector('.custom-player__fill');
+          if (!fill) return;
+
+          if (currentTime >= end) {
+            fill.style.width = '100%';
+          } else if (currentTime > start) {
+            const progress = ((currentTime - start) / (end - start)) * 100;
+            fill.style.width = progress + '%';
+          } else {
+            fill.style.width = '0%';
+          }
+        });
+
+        // Highlight active TOC item
+        const tocItems = document.querySelectorAll('#tableOfContents .toc-item');
+        let activeIdx = -1;
+        for (let i = segments.length - 1; i >= 0; i--) {
+          if (currentTime >= parseFloat(segments[i].dataset.start)) {
+            activeIdx = i;
+            break;
+          }
+        }
+        tocItems.forEach((item, idx) => {
+          item.classList.toggle('active', idx === activeIdx);
+        });
+      }
+
+      function setLayoutMode(mode) {
+        const layout = document.getElementById('windowsLayout');
+        const rightPane = document.querySelector('.right-pane');
+        const paneHeaderRight = document.getElementById('paneHeaderRight');
+        const paneHeaderLeft = document.getElementById('paneHeaderLeft');
+        const languageControlsHost = document.getElementById('languageControlsHost');
+        const leftControls = document.getElementById('languageControlsLeft');
+        const chatPane = document.getElementById('chatPane');
+
+        splitViewEnabled = mode === 'split';
+        chatEnabled = mode === 'bot';
+        numberOfWindows = splitViewEnabled ? 2 : 1;
+
+        const splitToggle = document.getElementById('splitViewToggle');
+        const chatToggle = document.getElementById('chatToggle');
+        if (splitToggle) splitToggle.classList.toggle('active', splitViewEnabled);
+        if (chatToggle) chatToggle.classList.toggle('active', chatEnabled);
+
+        layout.classList.remove('single-pane', 'dual-pane', 'chat-enabled');
+        if (splitViewEnabled) {
+          layout.classList.add('dual-pane');
+        } else if (chatEnabled) {
+          layout.classList.add('chat-enabled');
+        } else {
+          layout.classList.add('single-pane');
+        }
+
+        if (rightPane) rightPane.style.display = (splitViewEnabled || chatEnabled) ? 'flex' : 'none';
+        if (paneHeaderRight) paneHeaderRight.style.display = splitViewEnabled ? 'flex' : 'none';
+        if (secondaryContainer) {
+          secondaryContainer.style.display = splitViewEnabled ? 'flex' : 'none';
+          if (!splitViewEnabled && windowsContainer) {
+            Array.from(secondaryContainer.querySelectorAll('.window')).forEach((win) => {
+              win.classList.remove('active');
+              win.style.display = 'none';
+              if (win.parentElement !== windowsContainer) {
+                windowsContainer.appendChild(win);
+              }
+            });
+          }
+        }
+        if (chatPane) {
+          chatPane.style.display = chatEnabled ? 'flex' : 'none';
+          const chatWindow = chatPane.querySelector('.chat-window');
+          if (chatWindow) chatWindow.style.display = chatEnabled ? 'flex' : 'none';
+          if (chatEnabled && typeof initConnection === 'function') {
+            if (typeof streamID === 'undefined' || streamID === -1) {
+              initConnection();
+            }
+          }
+        }
+
+        if (splitViewEnabled) {
+          if (languageControlsHost) languageControlsHost.style.display = 'none';
+          if (paneHeaderLeft) paneHeaderLeft.style.display = 'flex';
+          if (leftControls && paneHeaderLeft) paneHeaderLeft.appendChild(leftControls);
+          buildSecondaryLanguageTabs();
+          const langs = getLanguageIndices();
+          if (!currentLeftIndex && langs.length > 0) {
+            currentLeftIndex = langs[0];
+            showWindow(currentLeftIndex);
+          }
+          if (langs.length > 1) {
+            const fallbackRight = currentRightIndex || langs.find(idx => idx !== currentLeftIndex) || null;
+            if (fallbackRight) {
+              showWindowSecondary(fallbackRight);
+            } else {
+              renderLanguageWindowInPane(null, 'right');
+            }
+          } else {
+            currentRightIndex = null;
+            renderLanguageWindowInPane(null, 'right');
+          }
+        } else {
+          if (paneHeaderLeft) paneHeaderLeft.style.display = 'none';
+          if (languageControlsHost) languageControlsHost.style.display = 'flex';
+          if (leftControls && languageControlsHost) languageControlsHost.appendChild(leftControls);
+        }
+
+        buildLanguageTabs();
+      }
+
+      function toggleLayoutMode(mode) {
+        if (mode === 'split') {
+          setLayoutMode(splitViewEnabled ? 'fullscreen' : 'split');
+        } else if (mode === 'bot') {
+          setLayoutMode(chatEnabled ? 'fullscreen' : 'bot');
+        } else {
+          setLayoutMode('fullscreen');
+        }
+      }
+
+      function toggleChat() {
+        toggleLayoutMode('bot');
+      }
+
+      function getWindowElementForPane(index, pane) {
+        if (!index) {
+          return null;
+        }
+        if (pane === 'right' && splitViewEnabled) {
+          const secondary = secondaryContainer || document.getElementById('windows-container-secondary');
+          if (secondary) {
+            const secondaryWindow = secondary.querySelector(`#window-${index}`);
+            if (secondaryWindow) {
+              return secondaryWindow;
+            }
+          }
+        }
+        return document.getElementById(`window-${index}`);
+      }
+
+      async function copyLanguageContent(index, pane) {
+        const windowElement = getWindowElementForPane(index, pane);
+        if (!windowElement) {
+          return;
+        }
+        const text = extractTextFromDiv(windowElement).trim();
+        if (!text) {
+          return;
+        }
+        const blob = new Blob([text], { type: 'text/html' });
+        const data = [new ClipboardItem({ 'text/html': blob })];
+        try {
+          await navigator.clipboard.write(data);
+        } catch (error) {
+          console.error('Failed to copy language content:', error);
+          alert('Failed to copy content. Please try again.');
+        }
+      }
+
+      function getMobileLanguageEntries() {
+        return Object.entries(lang_name).filter(([, langName]) =>
+          !langName.includes("Audio") && !langName.includes("Correction")
+        );
+      }
+
+      function buildMobilePaneTabs() {
+        if (!mobilePaneTabs) {
+          return;
+        }
+
+        mobilePaneTabs.innerHTML = '';
+        if (mobilePaneIndicator) {
+          mobilePaneIndicator.innerHTML = '';
+        }
+        mobilePaneOrder = [{ key: 'media', label: 'Video' }];
+
+        getMobileLanguageEntries().forEach(([index, langName]) => {
+          mobilePaneOrder.push({ key: `lang-${index}`, label: langName });
+        });
+
+        if (hasChatFeature) {
+          mobilePaneOrder.push({ key: 'bot', label: 'Bot' });
+        }
+
+        mobilePaneOrder.forEach((item) => {
+          const button = document.createElement('button');
+          button.className = 'mobile-pane-tab sidebar__item';
+          button.textContent = item.label;
+          button.title = item.label;
+          button.dataset.paneKey = item.key;
+          button.addEventListener('click', () => selectMobilePane(item.key));
+          mobilePaneTabs.appendChild(button);
+
+          if (mobilePaneIndicator) {
+            const dot = document.createElement('div');
+            dot.className = 'sidebar-indicator__dot';
+            dot.dataset.paneKey = item.key;
+            mobilePaneIndicator.appendChild(dot);
+          }
+        });
+      }
+
+      function updateMobilePaneIndicator(paneKey) {
+        if (!mobilePaneIndicator) {
+          return;
+        }
+        mobilePaneIndicator.querySelectorAll('.sidebar-indicator__dot').forEach((dot) => {
+          dot.classList.toggle('active', dot.dataset.paneKey === paneKey);
+        });
+      }
+
+      function selectMobilePane(paneKey) {
+        if (!isMobileArchive || !paneKey) {
+          return;
+        }
+
+        currentMobilePane = paneKey;
+        const rightPane = document.querySelector('.right-pane');
+        const chatPane = document.getElementById('chatPane');
+        const leftPane = document.querySelector('.left-pane');
+        const windowsLayout = document.getElementById('windowsLayout');
+
+        if (windowsLayout) {
+          windowsLayout.classList.remove('dual-pane', 'chat-enabled');
+          windowsLayout.classList.add('single-pane');
+        }
+        if (rightPane) {
+          rightPane.style.display = 'none';
+        }
+
+        if (mobileMediaPane) {
+          mobileMediaPane.style.display = paneKey === 'media' ? 'block' : 'none';
+        }
+        if (windowsContainer) {
+          windowsContainer.style.display = paneKey.startsWith('lang-') ? 'block' : 'none';
+        }
+        if (chatPane) {
+          chatPane.style.display = paneKey === 'bot' ? 'flex' : 'none';
+          const chatWindow = chatPane.querySelector('.chat-window');
+          if (chatWindow) {
+            chatWindow.style.display = paneKey === 'bot' ? 'flex' : 'none';
+          }
+        }
+
+        if (paneKey.startsWith('lang-')) {
+          showWindow(paneKey.replace('lang-', ''));
+        } else if (paneKey === 'bot' && chatPane && typeof initConnection === 'function') {
+          if (typeof streamID === 'undefined' || streamID === -1) {
+            initConnection();
+          }
+        }
+
+        document.querySelectorAll('#mobilePaneTabs .mobile-pane-tab').forEach((tab) => {
+          tab.classList.toggle('active', tab.dataset.paneKey === paneKey);
+        });
+        updateMobilePaneIndicator(paneKey);
+
+        const activeButton = mobilePaneTabs ? mobilePaneTabs.querySelector(`.mobile-pane-tab[data-pane-key="${paneKey}"]`) : null;
+        if (activeButton && mobilePaneTabs) {
+          activeButton.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+        }
+
+        if (leftPane) {
+          leftPane.classList.toggle('mobile-bot-active', paneKey === 'bot');
+        }
+      }
+
+      function bindMobileSwipe() {
+        const swipeTargets = [windowsContainer, mobileMediaPane, document.getElementById('chatPane')].filter(Boolean);
+        const getIndex = () => mobilePaneOrder.findIndex((item) => item.key === currentMobilePane);
+
+        const handleSwipe = (deltaX, deltaY) => {
+          if (Math.abs(deltaX) < 50 || Math.abs(deltaX) < Math.abs(deltaY)) {
+            return;
+          }
+          const currentIndex = getIndex();
+          if (currentIndex < 0) {
+            return;
+          }
+          const nextIndex = deltaX < 0 ? currentIndex + 1 : currentIndex - 1;
+          if (nextIndex >= 0 && nextIndex < mobilePaneOrder.length) {
+            selectMobilePane(mobilePaneOrder[nextIndex].key);
+          }
+        };
+
+        swipeTargets.forEach((target) => {
+          target.addEventListener('touchstart', (event) => {
+            if (!event.touches || event.touches.length === 0) return;
+            mobileTouchStartX = event.touches[0].clientX;
+            mobileTouchStartY = event.touches[0].clientY;
+          }, { passive: true });
+
+          target.addEventListener('touchend', (event) => {
+            if (!event.changedTouches || event.changedTouches.length === 0) return;
+            const touchEndX = event.changedTouches[0].clientX;
+            const touchEndY = event.changedTouches[0].clientY;
+            handleSwipe(touchEndX - mobileTouchStartX, touchEndY - mobileTouchStartY);
+          }, { passive: true });
+        });
+      }
+
+      function activateMobileArchiveMode() {
+        if (!isMobileArchive || mobileArchiveModeInitialized) {
+          return;
+        }
+
+        mobileArchiveModeInitialized = true;
+        splitViewEnabled = false;
+        chatEnabled = false;
+        numberOfWindows = 1;
+
+        const sidebar = document.querySelector('.sidebar--archive-session');
+        const mediaBlock = document.querySelector('.archive-media--sidebar');
+        const tocTitle = document.querySelector('.sidebar__section-title');
+        const toc = document.getElementById('tableOfContents');
+        const languageSelectorBar = document.getElementById('languageSelectorBar');
+        const splitToggle = document.getElementById('splitViewToggle');
+        const chatToggle = document.getElementById('chatToggle');
+        const viewControls = document.getElementById('viewControlsToggle');
+        const adminControls = document.getElementById('adminControlsToggle');
+        const rightPane = document.querySelector('.right-pane');
+        const leftPane = document.querySelector('.left-pane');
+        const chatPane = document.getElementById('chatPane');
+
+        if (mediaBlock && mobileMediaPane) {
+          mobileMediaPane.appendChild(mediaBlock);
+        }
+        if (chatPane && leftPane) {
+          leftPane.appendChild(chatPane);
+          chatPane.style.display = 'none';
+        }
+
+        if (mobilePaneSelector) {
+          mobilePaneSelector.style.display = 'block';
+        }
+        if (languageSelectorBar) {
+          languageSelectorBar.style.display = 'none';
+        }
+        if (splitToggle) splitToggle.style.display = 'none';
+        if (chatToggle) chatToggle.style.display = 'none';
+        if (viewControls) viewControls.style.display = 'none';
+        if (adminControls) adminControls.style.display = 'none';
+        if (tocTitle) tocTitle.style.display = 'none';
+        if (toc) toc.style.display = 'none';
+        if (sidebar) sidebar.style.display = 'none';
+        if (rightPane) rightPane.style.display = 'none';
+
+        buildMobilePaneTabs();
+        if (mobilePaneTabs) {
+          mobilePaneTabs.addEventListener('scroll', () => {
+            if (!mobilePaneOrder.length) {
+              return;
+            }
+            const tabWidth = mobilePaneTabs.firstElementChild ? mobilePaneTabs.firstElementChild.clientWidth + 8 : 1;
+            const index = Math.max(0, Math.min(mobilePaneOrder.length - 1, Math.round(mobilePaneTabs.scrollLeft / tabWidth)));
+            updateMobilePaneIndicator(mobilePaneOrder[index].key);
+          }, { passive: true });
+        }
+        bindMobileSwipe();
+        selectMobilePane('media');
+      }
+
+      
+      lang_index["English"] =1
+      lang_name["1"] = "English"
+      addWindow(1);
+      var element = document.getElementById('window-1');
+      element.style.display = "none";
+
+      
+      lang_index["German"] =2
+      lang_name["2"] = "German"
+      addWindow(2);
+      var element = document.getElementById('window-2');
+      element.style.display = "none";
+
+      
+
+      buildLanguageTabs();
+      setLayoutMode('fullscreen');
+
+      const splitToggleBtn = document.getElementById('splitViewToggle');
+      if (splitToggleBtn) {
+        splitToggleBtn.addEventListener('click', () => {
+          if (!isMobileArchive) {
+            toggleLayoutMode('split');
+          }
+        });
+      }
+
+      const copyLanguageLeftButton = document.getElementById('copyLanguageLeft');
+      if (copyLanguageLeftButton) {
+        copyLanguageLeftButton.addEventListener('click', () => {
+          copyLanguageContent(currentLeftIndex, 'left');
+        });
+      }
+
+      const copyLanguageRightButton = document.getElementById('copyLanguageRight');
+      if (copyLanguageRightButton) {
+        copyLanguageRightButton.addEventListener('click', () => {
+          copyLanguageContent(currentRightIndex, 'right');
+        });
+      }
+
+      const chatToggleBtn = document.getElementById('chatToggle');
+      if (chatToggleBtn) {
+        chatToggleBtn.addEventListener('click', () => {
+          if (!isMobileArchive) {
+            toggleLayoutMode('bot');
+          }
+        });
+      }
+
+      document.getElementById('languageDropdownToggle-left').addEventListener('click', function(e) {
+        e.stopPropagation();
+        const menu = document.getElementById('languageDropdownMenu-left');
+        menu.classList.toggle('active');
+        this.classList.toggle('active');
+      });
+
+      document.getElementById('languageDropdownToggle-right').addEventListener('click', function(e) {
+        e.stopPropagation();
+        const menu = document.getElementById('languageDropdownMenu-right');
+        menu.classList.toggle('active');
+        this.classList.toggle('active');
+      });
+
+      document.addEventListener('click', function(e) {
+        if (!e.target.closest('#languageDropdownWrapper-left')) {
+          document.getElementById('languageDropdownMenu-left').classList.remove('active');
+          document.getElementById('languageDropdownToggle-left').classList.remove('active');
+        }
+        if (!e.target.closest('#languageDropdownWrapper-right')) {
+          document.getElementById('languageDropdownMenu-right').classList.remove('active');
+          document.getElementById('languageDropdownToggle-right').classList.remove('active');
+        }
+      });
+
+        const customMenuArchive = document.getElementById('customMenuArchive');
+        windowsContainer.addEventListener('contextmenu', (e) => {
+          if(customMenuArchive !== null) {
+            e.preventDefault();
+            customMenuArchive.style.left = `${e.pageX}px`;
+            customMenuArchive.style.top = `${e.pageY}px`;
+            customMenuArchive.style.display = 'block';
+          }
+        });
+
+        document.addEventListener('click', () => {
+          if(customMenuArchive !== null) {
+            customMenuArchive.style.display = 'none';
+          }
+        });
+
+        const profileSelection = document.getElementById('select_profile');
+        profileSelection.addEventListener('click', (e) => {
+            e.preventDefault();
+        });
+
+        const cbasrButtonArchive = document.getElementById('contextbiasing-asr-contextmenuArchive-button');
+        if(cbasrButtonArchive) {
+            cbasrButtonArchive.addEventListener('click', (e) => {
+                customMenuArchive.style.display = 'none';
+                profileSelection.style.display = 'block';
+
+                const offset = 10; // small gap from cursor
+                let top = e.clientY + offset;
+                let left = e.clientX + offset;
+
+                profileSelection.style.top = `${top}px`;
+                profileSelection.style.left = `${left}px`;
+
+                e.stopPropagation();
+            });
+        }
+
+        const continueBtn = document.getElementById('continueBtn');
+
+        if(continueBtn) {
+            continueBtn.addEventListener('click', (e) => {
+                profileSelection.style.display = 'none';
+
+                var contextSettingWindow = document.getElementById('context-setting');
+
+                const contextSettingWindowHeight = 350;
+                const contextSettingWindowWidth = 600;
+
+                const offset = 10; // small gap from cursor
+                let top = e.clientY + offset;
+                let left = e.clientX + offset;
+
+                const viewportWidth = window.innerWidth;
+                const viewportHeight = window.innerHeight;
+
+                if (left + contextSettingWindowWidth > viewportWidth) {
+                    left = viewportWidth - contextSettingWindowWidth - offset;
+                }
+
+                if (top + contextSettingWindowHeight > viewportHeight) {
+                    top = viewportHeight - contextSettingWindowHeight - offset;
+                }
+
+                contextSettingWindow.style.top = `${top}px`;
+                contextSettingWindow.style.left = `${left}px`;
+
+                contextSettingWindow.style.height = `${contextSettingWindowHeight}px`;
+                contextSettingWindow.style.width = `${contextSettingWindowWidth}px`;
+                contextSettingWindow.style.display = 'block';
+
+                // Send message to iframe, merging word data captured by the contextmenu handler
+                var archive_post_message = Object.assign({}, post_message, {
+                  profile_id: document.getElementById("profile").value
+                });
+                contextSettingWindow.contentWindow.postMessage(archive_post_message, '*');
+
+                e.stopPropagation();
+            });
+        }
+
+
+      const viewControlsToggle = document.getElementById('viewControlsToggle');
+      const viewControlsMenu = document.getElementById('viewControlsMenu');
+
+      if (viewControlsToggle && viewControlsMenu) {
+        viewControlsToggle.addEventListener('click', (e) => {
+          e.stopPropagation();
+          viewControlsMenu.classList.toggle('active');
+          viewControlsToggle.classList.toggle('active');
+        });
+
+        const maximizeButton = document.getElementById('maximizeButton');
+        if (maximizeButton) {
+          maximizeButton.addEventListener('click', () => {
+            const activeWindow = document.querySelector('#windows-container .window.active');
+            if (activeWindow) {
+              toggleFullScreen(activeWindow.id);
+            }
+            viewControlsMenu.classList.remove('active');
+            viewControlsToggle.classList.remove('active');
+          });
+        }
+
+        const fontSizeIncrease = document.getElementById('fontSizeIncrease');
+        const fontSizeDecrease = document.getElementById('fontSizeDecrease');
+        if (fontSizeIncrease && typeof window.changeFontSizeWindow === 'function') {
+          fontSizeIncrease.addEventListener('click', () => window.changeFontSizeWindow(1));
+        }
+        if (fontSizeDecrease && typeof window.changeFontSizeWindow === 'function') {
+          fontSizeDecrease.addEventListener('click', () => window.changeFontSizeWindow(-1));
+        }
+      }
+
+      
+      const configureArchiveButton = document.getElementById('configureArchiveButton');
+      if (configureArchiveButton) {
+        configureArchiveButton.addEventListener('click', () => {
+          window.location.href = "/archivesession_configure/L2hvbWUvYWRtaW5AZXhhbXBsZS5jb20vSU1HXzI1Mjcg4oCTIDIwMjYtMDgtMTYgMDA6MDU=";
+        });
+      }
+
+
+    function delete_archive_recording(reloadInsteadOfRedirect=false) {
+      const dialog = document.getElementById('DeleteDialog');
+      dialog.style.display = 'block';
+
+      const confirmBtn = document.getElementById('confirmBtnDelete');
+      confirmBtn.onclick = function() {
+
+        window.location.href = reloadInsteadOfRedirect ? window.location.href : "/delete_recording/L2hvbWUvYWRtaW5AZXhhbXBsZS5jb20vSU1HXzI1Mjcg4oCTIDIwMjYtMDgtMTYgMDA6MDU="
+      }
+      const cancelBtn = document.getElementById('cancelBtnDelete');
+      cancelBtn.onclick = function() {
+          dialog.style.display = 'none';
+      }
+    }
+
+      const adminControlsToggle = document.getElementById('adminControlsToggle');
+      const adminControlsMenu = document.getElementById('adminControlsMenu');
+      if (adminControlsToggle && adminControlsMenu) {
+        adminControlsToggle.addEventListener('click', (e) => {
+          e.stopPropagation();
+          adminControlsMenu.classList.toggle('active');
+          adminControlsToggle.classList.toggle('active');
+        });
+      }
+
+      const deleteArchiveButton = document.getElementById('deleteArchiveButton');
+      if (deleteArchiveButton) {
+        deleteArchiveButton.addEventListener('click', () => {
+          delete_archive_recording(false);
+          if (adminControlsMenu) adminControlsMenu.classList.remove('active');
+          if (adminControlsToggle) adminControlsToggle.classList.remove('active');
+        });
+      }
+
+      
+
+      document.addEventListener('click', (e) => {
+        if (!e.target.closest('.control-dropdown-wrapper')) {
+          document.querySelectorAll('.control-dropdown-menu').forEach(menu => menu.classList.remove('active'));
+          document.querySelectorAll('.control-dropdown-toggle').forEach(toggle => toggle.classList.remove('active'));
+        }
+      });
+
+      
+
+      var media = document.getElementById("media");
+      initCustomPlayer();
+      const archiveAudioSourceSelect = document.getElementById('archiveAudioSourceSelect');
+      let archiveAudioMode = 'original';
+      let activeArchiveTtsAudio = null;
+      let lastArchiveTtsHardSyncAt = 0;
+
+      function getTtsAudioElementByLang(langName) {
+        if (!langName) {
+          return null;
+        }
+
+        for (const [langId, textLang] of Object.entries(lang_name)) {
+          if (langName.includes(textLang)) {
+            const windowElement = document.getElementById(`window-${langId}`);
+            const container = windowElement ? windowElement.querySelector('.window-content-audio') : null;
+            if (container) {
+              const audioEl = container.querySelector('audio');
+              if (audioEl) {
+                return audioEl;
+              }
+            }
+          }
+        }
+
+        return null;
+      }
+
+      function pauseArchiveTtsAudio() {
+        if (activeArchiveTtsAudio) {
+          activeArchiveTtsAudio.pause();
+        }
+      }
+
+      function canSeekArchiveTtsAudio(audioEl) {
+        return !!audioEl && Number.isFinite(audioEl.duration) && audioEl.readyState >= 1;
+      }
+
+      function getArchiveTtsTargetTime(audioEl) {
+        if (!media || !audioEl || !Number.isFinite(media.currentTime)) {
+          return 0;
+        }
+        if (!Number.isFinite(audioEl.duration) || audioEl.duration <= 0) {
+          return Math.max(0, media.currentTime || 0);
+        }
+        return Math.max(0, Math.min(media.currentTime || 0, Math.max(0, audioEl.duration - 0.05)));
+      }
+
+      function hardSyncArchiveTtsToMedia() {
+        if (!media || archiveAudioMode === 'original' || !activeArchiveTtsAudio) {
+          return;
+        }
+        if (canSeekArchiveTtsAudio(activeArchiveTtsAudio)) {
+          activeArchiveTtsAudio.currentTime = getArchiveTtsTargetTime(activeArchiveTtsAudio);
+          lastArchiveTtsHardSyncAt = Date.now();
+        }
+      }
+
+      function syncArchiveTtsToMedia(force = false) {
+        if (!media || archiveAudioMode === 'original' || !activeArchiveTtsAudio) {
+          return;
+        }
+
+        if (force) {
+          hardSyncArchiveTtsToMedia();
+          return;
+        }
+
+        // Avoid frequent seeking during playback; it can create audible loops.
+        if (media.paused || activeArchiveTtsAudio.paused || media.seeking) {
+          return;
+        }
+
+        const drift = Math.abs((activeArchiveTtsAudio.currentTime || 0) - (media.currentTime || 0));
+        const now = Date.now();
+
+        // Apply correction only for very large drift and with a long cooldown.
+        if (drift > 2.0 && (now - lastArchiveTtsHardSyncAt) > 5000) {
+          hardSyncArchiveTtsToMedia();
+        }
+      }
+
+      function applyArchiveAudioSource(mode) {
+        archiveAudioMode = mode || 'original';
+
+        if (!media) {
+          return;
+        }
+
+        pauseArchiveTtsAudio();
+        activeArchiveTtsAudio = null;
+
+        if (archiveAudioMode === 'original') {
+          media.muted = false;
+          return;
+        }
+
+        const selectedTtsAudio = getTtsAudioElementByLang(archiveAudioMode);
+        if (!selectedTtsAudio) {
+          archiveAudioMode = 'original';
+          media.muted = false;
+          if (archiveAudioSourceSelect) {
+            archiveAudioSourceSelect.value = 'original';
+          }
+          return;
+        }
+
+        selectedTtsAudio.playbackRate = media.playbackRate || 1;
+        selectedTtsAudio.loop = false;
+        activeArchiveTtsAudio = selectedTtsAudio;
+        activeArchiveTtsAudio.preload = 'auto';
+        lastArchiveTtsHardSyncAt = 0;
+        media.muted = true;
+
+        const startSyncedPlayback = () => {
+          hardSyncArchiveTtsToMedia();
+          if (!media.paused) {
+            activeArchiveTtsAudio.play().catch((error) => {
+              console.warn('Unable to autoplay selected TTS audio:', error);
+            });
+          }
+        };
+
+        if (canSeekArchiveTtsAudio(activeArchiveTtsAudio)) {
+          startSyncedPlayback();
+        } else {
+          activeArchiveTtsAudio.addEventListener('loadedmetadata', startSyncedPlayback, { once: true });
+        }
+      }
+
+      if (archiveAudioSourceSelect) {
+        archiveAudioSourceSelect.addEventListener('change', (event) => {
+          applyArchiveAudioSource(event.target.value);
+        });
+        applyArchiveAudioSource(archiveAudioSourceSelect.value);
+      }
+
+      if (media) {
+      media.addEventListener('play', () => {
+        if (archiveAudioMode !== 'original' && activeArchiveTtsAudio) {
+          syncArchiveTtsToMedia(true);
+          if (activeArchiveTtsAudio.paused) {
+            activeArchiveTtsAudio.play().catch(() => {});
+          }
+        }
+      });
+
+      media.addEventListener('pause', () => {
+        pauseArchiveTtsAudio();
+      });
+
+      media.addEventListener('ratechange', () => {
+        if (activeArchiveTtsAudio) {
+          activeArchiveTtsAudio.playbackRate = media.playbackRate || 1;
+        }
+      });
+
+      media.addEventListener('seeking', () => {
+        syncArchiveTtsToMedia(true);
+      });
+
+      media.addEventListener('seeked', () => {
+        syncArchiveTtsToMedia(true);
+        if (archiveAudioMode !== 'original' && activeArchiveTtsAudio && !media.paused && activeArchiveTtsAudio.paused) {
+          activeArchiveTtsAudio.play().catch(() => {});
+        }
+      });
+
+      media.addEventListener("timeupdate", function() {
+        if (document.ignoreTimeUpdate) {
+            return;
+        }
+
+        var currentTime = media.currentTime;
+
+        
+        if (! ("1" in langText)) {
+          button = document.getElementById("toogleView-1")
+          if(button.textContent == "Plain") {
+            langType[1]="plain_transcript"
+            langWindow[1]=document.getElementById('window-content-1')
+          }else {
+            langType[1]="markup_transcript"
+            langWindow[1]=document.getElementById('window-content-structured-1')
+          }
+          langText[1] = langWindow[1].getElementsByClassName(langType[1])[0]
+          langIndex[1]=0
+        }
+        start=parseFloat(langText[1].getAttribute("start"))
+        end=parseFloat(langText[1].getAttribute("end"))
+        if (currentTime >= start && currentTime <  end ) {
+          langText[1].style.fontWeight = "bold"
+          langWindow[1].scroll({top: langText[1].offsetTop - 200, behavior: 'smooth'});
+        }else {
+              langText[1].style.fontWeight = "normal"
+              while(currentTime < start && langIndex[1] > 0) {
+                      langIndex[1] --;
+                      langText[1] = langWindow[1].getElementsByClassName(langType[1])[langIndex[1]]
+                      start=parseFloat(langText[1].getAttribute("start"))
+                      end=parseFloat(langText[1].getAttribute("end"))
+                      }
+              while(currentTime >= end && langIndex[1] < langWindow[1].getElementsByClassName(langType[1]).length) {
+                      langIndex[1] ++;
+                      langText[1] = langWindow[1].getElementsByClassName(langType[1])[langIndex[1]]
+                      start=parseFloat(langText[1].getAttribute("start"))
+                      end=parseFloat(langText[1].getAttribute("end"))
+                      }
+                      
+              if (currentTime >= start && currentTime <  end ) {
+                    langText[1].style.fontWeight = "bold"
+                    button = document.getElementById("toogleView-1")
+                    if(button.textContent == "Plain") {
+                      document.getElementById('window-content-1').scroll({top: langText[1].offsetTop - 200, behavior: 'smooth'});
+                    }else {
+                      document.getElementById('window-content-structured-1').scroll({top: langText[1].offsetTop - 200, behavior: 'smooth'});            
+                    }
+
+                }
+    }
+              
+        
+        if (! ("2" in langText)) {
+          button = document.getElementById("toogleView-2")
+          if(button.textContent == "Plain") {
+            langType[2]="plain_transcript"
+            langWindow[2]=document.getElementById('window-content-2')
+          }else {
+            langType[2]="markup_transcript"
+            langWindow[2]=document.getElementById('window-content-structured-2')
+          }
+          langText[2] = langWindow[2].getElementsByClassName(langType[2])[0]
+          langIndex[2]=0
+        }
+        start=parseFloat(langText[2].getAttribute("start"))
+        end=parseFloat(langText[2].getAttribute("end"))
+        if (currentTime >= start && currentTime <  end ) {
+          langText[2].style.fontWeight = "bold"
+          langWindow[2].scroll({top: langText[2].offsetTop - 200, behavior: 'smooth'});
+        }else {
+              langText[2].style.fontWeight = "normal"
+              while(currentTime < start && langIndex[2] > 0) {
+                      langIndex[2] --;
+                      langText[2] = langWindow[2].getElementsByClassName(langType[2])[langIndex[2]]
+                      start=parseFloat(langText[2].getAttribute("start"))
+                      end=parseFloat(langText[2].getAttribute("end"))
+                      }
+              while(currentTime >= end && langIndex[2] < langWindow[2].getElementsByClassName(langType[2]).length) {
+                      langIndex[2] ++;
+                      langText[2] = langWindow[2].getElementsByClassName(langType[2])[langIndex[2]]
+                      start=parseFloat(langText[2].getAttribute("start"))
+                      end=parseFloat(langText[2].getAttribute("end"))
+                      }
+                      
+              if (currentTime >= start && currentTime <  end ) {
+                    langText[2].style.fontWeight = "bold"
+                    button = document.getElementById("toogleView-2")
+                    if(button.textContent == "Plain") {
+                      document.getElementById('window-content-2').scroll({top: langText[2].offsetTop - 200, behavior: 'smooth'});
+                    }else {
+                      document.getElementById('window-content-structured-2').scroll({top: langText[2].offsetTop - 200, behavior: 'smooth'});            
+                    }
+
+                }
+    }
+              
+        
+
+
+            });
+      }
+
+
+
+           // function that gets input text (usedContext from the Chatbot and searches for the correct transcript part, then sets the video time to the belonging part)
+           // the function needs to be called when 'usedContext' changes
+           function jumpToTextAndTime(inputText) {
+              var found = false;
+
+              
+              // Determine the active transcript type
+              var button = document.getElementById("toogleView-1");
+              var langType = button.textContent == "Plain" ? "plain_transcript" : "markup_transcript";
+              var langWindow = document.getElementById(button.textContent == "Plain" ?
+                                                        'window-content-1' : 
+                                                        'window-content-structured-1');
+              var transcriptSegments = langWindow.getElementsByClassName(langType);
+
+              // Search for the input text in the current language transcript
+              for (var i = 0; i < transcriptSegments.length; i++) {
+                  var segment = transcriptSegments[i];
+                  if (segment.textContent.trim().includes(inputText)) {
+                      console.log('found the fitting segment:')
+                      console.log(segment.textContent)
+                      var start = parseFloat(segment.getAttribute("start"));
+                      var end = parseFloat(segment.getAttribute("end"));
+
+                      // Set video time
+                      if (media) {
+                        media.currentTime = start;
+                        if (archiveAudioMode !== 'original' && activeArchiveTtsAudio) {
+                          syncArchiveTtsToMedia(true);
+                          media.addEventListener('seeked', () => {
+                            syncArchiveTtsToMedia(true);
+                            if (!media.paused && activeArchiveTtsAudio.paused) {
+                              activeArchiveTtsAudio.play().catch(() => {});
+                            }
+                          }, { once: true });
+                        }
+                      }
+
+                      // Highlight the text
+                      segment.style.fontWeight = "bold";
+
+                      // Scroll the transcript window
+                      langWindow.scroll({ top: segment.offsetTop - 200, behavior: 'smooth' });
+
+                      found = true;
+                      break;
+                  }
+              }
+
+            // Reset the font weight for non-matching segments
+            if (found) {
+                var matchedIndex = i;  // Store the index of the matching segment
+
+                // Reset font weight for all segments
+                for (var j = 0; j < transcriptSegments.length; j++) {
+                    if (j !== matchedIndex) {
+                        transcriptSegments[j].style.fontWeight = "normal";
+                    }
+                }
+
+                // No need for a break statement; the outer loop will continue for other languages
+            }
+              
+              // Determine the active transcript type
+              var button = document.getElementById("toogleView-2");
+              var langType = button.textContent == "Plain" ? "plain_transcript" : "markup_transcript";
+              var langWindow = document.getElementById(button.textContent == "Plain" ?
+                                                        'window-content-2' : 
+                                                        'window-content-structured-2');
+              var transcriptSegments = langWindow.getElementsByClassName(langType);
+
+              // Search for the input text in the current language transcript
+              for (var i = 0; i < transcriptSegments.length; i++) {
+                  var segment = transcriptSegments[i];
+                  if (segment.textContent.trim().includes(inputText)) {
+                      console.log('found the fitting segment:')
+                      console.log(segment.textContent)
+                      var start = parseFloat(segment.getAttribute("start"));
+                      var end = parseFloat(segment.getAttribute("end"));
+
+                      // Set video time
+                      if (media) {
+                        media.currentTime = start;
+                        if (archiveAudioMode !== 'original' && activeArchiveTtsAudio) {
+                          syncArchiveTtsToMedia(true);
+                          media.addEventListener('seeked', () => {
+                            syncArchiveTtsToMedia(true);
+                            if (!media.paused && activeArchiveTtsAudio.paused) {
+                              activeArchiveTtsAudio.play().catch(() => {});
+                            }
+                          }, { once: true });
+                        }
+                      }
+
+                      // Highlight the text
+                      segment.style.fontWeight = "bold";
+
+                      // Scroll the transcript window
+                      langWindow.scroll({ top: segment.offsetTop - 200, behavior: 'smooth' });
+
+                      found = true;
+                      break;
+                  }
+              }
+
+            // Reset the font weight for non-matching segments
+            if (found) {
+                var matchedIndex = i;  // Store the index of the matching segment
+
+                // Reset font weight for all segments
+                for (var j = 0; j < transcriptSegments.length; j++) {
+                    if (j !== matchedIndex) {
+                        transcriptSegments[j].style.fontWeight = "normal";
+                    }
+                }
+
+                // No need for a break statement; the outer loop will continue for other languages
+            }
+              
+
+              // If no match was found, notify the user
+              if (!found) {
+                  console.log("Text not found in any transcript.");
+              }
+          }
+
+    // add function here that jumps to fitting transcript part when varibale usedContext is changed:
+    window.addEventListener('contextUpdated', (event) => {
+      const searchActive = window.isActive;
+      if (searchActive) {
+        const usedContext = event.detail;
+        console.log('detected in sessionWindow usedContext:', usedContext);
+        const truncatedContext = usedContext.length > 20 ? usedContext.substring(0, 20) : usedContext;
+
+        console.log('call function: jumpToTextAndTime');
+        jumpToTextAndTime(truncatedContext);
+      }
+      else {
+        console.log('search not active')
+      }
+    });
+
+
+
+const elementToMonitor = document.querySelector('.resizable-video');
+
+function isBelow50Percent(element) {
+    const windowWidth = window.innerWidth;
+    const elementWidth = element.offsetWidth;
+    return (elementWidth < windowWidth * 0.5);
+}
+
+function resizeElement() {
+    if (isBelow50Percent(elementToMonitor)) {
+        orientation = "portrait";
+        updateWindowWidth()
+    } else {
+        orientation = "landscape";
+        updateWindowWidth()
+    }
+}
+
+if (elementToMonitor) {
+  const resizeObserver = new ResizeObserver(resizeElement);
+  resizeObserver.observe(elementToMonitor);
+}
+
+
+
+			   function getData(page,limit) {
+
+			   
+			   console.log("Page:",page,"Limit:",limit)
+			   // Fetch data asynchronously after the initial page load
+            fetch(`/archive_messages/L2hvbWUvYWRtaW5AZXhhbXBsZS5jb20vSU1HXzI1Mjcg4oCTIDIwMjYtMDgtMTYgMDA6MDU=?page=${page}&limit=${limit}`)
+                .then(response => response.json())
+                .then(d => {
+											    // Add data to the DOM
+											    console.log("Totale number of entries: ",d["total"]);
+											    const total = parseInt(d["total"], 10);
+											    const data = d["data"] || [];
+											    for (let i = 0; i < data.length; i++) {
+
+                        	  var msg = JSON.parse(data[i][1])
+                            console.log('message:')
+                            console.log(msg)
+																    //console.log(lang_index[data[i][0]])
+																    //console.log(i)
+														addMessage(lang_index[data[i][0]],msg,1,0)
+														}
+                            console.log("Data processed");
+											    return total;
+														})
+														.then(total => {
+
+
+											    if(Number.isFinite(total) && page*limit < total) {
+                                setLoadingPercentage(Math.floor(page*limit/total * 100))
+													       getData(page+1,limit);
+											    } else {
+                                const loadingWrapper = document.querySelector('.loading-wrapper');
+                                if (loadingWrapper) {
+                                  loadingWrapper.classList.add('hidden');
+                                }
+                                if (isMobileArchive) {
+                                  activateMobileArchiveMode();
+                                } else {
+                                  showWindow(1);
+                                }
+
+                              }
+													    })
+													    .catch(error => {
+                    console.error('Error fetching data:', error);
+                    const loadingWrapper = document.querySelector('.loading-wrapper');
+                    if (loadingWrapper) {
+                      loadingWrapper.classList.add('hidden');
+                    }
+                    if (isMobileArchive) {
+                      activateMobileArchiveMode();
+                    } else {
+                      showWindow(1);
+                    }
+											    });
+											    
+
+			   
+
+
+			   }
+
+		
+  document.addEventListener('DOMContentLoaded', function() {
+  var total = "1"
+  var page = 0
+  var limit = 1000
+  getData(page,limit);
+													       
+        });
+
+			   
+    </script>
+
+  
+  <footer class="kit-footer">
+  <div class="kit-footer__container">
+    <div class="kit-footer__grid">
+      <div class="kit-footer__section">
+        <h3>About</h3>
+        <p>Breaking down language and comprehension barriers – ease and speed up work and learning with the lecture translator.</p>
+      </div>
+      <div class="kit-footer__section">
+        <h3>Get Started</h3>
+        <ul>
+          <li><a href="mailto:info@lecture-translator.kit.edu">Register for your own usage</a></li>
+          <li><a href="https://apps.apple.com/us/app/lecture-viewer/id6504312546">iOS App</a></li>
+          <li><a href="https://play.google.com/store/apps/details?id=vn.vais.meeting_translate">Android App</a></li>
+        </ul>
+      </div>
+      <div class="kit-footer__section">
+        <h3>Legal</h3>
+        <ul>
+          <li><a href="/about">About Us</a></li>
+          <li><a href="/legals">Legal Notice</a></li>
+          <li><a href="/terms">Terms of Service</a></li>
+          <li><a href="/contact">Contact</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="kit-footer__bottom">
+      <p class="kit-footer__contact">Questions? Contact us at <a href="mailto:info@lecture-translator.kit.edu">info@lecture-translator.kit.edu</a></p>
+    </div>
+  </div>
+</footer>
+
+  </body>
+</html>
