@@ -18,12 +18,13 @@ import io
 import requests
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
+from docx import Document
 
 # BeautifulSoup is imported only when needed for HTML parsing
-HAS_BS4 = False
+has_bs4 = False
 try:
     from bs4 import BeautifulSoup
-    HAS_BS4 = True
+    has_bs4 = True
 except ImportError:
     logging.warning("BeautifulSoup not installed. Export functions will be limited.")
 
@@ -63,6 +64,17 @@ sessions = {}
 internal_session = requests.Session()
 internal_session.verify = False
 _state = {"token": None}
+
+
+def parse_html_with_bs4(html_content):
+    """Parse HTML content using BeautifulSoup if available."""
+    if has_bs4 and html_content:
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            return soup
+        except (TypeError, ValueError) as e:
+            logging.warning("Failed to parse HTML with BeautifulSoup: %s", e)
+    return None
 
 
 def ensure_authenticated(token: str) -> bool:
@@ -375,7 +387,7 @@ def get_actual_file_url(session_id, filename, html_content=None):
                 if url.startswith("/"):
                     url = f"{INTERNAL_SERVER_URL}{url}"
                 return url
-        
+
         # Check for subtitle tracks
         if filename.startswith("subtitles_") and filename.endswith(".vtt"):
             label = filename.replace("subtitles_", "").replace(".vtt", "")
@@ -388,7 +400,7 @@ def get_actual_file_url(session_id, filename, html_content=None):
                 if url.startswith("/"):
                     url = f"{INTERNAL_SERVER_URL}{url}"
                 return url
-        
+
         # Check for audio source
         if filename.endswith(".wav"):
             match = re.search(
@@ -400,25 +412,25 @@ def get_actual_file_url(session_id, filename, html_content=None):
                 if url.startswith("/"):
                     url = f"{INTERNAL_SERVER_URL}{url}"
                 return url
-    
+
     # For messages.json, use archivemediafile endpoint
     if filename == "messages.json":
         return f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/messages.json"
-    
+
     # For VTT subtitles from the media endpoint
     if filename.endswith(".vtt"):
         label = filename.replace(".vtt", "")
         return f"{INTERNAL_SERVER_URL}/archivemedia/{session_id}/vtt/{label}"
-    
+
     # For video
     if filename == "video.mp4":
         return f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/video.mp4"
-    
+
     # For audio files (WAV)
     if filename.endswith(".wav"):
         encoded_name = filename.replace(" ", "%20")
         return f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/{encoded_name}"
-    
+
     # Default: try archivesession endpoint
     encoded_name = filename.replace(" ", "%20")
     return f"{INTERNAL_SERVER_URL}/archivesession/{session_id}/{encoded_name}"
@@ -493,10 +505,15 @@ def download_session_files(session_id, token):
         logging.warning("Could not download audio: %s", e)
 
     # ─── 5. DOWNLOAD messages.json (CRITICAL) ────────────────────────
-    messages_url = f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/messages.json"
+    messages_url = (
+        f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/messages.json"
+    )
     messages_path = os.path.join(session_dir, "messages.json")
     if curl_download(messages_url, messages_path, token):
-        logging.info("Downloaded messages.json (%d bytes)", os.path.getsize(messages_path))
+        logging.info(
+            "Downloaded messages.json (%d bytes)",
+            os.path.getsize(messages_path)
+        )
     else:
         logging.warning("Failed to download messages.json")
 
@@ -530,12 +547,12 @@ def download_session_files(session_id, token):
         file_path = os.path.join(session_dir, file_name)
         if os.path.exists(file_path) and os.path.getsize(file_path) > 1000:
             continue
-        
+
         url = f"{INTERNAL_SERVER_URL}/archivesession/{session_id}/{file_name}"
         if curl_download_with_headers(url, file_path, token):
             logging.info("Downloaded %s", file_name)
             continue
-        
+
         url = f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/{file_name}"
         if curl_download_with_headers(url, file_path, token):
             logging.info("Downloaded %s", file_path)
@@ -547,18 +564,21 @@ def download_session_files(session_id, token):
         try:
             with open(messages_path, "r", encoding="utf-8") as f:
                 messages_data = json.load(f)
-            
+
             # Handle different message formats
             # Sometimes messages.json is a list of [language_id, message_data] pairs
             # Sometimes it's a list of message objects
             # Sometimes it's a dict with a 'messages' key
-            
+
             # Normalize the data
             normalized_messages = []
-            
+
             if isinstance(messages_data, dict):
                 # Check for 'messages' key
-                if 'messages' in messages_data and isinstance(messages_data['messages'], list):
+                if (
+                    'messages' in messages_data
+                    and isinstance(messages_data['messages'], list)
+                ):
                     normalized_messages = messages_data['messages']
                 else:
                     # Try to extract messages from dict values
@@ -569,7 +589,7 @@ def download_session_files(session_id, token):
                                     normalized_messages.append(item)
                         elif isinstance(value, dict):
                             normalized_messages.append(value)
-            
+
             elif isinstance(messages_data, list):
                 for item in messages_data:
                     if isinstance(item, dict):
@@ -587,7 +607,7 @@ def download_session_files(session_id, token):
                                 normalized_messages.append(item[1])
                         except (json.JSONDecodeError, TypeError):
                             pass
-            
+
             # If still empty, try to parse raw content as message objects
             if not normalized_messages and isinstance(messages_data, list):
                 for item in messages_data:
@@ -595,68 +615,108 @@ def download_session_files(session_id, token):
                         # Check if it has message-like fields
                         if any(key in item for key in ['sender', 'seq', 'start', 'end']):
                             normalized_messages.append(item)
-            
-            logging.info("Extracted %d messages from messages.json", len(normalized_messages))
-            
+
+            logging.info(
+                "Extracted %d messages from messages.json",
+                len(normalized_messages)
+            )
+
             # Extract transcripts by language
             transcripts = []
-            
+
             # Process ASR
-            asr_texts = []
-            asr_messages = [msg for msg in normalized_messages if msg.get("sender", "").startswith("asr")]
+            asr_messages = [
+                msg for msg in normalized_messages
+                if msg.get("sender", "").startswith("asr")
+            ]
             if asr_messages:
-                asr_text = "\n".join([msg.get("seq", "") for msg in asr_messages if msg.get("seq")])
+                asr_text = "\n".join([
+                    msg.get("seq", "") for msg in asr_messages if msg.get("seq")
+                ])
                 if asr_text.strip():
                     transcripts.append({
                         "language": "Original (ASR)",
                         "source_file": "asr:0",
                         "text": asr_text
                     })
-                    logging.info("Extracted ASR transcript (%d chars)", len(asr_text))
-            
+                    logging.info(
+                        "Extracted ASR transcript (%d chars)",
+                        len(asr_text)
+                    )
+
             # Process MT translations
             for i in range(3):
-                mt_messages = [msg for msg in normalized_messages if msg.get("sender") == f"mt:{i}"]
+                mt_messages = [
+                    msg for msg in normalized_messages
+                    if msg.get("sender") == f"mt:{i}"
+                ]
                 if mt_messages:
-                    mt_text = "\n".join([msg.get("seq", "") for msg in mt_messages if msg.get("seq")])
+                    mt_text = "\n".join([
+                        msg.get("seq", "") for msg in mt_messages if msg.get("seq")
+                    ])
                     if mt_text.strip():
                         lang_names = ["English", "German", "French"]
+                        lang_label = (
+                            lang_names[i]
+                            if i < len(lang_names)
+                            else f"MT:{i}"
+                        )
                         transcripts.append({
-                            "language": f"Translation: {lang_names[i] if i < len(lang_names) else f'MT:{i}'}",
+                            "language": f"Translation: {lang_label}",
                             "source_file": f"mt:{i}",
                             "text": mt_text
                         })
-                        logging.info("Extracted %s translation (%d chars)", lang_names[i] if i < len(lang_names) else f"MT:{i}", len(mt_text))
-            
+                        logging.info(
+                            "Extracted %s translation (%d chars)",
+                            lang_label,
+                            len(mt_text)
+                        )
+
             # Process textstructurer (structured transcripts by language)
+            lang_map = {'ru': 'Russian', 'en': 'English', 'fr': 'French', 'de': 'German'}
             for lang in ['ru', 'en', 'fr', 'de']:
-                lang_messages = [msg for msg in normalized_messages if msg.get("sender") == f"textstructurer:0_{lang}"]
+                lang_messages = [
+                    msg for msg in normalized_messages
+                    if msg.get("sender") == f"textstructurer:0_{lang}"
+                ]
                 if lang_messages:
-                    lang_text = "\n".join([msg.get("seq", "") for msg in lang_messages if msg.get("seq")])
+                    lang_text = "\n".join([
+                        msg.get("seq", "") for msg in lang_messages if msg.get("seq")
+                    ])
                     if lang_text.strip():
-                        lang_names = {'ru': 'Russian', 'en': 'English', 'fr': 'French', 'de': 'German'}
                         transcripts.append({
-                            "language": f"Structured: {lang_names.get(lang, lang.upper())}",
+                            "language": f"Structured: {lang_map.get(lang, lang.upper())}",
                             "source_file": f"textstructurer:0_{lang}",
                             "text": lang_text
                         })
-                        logging.info("Extracted structured %s transcript (%d chars)", lang_names.get(lang, lang.upper()), len(lang_text))
-            
+                        logging.info(
+                            "Extracted structured %s transcript (%d chars)",
+                            lang_map.get(lang, lang.upper()),
+                            len(lang_text)
+                        )
+
             # Save transcripts
             if transcripts:
                 save_transcripts_to_files(session_dir, transcripts)
-                logging.info("Extracted %d transcripts from messages.json", len(transcripts))
+                logging.info(
+                    "Extracted %d transcripts from messages.json",
+                    len(transcripts)
+                )
             else:
                 logging.warning("No transcripts extracted from messages.json")
-                
+
         except json.JSONDecodeError as e:
             logging.warning("Could not parse messages.json: %s", e)
         except (OSError, KeyError, TypeError, AttributeError) as e:
             logging.warning("Could not extract transcripts from messages.json: %s", e)
 
     # ─── 9. SUMMARY ────────────────────────────────────────────────────
-    files = [f for f in os.listdir(session_dir) if os.path.isfile(os.path.join(session_dir, f)) and os.path.getsize(os.path.join(session_dir, f)) > 1000]
-    
+    files = [
+        f for f in os.listdir(session_dir)
+        if os.path.isfile(os.path.join(session_dir, f))
+        and os.path.getsize(os.path.join(session_dir, f)) > 1000
+    ]
+
     logging.info("=" * 60)
     logging.info("Session %s: Downloaded %s files total", session_id, len(files))
     for f in files:
@@ -665,6 +725,7 @@ def download_session_files(session_id, token):
     logging.info("=" * 60)
 
     return len(files) > 0
+
 
 def save_transcripts_to_files(session_dir, transcripts):
     """Save transcripts to JSON and TXT files."""
@@ -692,8 +753,6 @@ def save_transcripts_to_files(session_dir, transcripts):
 
 def export_docx(session_id, session_dir):
     """Export session data as DOCX."""
-    from docx import Document
-
     json_path = os.path.join(session_dir, "transcripts.json")
     transcripts = []
 
@@ -860,11 +919,11 @@ def session_messages_json(session_id):
     session_dir = os.path.join(SESSION_FOLDER, session_id)
     if not os.path.exists(session_dir):
         return jsonify({"error": "Session not found"}), 404
-    
+
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
         token = request.cookies.get("_forward_auth", "")
-    
+
     if token:
         local_path = os.path.join(session_dir, "messages.json")
         if not os.path.exists(local_path) or os.path.getsize(local_path) < 1000:
@@ -872,7 +931,7 @@ def session_messages_json(session_id):
             logging.info("Downloading messages.json from %s", url)
             if curl_download(url, local_path, token):
                 logging.info("Successfully downloaded messages.json")
-    
+
     json_path = os.path.join(session_dir, "messages.json")
     if os.path.exists(json_path) and os.path.getsize(json_path) > 1000:
         return send_file(
@@ -881,7 +940,7 @@ def session_messages_json(session_id):
             download_name=f"messages_{session_id}.json",
             mimetype="application/json"
         )
-    
+
     return jsonify({"error": "messages.json not found"}), 404
 
 
@@ -891,26 +950,26 @@ def download_session_zip(session_id):
     session_dir = os.path.join(SESSION_FOLDER, session_id)
     if not os.path.exists(session_dir):
         return jsonify({"error": "Session not found"}), 404
-    
+
     # Ensure we have messages.json
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
         token = request.cookies.get("_forward_auth", "")
-    
+
     if token:
         json_path = os.path.join(session_dir, "messages.json")
         if not os.path.exists(json_path) or os.path.getsize(json_path) < 1000:
             url = f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/messages.json"
             curl_download(url, json_path, token)
-    
+
     zip_path = os.path.join(tempfile.gettempdir(), f"session_{session_id}.zip")
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
         for root, _, files in os.walk(session_dir):
             for file in files:
                 file_path = os.path.join(root, file)
-                if os.path.getsize(file_path) > 1000:  # Only include non-empty files
+                if os.path.getsize(file_path) > 1000:
                     zipf.write(file_path, os.path.relpath(file_path, session_dir))
-    
+
     return send_file(
         zip_path,
         as_attachment=True,
@@ -926,10 +985,10 @@ def session_download_all(session_id):
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
         token = request.cookies.get("_forward_auth", "")
-    
+
     if token:
         download_session_files(session_id, token)
-    
+
     return download_session_zip(session_id)
 
 
