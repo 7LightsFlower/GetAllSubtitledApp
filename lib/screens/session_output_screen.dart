@@ -23,7 +23,9 @@ class SessionOutputScreen extends StatefulWidget {
 
 class _SessionOutputScreenState extends State<SessionOutputScreen> {
   List<Map<String, dynamic>> _files = [];
+  List<String> _availableLanguages = [];
   bool _isLoading = true;
+  bool _isLoadingLanguages = false;
   String _errorMessage = '';
   bool _isExporting = false;
 
@@ -31,6 +33,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   void initState() {
     super.initState();
     _fetchSessionOutput();
+    _fetchAvailableLanguages();
   }
 
   Future<void> _fetchSessionOutput() async {
@@ -69,6 +72,33 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     }
   }
 
+  Future<void> _fetchAvailableLanguages() async {
+    setState(() => _isLoadingLanguages = true);
+    
+    try {
+      final url = '$flaskServerUrl/session_languages/${widget.sessionId}';
+      final token = await InternalAuthService.getToken();
+      final response = await http.get(
+        Uri.parse(url),
+        headers: {
+          'Authorization': 'Bearer ${token ?? ''}',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        setState(() {
+          _availableLanguages = List<String>.from(data['languages'] ?? []);
+          _isLoadingLanguages = false;
+        });
+      } else {
+        setState(() => _isLoadingLanguages = false);
+      }
+    } catch (e) {
+      setState(() => _isLoadingLanguages = false);
+    }
+  }
+
   void _downloadFile(String url, String filename) {
     html.window.open(url, '_blank');
   }
@@ -83,25 +113,127 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   }
 
   // ─── EXPORT FUNCTIONS ──────────────────────────────────────────────
-  void _exportTXT() {
+  
+  void _exportSingleLanguage(String format, String language) {
     setState(() => _isExporting = true);
-    final exportUrl = '$flaskServerUrl/session_export_txt/${widget.sessionId}';
+    final encodedLang = Uri.encodeComponent(language);
+    final exportUrl = '$flaskServerUrl/session_export_${format.toLowerCase()}/${widget.sessionId}?language=$encodedLang';
     html.window.open(exportUrl, '_blank');
     setState(() => _isExporting = false);
   }
 
-  void _exportRTF() {
+  void _exportAllLanguages(String format) {
     setState(() => _isExporting = true);
-    final exportUrl = '$flaskServerUrl/session_export_rtf/${widget.sessionId}';
+    final exportUrl = '$flaskServerUrl/session_export_all_languages/${widget.sessionId}?format=${format.toLowerCase()}';
     html.window.open(exportUrl, '_blank');
     setState(() => _isExporting = false);
   }
 
-  void _exportDOCX() {
-    setState(() => _isExporting = true);
-    final exportUrl = '$flaskServerUrl/session_export/${widget.sessionId}';
-    html.window.open(exportUrl, '_blank');
-    setState(() => _isExporting = false);
+  void _showLanguageSelectionDialog(String format, String formatName) {
+    if (_availableLanguages.isEmpty) {
+      // If no languages detected, just export all
+      _exportAllLanguages(format);
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(_getFormatIcon(format), color: _getFormatColor(format)),
+            const SizedBox(width: 8),
+            Text('Export $formatName'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Select language to export:',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  // "All Languages" option
+                  _buildLanguageChip(
+                    label: '📦 All Languages',
+                    onTap: () {
+                      Navigator.pop(context);
+                      _exportAllLanguages(format);
+                    },
+                    isAllOption: true,
+                  ),
+                  // Individual languages
+                  ..._availableLanguages.map((lang) => _buildLanguageChip(
+                    label: lang,
+                    onTap: () {
+                      Navigator.pop(context);
+                      _exportSingleLanguage(format, lang);
+                    },
+                    isAllOption: false,
+                  )),
+                ],
+              ),
+            ),
+            if (_isLoadingLanguages)
+              const Padding(
+                padding: EdgeInsets.all(16.0),
+                child: Center(child: CircularProgressIndicator()),
+              ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLanguageChip({
+    required String label,
+    required VoidCallback onTap,
+    bool isAllOption = false,
+  }) {
+    return ActionChip(
+      label: Text(label),
+      onPressed: _isExporting ? null : onTap,
+      backgroundColor: isAllOption 
+          ? Colors.purple.withValues(alpha: 0.1)
+          : Colors.blue.withValues(alpha: 0.1),
+      side: BorderSide(
+        color: isAllOption 
+            ? Colors.purple.withValues(alpha: 0.3)
+            : Colors.blue.withValues(alpha: 0.3),
+      ),
+    );
+  }
+
+  IconData _getFormatIcon(String format) {
+    switch (format.toLowerCase()) {
+      case 'txt': return Icons.text_snippet;
+      case 'rtf': return Icons.description;
+      case 'docx': return Icons.file_present;
+      default: return Icons.file_download;
+    }
+  }
+
+  Color _getFormatColor(String format) {
+    switch (format.toLowerCase()) {
+      case 'txt': return Colors.grey;
+      case 'rtf': return Colors.orange;
+      case 'docx': return Colors.blue;
+      default: return Colors.purple;
+    }
   }
 
   void _showExportDialog() {
@@ -129,7 +261,10 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
               label: 'TXT',
               subtitle: 'Plain text format',
               color: Colors.grey,
-              onPressed: _exportTXT,
+              onPressed: () {
+                Navigator.pop(context);
+                _showLanguageSelectionDialog('txt', 'TXT');
+              },
             ),
             const SizedBox(height: 8),
             _buildExportButton(
@@ -137,7 +272,10 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
               label: 'RTF',
               subtitle: 'Rich Text Format',
               color: Colors.orange,
-              onPressed: _exportRTF,
+              onPressed: () {
+                Navigator.pop(context);
+                _showLanguageSelectionDialog('rtf', 'RTF');
+              },
             ),
             const SizedBox(height: 8),
             _buildExportButton(
@@ -145,7 +283,21 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
               label: 'DOCX',
               subtitle: 'Microsoft Word format',
               color: Colors.blue,
-              onPressed: _exportDOCX,
+              onPressed: () {
+                Navigator.pop(context);
+                _showLanguageSelectionDialog('docx', 'DOCX');
+              },
+            ),
+            const Divider(height: 24),
+            _buildExportButton(
+              icon: Icons.folder_zip,
+              label: 'All Formats + All Languages',
+              subtitle: 'Export everything as ZIP',
+              color: Colors.purple,
+              onPressed: () {
+                Navigator.pop(context);
+                _exportAllLanguages('zip');
+              },
             ),
           ],
         ),
@@ -195,6 +347,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                 height: 16,
                 child: CircularProgressIndicator(strokeWidth: 2),
               ),
+            const Icon(Icons.chevron_right, size: 16, color: Colors.grey),
           ],
         ),
         style: OutlinedButton.styleFrom(
@@ -307,19 +460,19 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                                 label: 'TXT',
                                 icon: Icons.text_snippet,
                                 color: Colors.grey,
-                                onTap: _exportTXT,
+                                onTap: () => _showLanguageSelectionDialog('txt', 'TXT'),
                               ),
                               _buildExportChip(
                                 label: 'RTF',
                                 icon: Icons.description,
                                 color: Colors.orange,
-                                onTap: _exportRTF,
+                                onTap: () => _showLanguageSelectionDialog('rtf', 'RTF'),
                               ),
                               _buildExportChip(
                                 label: 'DOCX',
                                 icon: Icons.file_present,
                                 color: Colors.blue,
-                                onTap: _exportDOCX,
+                                onTap: () => _showLanguageSelectionDialog('docx', 'DOCX'),
                               ),
                               _buildExportChip(
                                 label: 'All Files (ZIP)',
@@ -333,8 +486,37 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                                 color: Colors.green,
                                 onTap: _openSessionInBrowser,
                               ),
+                              if (_availableLanguages.isNotEmpty)
+                                _buildExportChip(
+                                  label: '📚 ${_availableLanguages.length} Languages',
+                                  icon: Icons.translate,
+                                  color: Colors.teal,
+                                  onTap: _showExportDialog,
+                                ),
                             ],
                           ),
+                          // ─── LANGUAGE INDICATOR ───────────────────
+                          if (_availableLanguages.isNotEmpty) ...[
+                            const SizedBox(height: 8),
+                            Wrap(
+                              spacing: 4,
+                              runSpacing: 4,
+                              children: _availableLanguages.map((lang) => Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: Colors.blue[100],
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Text(
+                                  lang,
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: Colors.blue[800],
+                                  ),
+                                ),
+                              )).toList(),
+                            ),
+                          ],
                         ],
                       ),
                     ),
