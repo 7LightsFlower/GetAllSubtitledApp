@@ -14,6 +14,7 @@ import time
 import uuid
 import zipfile
 import io
+import mimetypes
 
 import requests
 from flask import Flask, jsonify, request, send_file
@@ -1456,7 +1457,7 @@ def get_session_file(session_id, filename):
 
 @app.route("/upload", methods=["POST", "OPTIONS"])
 def upload_lecture():
-    """Upload a video file to the internal server using requests."""
+    """Upload a video file to the internal server using streaming."""
     if request.method == "OPTIONS":
         response = jsonify({"message": "OK"})
         response.headers.add("Access-Control-Allow-Origin", "*")
@@ -1477,13 +1478,14 @@ def upload_lecture():
         return jsonify({"error": "Empty filename"}), 400
 
     session_name = request.form.get("name", file_storage.filename)
-    file_storage.seek(0)
 
+    # Save locally first (streaming)
     local_filename = f"{uuid.uuid4()}_{file_storage.filename}"
     local_path = os.path.join(UPLOAD_FOLDER, local_filename)
+
+    # Stream save to disk
     file_storage.save(local_path)
     file_size = os.path.getsize(local_path)
-    file_storage.seek(0)
     logging.info("Saved local copy: %s (%d bytes)", local_filename, file_size)
 
     video_key = str(uuid.uuid4())
@@ -1504,6 +1506,7 @@ def upload_lecture():
     }
     videos.append(project)
 
+    # Prepare form data
     data = {}
     for key in request.form.keys():
         if key == "token":
@@ -1512,18 +1515,6 @@ def upload_lecture():
         data[key] = values[0] if len(values) == 1 else values
     if "path" not in data:
         data["path"] = "/home/admin@example.com"
-
-    files = {}
-    if "videofile" in request.files:
-        file_obj = request.files["videofile"]
-        if file_obj.filename:
-            file_obj.seek(0)
-            file_content = file_obj.read()
-            files["videofile"] = (
-                file_obj.filename,
-                file_content,
-                file_obj.content_type,
-            )
 
     headers = {
         "X-Forward-Auth": token,
@@ -1535,22 +1526,74 @@ def upload_lecture():
     try:
         logging.info("Uploading to internal server: %s", TARGET_URL)
         logging.info("Data keys: %s", list(data.keys()))
-        logging.info(
-            "File: %s (%d bytes)",
-            file_obj.filename if file_obj else "None",
-            len(file_content) if "file_content" in locals() else 0,
-        )
+        logging.info("File size: %d bytes", file_size)
 
-        resp = requests.post(
-            TARGET_URL,
-            data=data,
-            files=files,
-            headers=headers,
-            cookies=cookies,
-            timeout=(30, 3600),
-            verify=False,
-            allow_redirects=True,
-        )
+        # Use streaming multipart upload
+        with open(local_path, "rb") as f:
+            # Build multipart form data manually for streaming
+
+            boundary = f"----WebKitFormBoundary{uuid.uuid4().hex[:16]}"
+            content_type = f"multipart/form-data; boundary={boundary}"
+
+            def generate_multipart():
+                # Write form fields
+                for key, value in data.items():
+                    if isinstance(value, list):
+                        for v in value:
+                            yield f"--{boundary}\r\n"
+                            yield f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                            yield f"{v}\r\n"
+                    else:
+                        yield f"--{boundary}\r\n"
+                        yield f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                        yield f"{value}\r\n"
+
+                # Write file
+                filename = file_storage.filename
+                mimetype = mimetypes.guess_type(filename)[0] or "video/mp4"
+                yield f"--{boundary}\r\n"
+                yield f'Content-Disposition: form-data; name="videofile"; filename="{filename}"\r\n'
+                yield f"Content-Type: {mimetype}\r\n\r\n"
+
+                # Stream file in chunks
+                chunk_size = 8192  # 8KB chunks
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
+
+                yield b"\r\n"
+                yield f"--{boundary}--\r\n"
+
+            # Use requests with a custom body generator
+            class MultipartGenerator:
+                """Iterate over multipart request body chunks as bytes."""
+
+                def __init__(self, generator_func):
+                    self.generator = generator_func()
+                    self._iter = iter(self.generator)
+
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    value = next(self._iter)
+                    if isinstance(value, str):
+                        return value.encode("utf-8")
+                    return value
+
+            body_gen = MultipartGenerator(generate_multipart)
+
+            resp = requests.post(
+                TARGET_URL,
+                data=body_gen,
+                headers={**headers, "Content-Type": content_type},
+                cookies=cookies,
+                timeout=(30, 3600),
+                verify=False,
+                allow_redirects=True,
+            )
 
         logging.info("Response status: %s", resp.status_code)
         logging.info("Response URL: %s", resp.url)
