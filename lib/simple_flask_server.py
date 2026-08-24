@@ -556,13 +556,14 @@ def extract_transcripts_from_messages(messages_path):
             messages_data = json.load(f)
 
         transcripts = []
-        # Handle the structure: list of [language_id, message_data] pairs
-        # where message_data is a JSON string
+
+        # The messages_data is a list of [language_id, message_data_string] pairs
         if isinstance(messages_data, list):
             for item in messages_data:
                 if isinstance(item, list) and len(item) >= 2:
                     lang_id = item[0]
                     msg_str = item[1]
+
                     try:
                         if isinstance(msg_str, str):
                             msg_data = json.loads(msg_str)
@@ -572,13 +573,16 @@ def extract_transcripts_from_messages(messages_path):
                             continue
                     except (json.JSONDecodeError, TypeError):
                         continue
-                    # Check if this is a transcript message (has 'seq' field)
+
+                    # Check if this is a transcript message
                     if isinstance(msg_data, dict) and "seq" in msg_data:
                         sender = msg_data.get("sender", "")
                         text = msg_data.get("seq", "").strip()
+
                         if not text:
                             continue
-                        # Determine language/type from sender or use the language ID
+
+                        # Determine the language name from sender
                         lang_name = get_language_name_from_sender(sender, lang_id)
 
                         # Check if we already have this language
@@ -586,6 +590,7 @@ def extract_transcripts_from_messages(messages_path):
                             (t for t in transcripts if t.get("language") == lang_name),
                             None,
                         )
+
                         if existing:
                             existing["text"] += "\n" + text
                             if "segments" not in existing:
@@ -615,66 +620,6 @@ def extract_transcripts_from_messages(messages_path):
                                     ],
                                 }
                             )
-                    elif (
-                        isinstance(msg_data, dict)
-                        and "sender" in msg_data
-                        and "seq" in msg_data
-                    ):
-                        # Another format: direct dict with sender and seq
-                        sender = msg_data.get("sender", "")
-                        text = msg_data.get("seq", "").strip()
-
-                        if not text:
-                            continue
-
-                        lang_name = get_language_name_from_sender(sender, lang_id)
-
-                        existing = next(
-                            (t for t in transcripts if t.get("language") == lang_name),
-                            None,
-                        )
-                        if existing:
-                            existing["text"] += "\n" + text
-                        else:
-                            transcripts.append(
-                                {
-                                    "language": lang_name,
-                                    "source_file": f"lang_{lang_id}",
-                                    "text": text,
-                                    "sender": sender,
-                                }
-                            )
-
-        # Also handle the case where messages_data is a dict with 'messages' key
-        elif isinstance(messages_data, dict):
-            if "messages" in messages_data and isinstance(
-                messages_data["messages"], list
-            ):
-                for msg in messages_data["messages"]:
-                    if isinstance(msg, dict) and "seq" in msg:
-                        sender = msg.get("sender", "")
-                        text = msg.get("seq", "").strip()
-                        if text:
-                            lang_name = get_language_name_from_sender(sender, "")
-                            existing = next(
-                                (
-                                    t
-                                    for t in transcripts
-                                    if t.get("language") == lang_name
-                                ),
-                                None,
-                            )
-                            if existing:
-                                existing["text"] += "\n" + text
-                            else:
-                                transcripts.append(
-                                    {
-                                        "language": lang_name,
-                                        "source_file": "messages",
-                                        "text": text,
-                                        "sender": sender,
-                                    }
-                                )
 
         # Clean up and organize transcripts
         organized_transcripts = organize_transcripts(transcripts)
@@ -694,8 +639,57 @@ def get_language_name_from_sender(sender, lang_id):
     if not sender:
         return f"Language {lang_id}"
 
+    match = re.search(r"[:_](\d+)$", sender)
+    if match:
+        # For numbered languages like mt:0, mt:1, etc.
+        lang_map = {
+            "0": "English",
+            "1": "German",
+            "2": "French",
+            "3": "Russian",
+            "4": "Spanish",
+            "5": "Italian",
+            "6": "Portuguese",
+            "7": "Dutch",
+        }
+        num = match.group(1)
+        if num in lang_map:
+            # Determine what type of transcript this is
+            if sender.startswith("asr"):
+                return f"Transcript (Original ASR - {lang_map[num]})"
+            elif sender.startswith("mt:"):
+                return f"{lang_map[num]} Translation"
+            elif sender.startswith("textstructurer:"):
+                return f"Transcript (Structured - {lang_map[num]})"
+            elif sender.startswith("saasr"):
+                return f"Transcript (SAASR - {lang_map[num]})"
+
+    # Check for language codes in sender
+    lang_code_patterns = {
+        "en": "English",
+        "de": "German",
+        "fr": "French",
+        "ru": "Russian",
+        "es": "Spanish",
+        "it": "Italian",
+        "pt": "Portuguese",
+        "nl": "Dutch",
+    }
+
+    for code, name in lang_code_patterns.items():
+        if f"_{code}" in sender or f":{code}" in sender:
+            if sender.startswith("asr"):
+                return f"Transcript (Original ASR - {name})"
+            elif sender.startswith("mt:"):
+                return f"{name} Translation"
+            elif sender.startswith("textstructurer:"):
+                return f"Transcript (Structured - {name})"
+            elif sender.startswith("saasr"):
+                return f"Transcript (SAASR - {name})"
+
+    # Handle specific known patterns
     if sender.startswith("asr"):
-        return "Transcript (Original ASR)"
+        return f"Transcript (Original ASR - Language {lang_id})"
     elif sender.startswith("mt:0"):
         return "English Translation"
     elif sender.startswith("mt:1"):
@@ -706,30 +700,11 @@ def get_language_name_from_sender(sender, lang_id):
         return "Russian Translation"
     elif sender.startswith("mt:4"):
         return "Spanish Translation"
-    elif sender.startswith("textstructurer:0_en"):
-        return "Transcript (Structured - English)"
-    elif sender.startswith("textstructurer:0_de"):
-        return "Transcript (Structured - German)"
-    elif sender.startswith("textstructurer:0_fr"):
-        return "Transcript (Structured - French)"
-    elif sender.startswith("textstructurer:0_ru"):
-        return "Transcript (Structured - Russian)"
-    elif sender.startswith("textstructurer:0_es"):
-        return "Transcript (Structured - Spanish)"
-    elif sender.startswith("saasr"):
-        return f"Transcript (SAASR - {lang_id})"
+    elif sender.startswith("mt:5"):
+        return "Italian Translation"
+    elif sender.startswith("textstructurer:0"):
+        return f"Transcript (Structured - Language {lang_id})"
     else:
-        # Try to extract language from sender
-        lang_map = {
-            "en": "English",
-            "de": "German",
-            "fr": "French",
-            "ru": "Russian",
-            "es": "Spanish",
-        }
-        for code, name in lang_map.items():
-            if f"_{code}" in sender or f":{code}" in sender:
-                return f"Transcript ({name})"
         return f"Transcript (Language {lang_id})"
 
 
@@ -767,6 +742,7 @@ def organize_transcripts(transcripts):
         elif "Structured" in lang:
             return 1
         elif "Translation" in lang:
+            # Sort translations by name
             return 2
         else:
             return 3
@@ -831,6 +807,11 @@ def export_docx(session_id, session_dir, language_filter=None):
             transcripts = [
                 t for t in all_transcripts if t.get("language") == language_filter
             ]
+            logging.info(
+                "Filtered to %d transcripts for language: %s",
+                len(transcripts),
+                language_filter,
+            )
         else:
             transcripts = all_transcripts
 
@@ -857,7 +838,9 @@ def export_docx(session_id, session_dir, language_filter=None):
             doc.add_paragraph(transcript.get("text", ""))
             doc.add_paragraph("")
     else:
-        doc.add_paragraph("No transcript data available.")
+        doc.add_paragraph(
+            f"No transcript data available for {language_filter if language_filter else 'any language'}."
+        )
 
     doc_buffer = io.BytesIO()
     doc.save(doc_buffer)
@@ -923,50 +906,75 @@ def session_export_rtf(session_id):
 
     language = request.args.get("language")
 
-    txt_path = os.path.join(session_dir, "transcript.txt")
-    if os.path.exists(txt_path):
-        with open(txt_path, "r", encoding="utf-8") as f:
-            text_content = f.read()
-    else:
-        json_path = os.path.join(session_dir, "transcripts.json")
-        transcripts = []
-        if os.path.exists(json_path):
-            with open(json_path, "r", encoding="utf-8") as f:
-                all_transcripts = json.load(f)
+    # Load transcripts from JSON
+    json_path = os.path.join(session_dir, "transcripts.json")
+    transcripts = []
 
-            if language:
-                transcripts = [
-                    t for t in all_transcripts if t.get("language") == language
-                ]
-            else:
-                transcripts = all_transcripts
+    if os.path.exists(json_path):
+        with open(json_path, "r", encoding="utf-8") as f:
+            all_transcripts = json.load(f)
+
+        # Filter by language if specified
+        if language:
+            transcripts = [t for t in all_transcripts if t.get("language") == language]
+            logging.info(
+                "Filtered to %d transcripts for language: %s",
+                len(transcripts),
+                language,
+            )
+        else:
+            transcripts = all_transcripts
 
         if transcripts:
+            # Build text content from filtered transcripts
             text_parts = []
             for t in transcripts:
                 lang = t.get("language", "Unknown")
+                source = t.get("source_file", "")
+                sender = t.get("sender", "")
                 text = t.get("text", "")
-                text_parts.append(f"=== {lang} ===\n{text}")
+
+                # Add header for each transcript
+                header = f"=== {lang} ===\n"
+                if source:
+                    header += f"Source: {source}\n"
+                if sender:
+                    header += f"Sender: {sender}\n"
+                header += "=" * len(lang) + "===\n"
+
+                text_parts.append(header + text)
+
             text_content = "\n\n".join(text_parts)
         else:
-            text_content = "No data available."
+            text_content = f"No transcript data available for {language if language else 'any language'}."
+    else:
+        text_content = "No transcript data available."
 
+    # Escape text for RTF
     text_escaped = text_content.replace("\\", "\\\\")
     text_escaped = text_escaped.replace("{", "\\{")
     text_escaped = text_escaped.replace("}", "\\}")
     text_escaped = text_escaped.replace("\n", "\\par ")
 
+    # Build RTF document
     rtf_lines = [
         r"{\rtf1\ansi\deff0",
         r"{\fonttbl{\f0\fnil\fcharset0 Arial;}}",
         r"\f0\fs24",
         f"\\b\\fs32 Session: {session_id}\\b0\\par\\par",
         f'Export Date: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\\par\\par',
-        f"{text_escaped}\\par",
-        "}",
     ]
+
+    # Add language filter info if specified
+    if language:
+        rtf_lines.append(f"Filter: {language}\\par\\par")
+
+    rtf_lines.append(f"{text_escaped}\\par")
+    rtf_lines.append("}")
+
     rtf_string = "".join(rtf_lines)
 
+    # Build filename
     filename = f"session_{session_id}"
     if language:
         clean_lang = language.replace(" ", "_").replace("(", "").replace(")", "")
@@ -989,23 +997,16 @@ def session_export_txt(session_id):
 
     language = request.args.get("language")
 
-    txt_path = os.path.join(session_dir, "transcript.txt")
-    if os.path.exists(txt_path):
-        with open(txt_path, "r", encoding="utf-8") as f:
-            text_content = f.read()
-    else:
-        json_path = os.path.join(session_dir, "transcripts.json")
-        transcripts = []
-        if os.path.exists(json_path):
-            with open(json_path, "r", encoding="utf-8") as f:
-                all_transcripts = json.load(f)
+    json_path = os.path.join(session_dir, "transcripts.json")
+    if os.path.exists(json_path):
+        with open(json_path, "r", encoding="utf-8") as f:
+            all_transcripts = json.load(f)
 
-            if language:
-                transcripts = [
-                    t for t in all_transcripts if t.get("language") == language
-                ]
-            else:
-                transcripts = all_transcripts
+        # Filter by language if specified
+        if language:
+            transcripts = [t for t in all_transcripts if t.get("language") == language]
+        else:
+            transcripts = all_transcripts
 
         if transcripts:
             text_parts = []
@@ -1015,7 +1016,9 @@ def session_export_txt(session_id):
                 text_parts.append(f"=== {lang} ===\n{text}")
             text_content = "\n\n".join(text_parts)
         else:
-            text_content = "No transcript data available."
+            text_content = f"No transcript data available for {language}."
+    else:
+        text_content = "No transcript data available."
 
     filename = f"session_{session_id}"
     if language:
@@ -1027,6 +1030,41 @@ def session_export_txt(session_id):
         mimetype="text/plain",
         as_attachment=True,
         download_name=f"{filename}.txt",
+    )
+
+
+@app.route("/session_export_docx/<session_id>", methods=["GET"])
+def session_export_docx(session_id):
+    """Export session as DOCX file."""
+    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    if not os.path.exists(session_dir):
+        return jsonify({"error": "Session not found"}), 404
+
+    language = request.args.get("language")
+
+    try:
+        doc_buffer = export_docx(session_id, session_dir, language)
+    except ImportError:
+        return (
+            jsonify(
+                {
+                    "error": "python-docx not installed. Please install: pip install python-docx"
+                }
+            ),
+            500,
+        )
+
+    filename = f"session_{session_id}"
+    if language:
+        # Clean language name for filename
+        clean_lang = language.replace(" ", "_").replace("(", "").replace(")", "")
+        filename = f"session_{session_id}_{clean_lang}"
+
+    return send_file(
+        doc_buffer,
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        as_attachment=True,
+        download_name=f"{filename}.docx",
     )
 
 
