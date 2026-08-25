@@ -557,7 +557,38 @@ def extract_transcripts_from_messages(messages_path):
 
         transcripts = []
 
-        # The messages_data is a list of [language_id, message_data_string] pairs
+        # Build dynamic language map from the messages
+        language_map = {}
+        numeric_language_map = {}
+
+        # First pass: collect all unique language IDs and their sender patterns
+        if isinstance(messages_data, list):
+            for item in messages_data:
+                if isinstance(item, list) and len(item) >= 2:
+                    lang_id = item[0]
+                    msg_str = item[1]
+                    try:
+                        if isinstance(msg_str, str):
+                            msg_data = json.loads(msg_str)
+                        elif isinstance(msg_str, dict):
+                            msg_data = msg_str
+                        else:
+                            continue
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+                    if isinstance(msg_data, dict) and "sender" in msg_data:
+                        sender = msg_data.get("sender", "")
+                        # Extract language name from sender
+                        lang_name = extract_language_from_sender(
+                            sender, lang_id, numeric_language_map
+                        )
+                        # Store in maps
+                        if lang_id not in numeric_language_map:
+                            numeric_language_map[lang_id] = lang_name
+                        language_map[sender] = lang_name
+
+        # Second pass: process messages with the built maps
         if isinstance(messages_data, list):
             for item in messages_data:
                 if isinstance(item, list) and len(item) >= 2:
@@ -574,7 +605,6 @@ def extract_transcripts_from_messages(messages_path):
                     except (json.JSONDecodeError, TypeError):
                         continue
 
-                    # Check if this is a transcript message
                     if isinstance(msg_data, dict) and "seq" in msg_data:
                         sender = msg_data.get("sender", "")
                         text = msg_data.get("seq", "").strip()
@@ -582,8 +612,13 @@ def extract_transcripts_from_messages(messages_path):
                         if not text:
                             continue
 
-                        # Determine the language name from sender
-                        lang_name = get_language_name_from_sender(sender, lang_id)
+                        # Get language name from the map or extract it
+                        if sender in language_map:
+                            lang_name = language_map[sender]
+                        elif lang_id in numeric_language_map:
+                            lang_name = numeric_language_map[lang_id]
+                        else:
+                            lang_name = get_language_name_from_sender(sender, lang_id)
 
                         # Check if we already have this language
                         existing = next(
@@ -634,77 +669,133 @@ def extract_transcripts_from_messages(messages_path):
     return []
 
 
-def get_language_name_from_sender(sender, lang_id):
-    """Get a human-readable language name from sender string."""
-    if not sender:
-        return f"Language {lang_id}"
+def extract_language_from_sender(sender, lang_id, numeric_language_map):
+    """Extract language name from sender using dynamic mapping."""
+    # Check if we already have this language ID mapped
+    if lang_id in numeric_language_map:
+        return numeric_language_map[lang_id]
 
-    match = re.search(r"[:_](\d+)$", sender)
-    if match:
-        # For numbered languages like mt:0, mt:1, etc.
-        lang_map = {
-            "0": "English",
-            "1": "German",
-            "2": "French",
-            "3": "Russian",
-            "4": "Spanish",
-            "5": "Italian",
-            "6": "Portuguese",
-            "7": "Dutch",
+    # Try to extract language from sender
+    if sender.startswith("asr:"):
+        num_id = sender.replace("asr:", "")
+        if num_id in numeric_language_map:
+            return numeric_language_map[num_id]
+        # Use the lang_id as fallback
+        return f"Transcript (Original ASR - Language {lang_id})"
+
+    elif sender.startswith("mt:"):
+        num_id = sender.replace("mt:", "")
+        if num_id in numeric_language_map:
+            return f"{numeric_language_map[num_id]} Translation"
+        return f"Translation (Language {lang_id})"
+
+    elif sender.startswith("textstructurer:0_"):
+        lang_code = sender.replace("textstructurer:0_", "")
+        # Check if this is a known language code
+        language_names = {
+            "en": "English",
+            "de": "German",
+            "fr": "French",
+            "es": "Spanish",
+            "it": "Italian",
+            "pt": "Portuguese",
+            "nl": "Dutch",
+            "ru": "Russian",
+            "ja": "Japanese",
+            "ko": "Korean",
+            "zh": "Chinese",
+            "ar": "Arabic",
+            "hi": "Hindi",
+            "pl": "Polish",
+            "tr": "Turkish",
+            "uk": "Ukrainian",
+            "vi": "Vietnamese",
+            "th": "Thai",
+            "id": "Indonesian",
+            "ms": "Malay",
         }
-        num = match.group(1)
-        if num in lang_map:
-            # Determine what type of transcript this is
-            if sender.startswith("asr"):
-                return f"Transcript (Original ASR - {lang_map[num]})"
-            elif sender.startswith("mt:"):
-                return f"{lang_map[num]} Translation"
-            elif sender.startswith("textstructurer:"):
-                return f"Transcript (Structured - {lang_map[num]})"
-            elif sender.startswith("saasr"):
-                return f"Transcript (SAASR - {lang_map[num]})"
+        if lang_code in language_names:
+            return f"Transcript (Structured - {language_names[lang_code]})"
+        return f"Transcript (Structured - {lang_code})"
+
+    elif sender.startswith("saasr"):
+        return f"Transcript (SAASR - Language {lang_id})"
 
     # Check for language codes in sender
-    lang_code_patterns = {
+    language_names = {
         "en": "English",
         "de": "German",
         "fr": "French",
-        "ru": "Russian",
         "es": "Spanish",
         "it": "Italian",
         "pt": "Portuguese",
         "nl": "Dutch",
+        "ru": "Russian",
+        "ja": "Japanese",
+        "ko": "Korean",
+        "zh": "Chinese",
+        "ar": "Arabic",
+        "hi": "Hindi",
+        "pl": "Polish",
+        "tr": "Turkish",
+        "uk": "Ukrainian",
+        "vi": "Vietnamese",
+        "th": "Thai",
+        "id": "Indonesian",
+        "ms": "Malay",
+    }
+    for code, name in language_names.items():
+        if f"_{code}" in sender or f":{code}" in sender:
+            return f"Transcript ({name})"
+
+    return f"Transcript (Language {lang_id})"
+
+
+def get_language_name_from_sender(sender, lang_id):
+    """Get a human-readable language name from sender string (fallback)."""
+    if not sender:
+        return f"Language {lang_id}"
+
+    # Basic language name mapping
+    language_names = {
+        "en": "English",
+        "de": "German",
+        "fr": "French",
+        "es": "Spanish",
+        "it": "Italian",
+        "pt": "Portuguese",
+        "nl": "Dutch",
+        "ru": "Russian",
+        "ja": "Japanese",
+        "ko": "Korean",
+        "zh": "Chinese",
+        "ar": "Arabic",
+        "hi": "Hindi",
+        "pl": "Polish",
+        "tr": "Turkish",
+        "uk": "Ukrainian",
+        "vi": "Vietnamese",
+        "th": "Thai",
+        "id": "Indonesian",
+        "ms": "Malay",
     }
 
-    for code, name in lang_code_patterns.items():
-        if f"_{code}" in sender or f":{code}" in sender:
-            if sender.startswith("asr"):
-                return f"Transcript (Original ASR - {name})"
-            elif sender.startswith("mt:"):
-                return f"{name} Translation"
-            elif sender.startswith("textstructurer:"):
-                return f"Transcript (Structured - {name})"
-            elif sender.startswith("saasr"):
-                return f"Transcript (SAASR - {name})"
-
-    # Handle specific known patterns
-    if sender.startswith("asr"):
+    if sender.startswith("asr:"):
         return f"Transcript (Original ASR - Language {lang_id})"
-    elif sender.startswith("mt:0"):
-        return "English Translation"
-    elif sender.startswith("mt:1"):
-        return "German Translation"
-    elif sender.startswith("mt:2"):
-        return "French Translation"
-    elif sender.startswith("mt:3"):
-        return "Russian Translation"
-    elif sender.startswith("mt:4"):
-        return "Spanish Translation"
-    elif sender.startswith("mt:5"):
-        return "Italian Translation"
-    elif sender.startswith("textstructurer:0"):
-        return f"Transcript (Structured - Language {lang_id})"
+    elif sender.startswith("mt:"):
+        return f"Translation (Language {lang_id})"
+    elif sender.startswith("textstructurer:0_"):
+        lang_code = sender.replace("textstructurer:0_", "")
+        if lang_code in language_names:
+            return f"Transcript (Structured - {language_names[lang_code]})"
+        return f"Transcript (Structured - {lang_code})"
+    elif sender.startswith("saasr"):
+        return f"Transcript (SAASR - Language {lang_id})"
     else:
+        # Check for language codes in sender
+        for code, name in language_names.items():
+            if f"_{code}" in sender or f":{code}" in sender:
+                return f"Transcript ({name})"
         return f"Transcript (Language {lang_id})"
 
 

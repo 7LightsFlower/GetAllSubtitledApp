@@ -6,6 +6,8 @@ import 'dart:convert';
 import 'dart:html' as html;
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
+// Remove the unused import:
+// import 'package:asr_live_translator/models/language_config.dart';
 
 class SessionOutputScreen extends StatefulWidget {
   final String sessionId;
@@ -87,8 +89,11 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
+        final languages = List<String>.from(data['languages'] ?? []);
+        // Sort languages naturally
+        languages.sort((a, b) => a.compareTo(b));
         setState(() {
-          _availableLanguages = List<String>.from(data['languages'] ?? []);
+          _availableLanguages = languages;
           _isLoadingLanguages = false;
         });
       } else {
@@ -136,6 +141,9 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       return;
     }
 
+    // Sort languages for display
+    final sortedLanguages = List<String>.from(_availableLanguages)..sort();
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -171,7 +179,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                     isAllOption: true,
                   ),
                   // Individual languages
-                  ..._availableLanguages.map((lang) => _buildLanguageChip(
+                  ...sortedLanguages.map((lang) => _buildLanguageChip(
                     label: lang,
                     onTap: () {
                       Navigator.pop(context);
@@ -363,6 +371,8 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final sortedLanguages = List<String>.from(_availableLanguages)..sort();
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Session Output'),
@@ -445,6 +455,14 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                                         color: Colors.grey[600],
                                       ),
                                     ),
+                                    if (_availableLanguages.isNotEmpty)
+                                      Text(
+                                        'Languages: ${_availableLanguages.length}',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: Colors.blue[600],
+                                        ),
+                                      ),
                                   ],
                                 ),
                               ),
@@ -501,7 +519,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                             Wrap(
                               spacing: 4,
                               runSpacing: 4,
-                              children: _availableLanguages.map((lang) => Container(
+                              children: sortedLanguages.map((lang) => Container(
                                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                                 decoration: BoxDecoration(
                                   color: Colors.blue[100],

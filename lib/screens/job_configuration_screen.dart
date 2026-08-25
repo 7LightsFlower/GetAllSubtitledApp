@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/screens/session_output_screen.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
+import 'package:asr_live_translator/models/language_config.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -35,9 +36,11 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
 
   String _date = '';
 
+  // Language lists using ISO 639-1 codes from LanguageConfig
   final List<String> _inputLanguages = ['en'];
   final List<String> _outputLanguages = ['de'];
   final List<String> _audioLanguages = ['de'];
+  
   String _availability = 'private';
   bool _profanityFilter = true;
   bool _filterMusic = true;
@@ -79,18 +82,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   int _outputFileCount = 0;
 
   // --- Constants ---
-  static const List<String> _allInputLanguages = [
-    'en', 'de', 'fr', 'es', 'it', 'ja', 'ko', 'zh', 'ru', 'ar',
-    'hi', 'pt', 'nl', 'pl', 'tr', 'uk', 'vi', 'th', 'id', 'ms'
-  ];
-  static const List<String> _allOutputLanguages = [
-    'en', 'de', 'fr', 'es', 'it', 'ja', 'ko', 'zh', 'ru', 'ar',
-    'hi', 'pt', 'nl', 'pl', 'tr', 'uk', 'vi', 'th'
-  ];
-  static const List<String> _allAudioLanguages = [
-    'en', 'de', 'fr', 'es', 'it', 'ja', 'ko', 'zh', 'ru', 'ar',
-    'hi', 'pt', 'pl', 'tr', 'uk', 'vi', 'th'
-  ];
   static const List<String> _availabilityOptions = [
     'private', 'private+qr', 'kitemployee', 'kitall', 'public'
   ];
@@ -339,6 +330,37 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     );
   }
 
+  // --- Language toggle methods ---
+  void _toggleInputLanguage(String lang) {
+    setState(() {
+      if (_inputLanguages.contains(lang)) {
+        _inputLanguages.remove(lang);
+      } else {
+        _inputLanguages.add(lang);
+      }
+    });
+  }
+
+  void _toggleOutputLanguage(String lang) {
+    setState(() {
+      if (_outputLanguages.contains(lang)) {
+        _outputLanguages.remove(lang);
+      } else {
+        _outputLanguages.add(lang);
+      }
+    });
+  }
+
+  void _toggleAudioLanguage(String lang) {
+    setState(() {
+      if (_audioLanguages.contains(lang)) {
+        _audioLanguages.remove(lang);
+      } else {
+        _audioLanguages.add(lang);
+      }
+    });
+  }
+
   // --- Submit ---
   Future<void> _submitJob() async {
     if (!_formKey.currentState!.validate()) return;
@@ -469,6 +491,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     formData.append('errorCorrection', errorCorrection);
     formData.append('ttsQualityMode', ttsQualityMode);
 
+    // Send ISO 639-1 language codes
     for (final lang in inputLanguages) {
       formData.append('language', lang);
     }
@@ -1279,6 +1302,11 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   // --- Build ---
   @override
   Widget build(BuildContext context) {
+    // Get sorted language codes with display names for each category
+    final inputLangCodes = LanguageConfig.getSortedInputLanguages();
+    final outputLangCodes = LanguageConfig.getSortedOutputLanguages();
+    final audioLangCodes = LanguageConfig.getSortedAudioLanguages();
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Configure Job'),
@@ -1350,68 +1378,59 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ),
               const SizedBox(height: 16),
 
-              // Input Languages
+              // Input Languages - Use inputLanguages map
               const Text('Input Languages', style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
               Wrap(
                 spacing: 8,
-                children: _allInputLanguages.map((lang) {
+                runSpacing: 4,
+                children: inputLangCodes.map((code) {
+                  final displayName = LanguageConfig.getInputLanguageName(code);
                   return FilterChip(
-                    label: Text(lang.toUpperCase()),
-                    selected: _inputLanguages.contains(lang),
+                    label: Text('$displayName ($code)'),
+                    selected: _inputLanguages.contains(code),
                     onSelected: (selected) {
-                      setState(() {
-                        if (selected) {
-                          _inputLanguages.add(lang);
-                        } else {
-                          _inputLanguages.remove(lang);
-                        }
-                      });
+                      _toggleInputLanguage(code);
                     },
                   );
                 }).toList(),
               ),
               const SizedBox(height: 16),
 
-              // Output Languages
+              // Output Languages - Use outputLanguages map
               const Text('Output Languages (Translation)',
                   style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
               Wrap(
                 spacing: 8,
-                children: _allOutputLanguages.map((lang) {
+                runSpacing: 4,
+                children: outputLangCodes.map((code) {
+                  final displayName = LanguageConfig.getOutputLanguageName(code);
                   return FilterChip(
-                    label: Text(lang.toUpperCase()),
-                    selected: _outputLanguages.contains(lang),
+                    label: Text('$displayName ($code)'),
+                    selected: _outputLanguages.contains(code),
                     onSelected: (selected) {
-                      setState(() {
-                        if (selected) {
-                          _outputLanguages.add(lang);
-                        } else {
-                          _outputLanguages.remove(lang);
-                        }
-                      });
+                      _toggleOutputLanguage(code);
                     },
                   );
                 }).toList(),
               ),
               const SizedBox(height: 16),
 
-              // Audio Languages
+              // Audio Languages - Use audioLanguages map
               const Text('Generated Audio Languages',
                   style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
               Wrap(
                 spacing: 8,
-                children: _allAudioLanguages.map((lang) {
+                runSpacing: 4,
+                children: audioLangCodes.map((code) {
+                  final displayName = LanguageConfig.getAudioLanguageName(code);
                   return FilterChip(
-                    label: Text(lang.toUpperCase()),
-                    selected: _audioLanguages.contains(lang),
+                    label: Text('$displayName ($code)'),
+                    selected: _audioLanguages.contains(code),
                     onSelected: (selected) {
-                      setState(() {
-                        if (selected) {
-                          _audioLanguages.add(lang);
-                        } else {
-                          _audioLanguages.remove(lang);
-                        }
-                      });
+                      _toggleAudioLanguage(code);
                     },
                   );
                 }).toList(),
