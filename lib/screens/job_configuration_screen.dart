@@ -35,6 +35,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   final TextEditingController _pauseController = TextEditingController(text: '2');
 
   String _date = '';
+  String? _thumbnailUrl;
 
   // Language lists using ISO 639-1 codes from LanguageConfig
   final List<String> _inputLanguages = ['en'];
@@ -104,6 +105,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     _date = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
     _topicNameController.text = _sessionNameController.text;
     _checkConnection();
+    _fetchThumbnail();
   }
 
   @override
@@ -126,6 +128,31 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         '${now.hour.toString().padLeft(2, '0')}:'
         '${now.minute.toString().padLeft(2, '0')}';
     return '${widget.videoName} – $dateTimeStr';
+  }
+
+  // --- Fetch thumbnail ---
+  Future<void> _fetchThumbnail() async {
+    try {
+      final token = await InternalAuthService.getToken();
+      if (token == null || token.isEmpty) return;
+      
+      final response = await http.get(
+        Uri.parse('$authBaseUrl/video_detail/${widget.videoKey}'),
+        headers: {'Authorization': 'Bearer $token'},
+      );
+      
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final thumbnailUrl = data['thumbnail_url'] as String?;
+        if (mounted && thumbnailUrl != null && thumbnailUrl.isNotEmpty) {
+          setState(() {
+            _thumbnailUrl = thumbnailUrl;
+          });
+        }
+      }
+    } catch (e) {
+      if (kDebugMode) print('Failed to fetch thumbnail: $e');
+    }
   }
 
   // --- Connection ---
@@ -1307,6 +1334,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     final inputLangCodes = LanguageConfig.getSortedInputLanguages();
     final outputLangCodes = LanguageConfig.getSortedOutputLanguages();
     final audioLangCodes = LanguageConfig.getSortedAudioLanguages();
+    
+    // Get screen height for thumbnail
 
     return Scaffold(
       appBar: AppBar(
@@ -1328,60 +1357,74 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // ─── VIDEO PREVIEW ──────────────────────────────────────────
+              // ─── Video Preview Card (from session_detail_screen) ──────
               Container(
-                margin: const EdgeInsets.only(bottom: 16),
-                padding: const EdgeInsets.all(8),
+                padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: Colors.grey[100],
-                  borderRadius: BorderRadius.circular(8),
+                  color: Colors.grey[50],
+                  borderRadius: BorderRadius.circular(12),
                   border: Border.all(color: Colors.grey[300]!),
                 ),
-                child: Row(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Small thumbnail
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(6),
-                      child: Image.network(
-                        '$authBaseUrl/media/${widget.videoKey}?thumbnail=true',
-                        height: 60,
-                        width: 80,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => Container(
-                          height: 60,
-                          width: 80,
-                          color: Colors.grey[300],
-                          child: const Icon(Icons.videocam, size: 24),
+                    // Video info row
+                    Row(
+                      children: [
+                        // Small thumbnail
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(6),
+                          child: _thumbnailUrl != null && _thumbnailUrl!.isNotEmpty
+                              ? Image.network(
+                                  _thumbnailUrl!,
+                                  height: 60,
+                                  width: 80,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, __, ___) => Container(
+                                    height: 60,
+                                    width: 80,
+                                    color: Colors.grey[300],
+                                    child: const Icon(Icons.videocam, size: 24),
+                                  ),
+                                )
+                              : Container(
+                                  height: 60,
+                                  width: 80,
+                                  color: Colors.grey[300],
+                                  child: const Icon(Icons.videocam, size: 24),
+                                ),
                         ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            widget.videoName,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 14,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                widget.videoName,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 14,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              Text(
+                                'Key: ${widget.videoKey.substring(0, 32)}...',
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: Colors.grey[500],
+                                ),
+                              ),
+                            ],
                           ),
-                          Text(
-                            'Video Key: ${widget.videoKey}',
-                            style: TextStyle(
-                              fontSize: 10,
-                              color: Colors.grey[600],
-                            ),
-                          ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
               ),
+              const SizedBox(height: 16),
+
               // Session Name
               TextFormField(
                 controller: _sessionNameController,

@@ -224,56 +224,55 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
   Widget _buildContent() {
     final detail = _detail!;
+    
+    // Get screen height
+    final screenHeight = MediaQuery.of(context).size.height;
+    // Thumbnail height = 1/3 of screen height
+    final thumbnailHeight = screenHeight / 3;
+    // 3:2 aspect ratio => width = height * 3 / 2
+    final thumbnailWidth = thumbnailHeight * 1.5;
+    
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Thumbnail - Smaller size (120px height)
-          if (detail.thumbnailUrl != null && detail.thumbnailUrl!.isNotEmpty)
-            ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: Image.network(
-                detail.thumbnailUrl!,
-                width: double.infinity,
-                height: 120,
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => Container(
-                  height: 120,
-                  width: double.infinity,
-                  color: Colors.grey[300],
-                  child: const Icon(Icons.videocam, size: 40, color: Colors.grey),
-                ),
-                loadingBuilder: (context, child, loadingProgress) {
-                  if (loadingProgress == null) return child;
-                  return Container(
-                    height: 120,
-                    width: double.infinity,
-                    color: Colors.grey[300],
-                    child: Center(
-                      child: CircularProgressIndicator(
-                        value: loadingProgress.expectedTotalBytes != null
-                            ? loadingProgress.cumulativeBytesLoaded / 
-                              loadingProgress.expectedTotalBytes!
-                            : null,
-                      ),
-                    ),
-                  );
-                },
-              ),
-            )
-          else
-            // Placeholder when no thumbnail
-            Container(
-              height: 120,
-              width: double.infinity,
-              decoration: BoxDecoration(
-                color: Colors.grey[300],
+          // ─── Thumbnail with 3:2 aspect ratio, 1/3 of screen height ──
+          Center(
+            child: SizedBox(
+              width: thumbnailWidth,
+              height: thumbnailHeight,
+              child: ClipRRect(
                 borderRadius: BorderRadius.circular(8),
+                child: detail.thumbnailUrl != null && detail.thumbnailUrl!.isNotEmpty
+                    ? Image.network(
+                        detail.thumbnailUrl!,
+                        width: thumbnailWidth,
+                        height: thumbnailHeight,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => _buildThumbnailPlaceholder(detail, thumbnailHeight),
+                        loadingBuilder: (context, child, loadingProgress) {
+                          if (loadingProgress == null) return child;
+                          return Container(
+                            height: thumbnailHeight,
+                            width: thumbnailWidth,
+                            color: Colors.grey[300],
+                            child: Center(
+                              child: CircularProgressIndicator(
+                                value: loadingProgress.expectedTotalBytes != null
+                                    ? loadingProgress.cumulativeBytesLoaded / 
+                                      loadingProgress.expectedTotalBytes!
+                                    : null,
+                              ),
+                            ),
+                          );
+                        },
+                      )
+                    : _buildThumbnailPlaceholder(detail, thumbnailHeight),
               ),
-              child: const Icon(Icons.videocam, size: 40, color: Colors.grey),
             ),
-          const SizedBox(height: 12),
+          ),
+          const SizedBox(height: 16),
 
           // Title & File name
           Text(
@@ -369,6 +368,80 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                 foregroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                 textStyle: const TextStyle(fontSize: 16),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildThumbnailPlaceholder(SessionDetail detail, double height) {
+    return Container(
+      height: height,
+      width: double.infinity,
+      color: Colors.grey[800],
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          // Background gradient
+          Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  Colors.grey[800]!,
+                  Colors.grey[900]!,
+                ],
+              ),
+            ),
+          ),
+          // Video icon and duration in center
+          Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.play_circle_outline,
+                  size: 48,
+                  color: Colors.white.withValues(alpha: 0.7),
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.6),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    _formatDuration(detail.duration),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // File format badge at bottom right
+          Positioned(
+            bottom: 10,
+            right: 10,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.6),
+                borderRadius: BorderRadius.circular(3),
+              ),
+              child: Text(
+                detail.fileName.split('.').last.toUpperCase(),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 10,
+                ),
               ),
             ),
           ),
