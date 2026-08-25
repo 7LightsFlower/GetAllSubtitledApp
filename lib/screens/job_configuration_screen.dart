@@ -1300,6 +1300,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   }
 
   // --- Build ---
+  
   @override
   Widget build(BuildContext context) {
     // Get sorted language codes with display names for each category
@@ -1327,6 +1328,60 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // ─── VIDEO PREVIEW ──────────────────────────────────────────
+              Container(
+                margin: const EdgeInsets.only(bottom: 16),
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.grey[100],
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.grey[300]!),
+                ),
+                child: Row(
+                  children: [
+                    // Small thumbnail
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: Image.network(
+                        '$authBaseUrl/media/${widget.videoKey}?thumbnail=true',
+                        height: 60,
+                        width: 80,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => Container(
+                          height: 60,
+                          width: 80,
+                          color: Colors.grey[300],
+                          child: const Icon(Icons.videocam, size: 24),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            widget.videoName,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          Text(
+                            'Video Key: ${widget.videoKey}',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Colors.grey[600],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
               // Session Name
               TextFormField(
                 controller: _sessionNameController,

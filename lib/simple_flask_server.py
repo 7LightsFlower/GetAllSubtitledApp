@@ -184,27 +184,102 @@ def process_job(job_id):
             job["segments"] = generate_mock_segments()
 
 
-dummy_project = {
-    "key": "dummy-key-123",
-    "name": "Sample Video",
-    "file_name": "sample.mp4",
-    "uploaded": utc_now_iso(),
-    "last_opened": None,
-    "duration": 60.0,
-    "fps": 30.0,
-    "file_size": 10485760,
-    "segment_count": 5,
-    "languages": ["en", "de"],
-    "thumbnail_url": None,
-    "segmentation_done": True,
-    "segmentation_progress": 100,
-}
-videos.append(dummy_project)
+# ─── VIDEO THUMBNAIL GENERATION ────────────────────────────────────────
 
-users["testuser@example.com"] = {
-    "name": "Test User",
-    "password": "YourSecurePassword123",
-}
+
+def generate_video_thumbnail(video_path, thumbnail_path, time_offset=1.0):
+    """
+    Generate a thumbnail from a video file using ffmpeg.
+    Returns True if successful, False otherwise.
+    """
+    try:
+        # Check if ffmpeg is available
+        subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+
+        # Generate thumbnail at the specified time offset
+        cmd = [
+            "ffmpeg",
+            "-i",
+            video_path,
+            "-ss",
+            str(time_offset),
+            "-vframes",
+            "1",
+            "-vf",
+            "scale=320:-1",  # Width 320, height auto
+            "-q:v",
+            "2",  # Quality
+            "-y",  # Overwrite output file
+            thumbnail_path,
+        ]
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=False, timeout=30
+        )
+
+        if result.returncode == 0 and os.path.exists(thumbnail_path):
+            return True
+        else:
+            logging.warning("FFmpeg failed: %s", result.stderr)
+            return False
+
+    except subprocess.TimeoutExpired:
+        logging.warning("FFmpeg timeout generating thumbnail")
+        return False
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        logging.warning("FFmpeg error: %s", e)
+        return False
+
+
+def get_video_metadata(video_path):
+    """
+    Extract video metadata using ffprobe.
+    Returns (duration, fps) or (120.0, 30.0) if failed.
+    """
+    try:
+        cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=duration,r_frame_rate",
+            "-of",
+            "json",
+            video_path,
+        ]
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=10, check=False
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            streams = data.get("streams", [])
+            if streams:
+                stream = streams[0]
+                duration = float(stream.get("duration", 120.0))
+
+                # Parse frame rate (e.g., "30/1" -> 30.0)
+                fps_str = stream.get("r_frame_rate", "30/1")
+                if "/" in fps_str:
+                    num, den = fps_str.split("/")
+                    fps = float(num) / float(den) if float(den) > 0 else 30.0
+                else:
+                    fps = float(fps_str)
+
+                return duration, fps
+    except (
+        subprocess.SubprocessError,
+        FileNotFoundError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        OSError,
+    ) as e:
+        logging.warning("Failed to get video metadata: %s", e)
+
+    return 120.0, 30.0  # Default values
 
 
 # ─── CURL DOWNLOAD FUNCTIONS ──────────────────────────────────────────
@@ -1394,6 +1469,15 @@ def login():
 @app.route("/videos", methods=["GET"])
 def get_videos():
     """Return the list of uploaded videos with storage usage info."""
+    # Build full URLs for thumbnails
+    for video in videos:
+        if video.get("thumbnail_url"):
+            # Make it a full URL if it's a relative path
+            if video["thumbnail_url"].startswith("/thumbnails/"):
+                video["thumbnail_url"] = (
+                    f"http://localhost:5000{video['thumbnail_url']}"
+                )
+
     storage_used_gb = sum(v.get("file_size", 0) for v in videos) / (1024.0**3)
     return (
         jsonify(
@@ -1434,6 +1518,20 @@ def serve_video(video_key):
     return send_file(file_path, as_attachment=False)
 
 
+@app.route("/thumbnails/<filename>")
+def serve_thumbnail(filename):
+    """Serve thumbnail images."""
+    # Security: prevent directory traversal
+    if ".." in filename or "/" in filename or "\\" in filename:
+        return jsonify({"error": "Invalid filename"}), 400
+
+    thumbnail_path = os.path.join(UPLOAD_FOLDER, filename)
+    if not os.path.exists(thumbnail_path):
+        return jsonify({"error": "Thumbnail not found"}), 404
+
+    return send_file(thumbnail_path, mimetype="image/jpeg")
+
+
 @app.route("/upload-chunk", methods=["POST"])
 def upload_chunk():
     """Receive a chunk of a file upload for chunked uploads."""
@@ -1465,18 +1563,34 @@ def finish_upload():
     with open(file_path, "wb") as f:
         f.write(combined)
     file_size = len(combined)
+
+    # ─── Generate thumbnail ──────────────────────────────────────────────
+    thumbnail_filename = f"{os.path.splitext(filename)[0]}_thumb.jpg"
+    thumbnail_path = os.path.join(UPLOAD_FOLDER, thumbnail_filename)
+    thumbnail_url = None
+
+    if generate_video_thumbnail(file_path, thumbnail_path):
+        thumbnail_url = f"/thumbnails/{thumbnail_filename}"
+        logging.info("Generated thumbnail: %s", thumbnail_filename)
+    else:
+        logging.warning("Failed to generate thumbnail for %s", filename)
+
+    # ─── Get video metadata ──────────────────────────────────────────────
+    duration, fps = get_video_metadata(file_path)
+
+    # ─── Create project with thumbnail ──────────────────────────────────
     project = {
         "key": str(uuid.uuid4()),
         "name": filename.rsplit(".", 1)[0] if "." in filename else filename,
         "file_name": filename,
         "uploaded": utc_now_iso(),
         "last_opened": None,
-        "duration": 120.0,
-        "fps": 30.0,
+        "duration": duration,
+        "fps": fps,
         "file_size": file_size,
         "segment_count": 0,
         "languages": ["en"],
-        "thumbnail_url": None,
+        "thumbnail_url": thumbnail_url,
         "segmentation_done": auto_segmentation,
         "segmentation_progress": 100 if auto_segmentation else 0,
     }
@@ -1918,11 +2032,44 @@ def clear_videos():
             file_path = os.path.join(UPLOAD_FOLDER, video["file_name"])
             if os.path.exists(file_path):
                 os.remove(file_path)
+            # Also remove thumbnail
+            thumbnail_filename = f"{os.path.splitext(video['file_name'])[0]}_thumb.jpg"
+            thumbnail_path = os.path.join(UPLOAD_FOLDER, thumbnail_filename)
+            if os.path.exists(thumbnail_path):
+                os.remove(thumbnail_path)
     videos.clear()
-    videos.append(dummy_project)
+    # Recreate dummy project with thumbnail
+    dummy_with_thumb = dummy_project.copy()
+    dummy_with_thumb["thumbnail_url"] = None
+    videos.append(dummy_with_thumb)
     chunk_storage.clear()
     jobs.clear()
     return jsonify({"message": "Cleared"}), 200
+
+
+# ─── Dummy project with thumbnail ──────────────────────────────────────
+
+dummy_project = {
+    "key": "dummy-key-123",
+    "name": "Sample Video",
+    "file_name": "sample.mp4",
+    "uploaded": utc_now_iso(),
+    "last_opened": None,
+    "duration": 60.0,
+    "fps": 30.0,
+    "file_size": 10485760,
+    "segment_count": 5,
+    "languages": ["en", "de"],
+    "thumbnail_url": None,
+    "segmentation_done": True,
+    "segmentation_progress": 100,
+}
+videos.append(dummy_project)
+
+users["testuser@example.com"] = {
+    "name": "Test User",
+    "password": "YourSecurePassword123",
+}
 
 
 if __name__ == "__main__":

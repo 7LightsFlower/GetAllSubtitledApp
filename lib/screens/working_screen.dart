@@ -780,10 +780,10 @@ class _WorkingScreenState extends State<WorkingScreen> {
     return GridView.builder(
       padding: const EdgeInsets.all(16),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
-        childAspectRatio: 0.75,
-        crossAxisSpacing: 16,
-        mainAxisSpacing: 16,
+        crossAxisCount: 4,
+        childAspectRatio: 0.5,
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 12,
       ),
       itemCount: filtered.length,
       itemBuilder: (context, index) {
@@ -799,67 +799,104 @@ class _WorkingScreenState extends State<WorkingScreen> {
       onTap: () => _openSessionDetail(project.key),
       child: Card(
         elevation: 2,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // ─── Thumbnail / Preview Image ──────────────────────────────
             Expanded(
-              flex: 3,
+              flex: 2,
               child: ClipRRect(
-                borderRadius: const BorderRadius.vertical(top: Radius.circular(10)),
-                child: project.thumbnailUrl != null
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+                child: project.thumbnailUrl != null && project.thumbnailUrl!.isNotEmpty
                     ? Image.network(
                         project.thumbnailUrl!,
                         fit: BoxFit.cover,
                         width: double.infinity,
-                        errorBuilder: (_, __, ___) => _placeholderThumbnail(),
+                        errorBuilder: (context, error, stackTrace) {
+                          return _buildThumbnailPlaceholder(project);
+                        },
+                        loadingBuilder: (context, child, loadingProgress) {
+                          if (loadingProgress == null) return child;
+                          return Container(
+                            color: Colors.grey[300],
+                            child: Center(
+                              child: CircularProgressIndicator(
+                                value: loadingProgress.expectedTotalBytes != null
+                                    ? loadingProgress.cumulativeBytesLoaded / 
+                                      loadingProgress.expectedTotalBytes!
+                                    : null,
+                              ),
+                            ),
+                          );
+                        },
                       )
-                    : _placeholderThumbnail(),
+                    : _buildThumbnailPlaceholder(project),
               ),
             ),
+            // ─── Card Content ───────────────────────────────────────────
             Expanded(
               flex: 2,
               child: Padding(
-                padding: const EdgeInsets.all(8.0),
+                padding: const EdgeInsets.all(6.0),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    // Project Name
                     GestureDetector(
                       onTap: () => _editProjectName(project),
                       child: Text(
                         project.name,
-                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold, 
+                          fontSize: 11,
+                        ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
+                    // File Name
                     Text(
                       project.fileName,
-                      style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                      style: TextStyle(
+                        fontSize: 9, 
+                        color: Colors.grey[600],
+                      ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
+                    // Duration and Segments
+                    Row(
+                      children: [
+                        Text(
+                          _formatDuration(project.duration),
+                          style: TextStyle(
+                            fontSize: 9, 
+                            color: Colors.grey[500],
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          '• ${project.segmentCount} segs',
+                          style: TextStyle(
+                            fontSize: 9, 
+                            color: Colors.grey[500],
+                          ),
+                        ),
+                      ],
+                    ),
+                    // Upload Date
                     Text(
                       _formatDate(project.uploaded),
-                      style: TextStyle(fontSize: 11, color: Colors.grey[500]),
-                    ),
-                    Text(
-                      'Segments: ${project.segmentCount}',
-                      style: TextStyle(fontSize: 11, color: Colors.grey[500]),
-                    ),
-                    _buildPipelineStatus(project),
-                    if (project.languages.isNotEmpty)
-                      Wrap(
-                        spacing: 4,
-                        children: project.languages.take(3).map((lang) {
-                          return Chip(
-                            label: Text(lang, style: const TextStyle(fontSize: 10)),
-                            padding: EdgeInsets.zero,
-                            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          );
-                        }).toList(),
+                      style: TextStyle(
+                        fontSize: 8, 
+                        color: Colors.grey[400],
                       ),
+                    ),
+                    // Pipeline Status
+                    _buildPipelineStatus(project),
                     const Spacer(),
+                    // Work Button
                     Align(
                       alignment: Alignment.bottomRight,
                       child: ElevatedButton(
@@ -867,10 +904,12 @@ class _WorkingScreenState extends State<WorkingScreen> {
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.blue,
                           foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                          textStyle: const TextStyle(fontSize: 12),
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                          textStyle: const TextStyle(fontSize: 9),
+                          minimumSize: const Size(0, 26),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                         ),
-                        child: const Text('Work'),
+                        child: const Text('Open'),
                       ),
                     ),
                   ],
@@ -883,10 +922,77 @@ class _WorkingScreenState extends State<WorkingScreen> {
     );
   }
 
-  Widget _placeholderThumbnail() {
+  // ─── Thumbnail Placeholder with Video Info ──────────────────────────
+  
+  Widget _buildThumbnailPlaceholder(VideoProject project) {
     return Container(
-      color: Colors.grey[300],
-      child: const Icon(Icons.videocam, size: 50, color: Colors.grey),
+      color: Colors.grey[800],
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          // Background gradient
+          Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  Colors.grey[800]!,
+                  Colors.grey[900]!,
+                ],
+              ),
+            ),
+          ),
+          // Video icon and duration in center
+          Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.play_circle_outline,
+                  size: 36,
+                  color: Colors.white.withValues(alpha: 0.7),
+                ),
+                const SizedBox(height: 4),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.6),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    _formatDuration(project.duration),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // File format badge at bottom
+          Positioned(
+            bottom: 6,
+            right: 6,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.6),
+                borderRadius: BorderRadius.circular(3),
+              ),
+              child: Text(
+                project.fileName.split('.').last.toUpperCase(),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 8,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -894,32 +1000,35 @@ class _WorkingScreenState extends State<WorkingScreen> {
     if (project.segmentationDone) {
       return const Row(
         children: [
-          Icon(Icons.check_circle, color: Colors.green, size: 14),
-          SizedBox(width: 4),
-          Text('Segmentation: Done', style: TextStyle(fontSize: 11)),
+          Icon(Icons.check_circle, color: Colors.green, size: 11),
+          SizedBox(width: 2),
+          Text('Done', style: TextStyle(fontSize: 8, color: Colors.green)),
         ],
       );
     } else if (project.segmentationProgress > 0) {
       return Row(
         children: [
-          const SizedBox(
-            width: 14,
-            height: 14,
-            child: CircularProgressIndicator(strokeWidth: 2),
+          SizedBox(
+            width: 10,
+            height: 10,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              value: project.segmentationProgress / 100,
+            ),
           ),
-          const SizedBox(width: 4),
+          const SizedBox(width: 2),
           Text(
-            'Segmentation: ${project.segmentationProgress}%',
-            style: const TextStyle(fontSize: 11),
+            '${project.segmentationProgress}%',
+            style: const TextStyle(fontSize: 8),
           ),
         ],
       );
     } else {
       return const Row(
         children: [
-          Icon(Icons.content_cut, color: Colors.grey, size: 14),
-          SizedBox(width: 4),
-          Text('Segmentation: Not started', style: TextStyle(fontSize: 11)),
+          Icon(Icons.content_cut, color: Colors.grey, size: 11),
+          SizedBox(width: 2),
+          Text('Pending', style: TextStyle(fontSize: 8, color: Colors.grey)),
         ],
       );
     }
@@ -930,7 +1039,15 @@ class _WorkingScreenState extends State<WorkingScreen> {
     final diff = now.difference(dt);
     if (diff.inDays == 0) return 'Today';
     if (diff.inDays == 1) return 'Yesterday';
+    if (diff.inDays < 7) return '${diff.inDays} days ago';
     return '${dt.day}/${dt.month}/${dt.year}';
+  }
+
+  String _formatDuration(double seconds) {
+    final duration = Duration(seconds: seconds.round());
+    final minutes = duration.inMinutes;
+    final remainingSeconds = duration.inSeconds.remainder(60);
+    return '${minutes.toString().padLeft(2, '0')}:${remainingSeconds.toString().padLeft(2, '0')}';
   }
 
   String _formatBytes(int bytes) {

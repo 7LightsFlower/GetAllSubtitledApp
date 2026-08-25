@@ -121,7 +121,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       final prefs = await SharedPreferences.getInstance();
       final token = prefs.getString('auth_token') ?? '';
       final response = await http.get(
-        // Fixed: removed double slash
         Uri.parse('$authBaseUrl/video_detail/${widget.videoKey}'),
         headers: {'Authorization': 'Bearer $token'},
       );
@@ -153,7 +152,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       MaterialPageRoute(
         builder: (_) => JobConfigurationScreen(
           videoKey: _detail!.key,
-          videoName: _detail!.name, // Pass the video name
+          videoName: _detail!.name,
         ),
       ),
     );
@@ -230,30 +229,61 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Thumbnail
-          if (detail.thumbnailUrl != null)
+          // Thumbnail - Smaller size (120px height)
+          if (detail.thumbnailUrl != null && detail.thumbnailUrl!.isNotEmpty)
             ClipRRect(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(8),
               child: Image.network(
                 detail.thumbnailUrl!,
                 width: double.infinity,
-                height: 200,
+                height: 120,
                 fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) =>
-                    const Icon(Icons.broken_image, size: 80),
+                errorBuilder: (_, __, ___) => Container(
+                  height: 120,
+                  width: double.infinity,
+                  color: Colors.grey[300],
+                  child: const Icon(Icons.videocam, size: 40, color: Colors.grey),
+                ),
+                loadingBuilder: (context, child, loadingProgress) {
+                  if (loadingProgress == null) return child;
+                  return Container(
+                    height: 120,
+                    width: double.infinity,
+                    color: Colors.grey[300],
+                    child: Center(
+                      child: CircularProgressIndicator(
+                        value: loadingProgress.expectedTotalBytes != null
+                            ? loadingProgress.cumulativeBytesLoaded / 
+                              loadingProgress.expectedTotalBytes!
+                            : null,
+                      ),
+                    ),
+                  );
+                },
               ),
+            )
+          else
+            // Placeholder when no thumbnail
+            Container(
+              height: 120,
+              width: double.infinity,
+              decoration: BoxDecoration(
+                color: Colors.grey[300],
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(Icons.videocam, size: 40, color: Colors.grey),
             ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 12),
 
           // Title & File name
           Text(
             detail.name,
-            style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 4),
           Text(
             detail.fileName,
-            style: const TextStyle(color: Colors.grey),
+            style: const TextStyle(color: Colors.grey, fontSize: 14),
           ),
           const SizedBox(height: 16),
 
