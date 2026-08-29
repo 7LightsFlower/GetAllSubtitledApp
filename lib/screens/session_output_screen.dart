@@ -1,13 +1,18 @@
 // session_output_screen.dart
 import 'package:flutter/material.dart';
+import 'package:video_player/video_player.dart';
 import 'package:http/http.dart' as http;
-import 'dart:convert';
 // ignore: deprecated_member_use, avoid_web_libraries_in_flutter
 import 'dart:html' as html;
+import 'dart:convert';
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
-// Remove the unused import:
-// import 'package:asr_live_translator/models/language_config.dart';
+import 'package:asr_live_translator/models/session_data.dart';
+import 'package:asr_live_translator/widgets/video_player_widget.dart';
+import 'package:asr_live_translator/widgets/transcript_view.dart';
+import 'package:asr_live_translator/widgets/language_tabs.dart';
+import 'package:asr_live_translator/widgets/chapter_seekbar.dart';
+import 'package:asr_live_translator/widgets/export_dialog.dart';
 
 class SessionOutputScreen extends StatefulWidget {
   final String sessionId;
@@ -24,48 +29,102 @@ class SessionOutputScreen extends StatefulWidget {
 }
 
 class _SessionOutputScreenState extends State<SessionOutputScreen> {
-  List<Map<String, dynamic>> _files = [];
-  List<String> _availableLanguages = [];
+  VideoPlayerController? _videoController;
+  List<TranscriptData> _transcripts = [];
+  final List<ChapterData> _chapters = [];
+  List<SessionFile> _files = [];
   bool _isLoading = true;
-  bool _isLoadingLanguages = false;
+  bool _isSplitView = false;
+  bool _showFileList = false;
+  String _selectedLanguage = '';
   String _errorMessage = '';
-  bool _isExporting = false;
+  String _videoUrl = '';
+  
+  int _currentSegmentIndex = -1;
+  final ScrollController _scrollController = ScrollController();
+  bool _isVideoReady = false;
+
+  static const double _maxVideoHeight = 200;
+  static const double _minVideoHeight = 150;
 
   @override
   void initState() {
     super.initState();
-    _fetchSessionOutput();
-    _fetchAvailableLanguages();
+    _loadSessionData();
   }
 
-  Future<void> _fetchSessionOutput() async {
+  @override
+  void dispose() {
+    _videoController?.removeListener(_onVideoProgress);
+    _videoController?.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadSessionData() async {
     setState(() {
       _isLoading = true;
       _errorMessage = '';
     });
 
     try {
-      final url = '$flaskServerUrl/session_output/${widget.sessionId}';
       final token = await InternalAuthService.getToken();
-      final response = await http.get(
-        Uri.parse(url),
+      
+      final outputUrl = '$flaskServerUrl/session_output/${widget.sessionId}';
+      final outputResponse = await http.get(
+        Uri.parse(outputUrl),
         headers: {
           'Authorization': 'Bearer ${token ?? ''}',
         },
       );
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
+      if (outputResponse.statusCode != 200) {
         setState(() {
-          _files = List<Map<String, dynamic>>.from(data['files'] ?? []);
+          _errorMessage = 'Failed to load session: ${outputResponse.statusCode}';
           _isLoading = false;
         });
-      } else {
-        setState(() {
-          _errorMessage = 'Failed to load session output: ${response.statusCode}';
-          _isLoading = false;
-        });
+        return;
       }
+
+      final outputData = jsonDecode(outputResponse.body);
+      final filesData = outputData['files'] as List? ?? [];
+      _files = filesData.map((f) => SessionFile.fromJson(f)).toList();
+
+      final transcriptUrl = '$flaskServerUrl/session_transcript_json/${widget.sessionId}';
+      final transcriptResponse = await http.get(
+        Uri.parse(transcriptUrl),
+        headers: {
+          'Authorization': 'Bearer ${token ?? ''}',
+        },
+      );
+
+      if (transcriptResponse.statusCode == 200) {
+        final transcriptData = jsonDecode(transcriptResponse.body);
+        if (transcriptData is List) {
+          _transcripts = transcriptData
+              .map((t) => TranscriptData.fromJson(t))
+              .toList();
+          
+          if (_transcripts.isNotEmpty) {
+            _selectedLanguage = _transcripts.first.language;
+            _extractChapters();
+          }
+        }
+      }
+
+      final videoFile = _files.firstWhere(
+        (f) => f.name.endsWith('.mp4') || f.name.endsWith('.webm'),
+        orElse: () => const SessionFile(name: '', size: 0, url: ''),
+      );
+
+      if (videoFile.name.isNotEmpty) {
+        _videoUrl = '$flaskServerUrl/session_file/${widget.sessionId}/${videoFile.name}';
+        _initializeVideoPlayer();
+      }
+
+      setState(() {
+        _isLoading = false;
+      });
     } catch (e) {
       setState(() {
         _errorMessage = 'Error: $e';
@@ -74,304 +133,263 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     }
   }
 
-  Future<void> _fetchAvailableLanguages() async {
-    setState(() => _isLoadingLanguages = true);
+  void _extractChapters() {
+    _chapters.clear();
     
+    final transcript = _transcripts.firstWhere(
+      (t) => t.language == _selectedLanguage,
+      orElse: () => _transcripts.isNotEmpty ? _transcripts.first : TranscriptData.empty(),
+    );
+    
+    if (transcript.segments.isEmpty) return;
+
+    ChapterData? currentChapter;
+    for (final segment in transcript.segments) {
+      if (segment.markup == 'chapterBreak') {
+        currentChapter = ChapterData(
+          start: segment.start,
+          end: segment.end,
+          index: _chapters.length,
+          heading: '',
+          segments: [],
+        );
+        _chapters.add(currentChapter);
+      } else if (segment.markup == 'heading' && currentChapter != null) {
+        currentChapter = currentChapter.copyWith(heading: segment.text);
+        _chapters[_chapters.length - 1] = currentChapter;
+      } else if (currentChapter != null && 
+                 (segment.markup == null || segment.markup == 'paragraphBreak')) {
+        final updatedSegments = List<SegmentData>.from(currentChapter.segments)
+          ..add(segment);
+        currentChapter = currentChapter.copyWith(segments: updatedSegments);
+        _chapters[_chapters.length - 1] = currentChapter;
+      }
+    }
+
+    if (_chapters.isEmpty && transcript.segments.isNotEmpty) {
+      _chapters.add(ChapterData(
+        start: 0,
+        end: _videoController?.value.duration.inSeconds.toDouble() ?? 120,
+        index: 0,
+        heading: 'Full Session',
+        segments: List.from(transcript.segments),
+      ));
+    }
+  }
+
+  void _initializeVideoPlayer() {
+    _videoController = VideoPlayerController.networkUrl(
+      Uri.parse(_videoUrl),
+    )..initialize().then((_) {
+        setState(() {
+          _isVideoReady = true;
+        });
+        _videoController!.addListener(_onVideoProgress);
+        _videoController!.play();
+      }).catchError((error) {
+        setState(() {
+          _errorMessage = 'Failed to load video: $error';
+        });
+      });
+  }
+
+  void _onVideoProgress() {
+    if (_videoController == null || !_videoController!.value.isInitialized) return;
+    
+    final currentTime = _videoController!.value.position.inMilliseconds / 1000.0;
+    
+    final transcript = _transcripts.firstWhere(
+      (t) => t.language == _selectedLanguage,
+      orElse: () => _transcripts.isNotEmpty ? _transcripts.first : TranscriptData.empty(),
+    );
+    
+    if (transcript.segments.isEmpty) return;
+
+    int newIndex = -1;
+    for (int i = 0; i < transcript.segments.length; i++) {
+      final seg = transcript.segments[i];
+      if (currentTime >= seg.start && currentTime < seg.end) {
+        newIndex = i;
+        break;
+      }
+    }
+    
+    if (newIndex != _currentSegmentIndex) {
+      setState(() {
+        _currentSegmentIndex = newIndex;
+      });
+    }
+  }
+
+  void _toggleSplitView() {
+    setState(() {
+      _isSplitView = !_isSplitView;
+    });
+  }
+
+  void _toggleFileList() {
+    setState(() {
+      _showFileList = !_showFileList;
+    });
+  }
+
+  void _selectLanguage(String language) {
+    setState(() {
+      _selectedLanguage = language;
+    });
+    _extractChapters();
+  }
+
+  void _togglePlayPause() {
+    if (_videoController == null || !_videoController!.value.isInitialized) return;
+    
+    if (_videoController!.value.isPlaying) {
+      _videoController!.pause();
+    } else {
+      _videoController!.play();
+    }
+    setState(() {});
+  }
+
+  void _seekTo(double seconds) {
+    if (_videoController == null || !_videoController!.value.isInitialized) return;
+    _videoController!.seekTo(Duration(milliseconds: (seconds * 1000).toInt()));
+  }
+
+  void _jumpToChapter(ChapterData chapter) {
+    if (_videoController == null || !_videoController!.value.isInitialized) return;
+    _videoController!.seekTo(Duration(milliseconds: (chapter.start * 1000).toInt()));
+  }
+
+  void _downloadFile(SessionFile file) async {
     try {
-      final url = '$flaskServerUrl/session_languages/${widget.sessionId}';
       final token = await InternalAuthService.getToken();
+      final downloadUrl = '$flaskServerUrl/session_file/${widget.sessionId}/${file.name}';
+      
       final response = await http.get(
-        Uri.parse(url),
+        Uri.parse(downloadUrl),
         headers: {
           'Authorization': 'Bearer ${token ?? ''}',
         },
       );
 
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final languages = List<String>.from(data['languages'] ?? []);
-        // Sort languages naturally
-        languages.sort((a, b) => a.compareTo(b));
-        setState(() {
-          _availableLanguages = languages;
-          _isLoadingLanguages = false;
-        });
+        // For web
+        final blob = html.Blob([response.bodyBytes]);
+        final url = html.Url.createObjectUrlFromBlob(blob);
+        html.AnchorElement(href: url)
+          ..setAttribute('download', file.name)
+          ..click();
+        html.Url.revokeObjectUrl(url);
+
+        if (!mounted) return;
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Downloaded: ${file.name}')),
+        );
       } else {
-        setState(() => _isLoadingLanguages = false);
+        throw Exception('Download failed: ${response.statusCode}');
       }
     } catch (e) {
-      setState(() => _isLoadingLanguages = false);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Download failed: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
     }
   }
 
-  void _downloadFile(String url, String filename) {
-    html.window.open(url, '_blank');
-  }
-
-  void _downloadAllFiles() {
-    final downloadUrl = '$flaskServerUrl/session_zip/${widget.sessionId}';
-    html.window.open(downloadUrl, '_blank');
-  }
-
-  void _openSessionInBrowser() {
-    html.window.open(widget.sessionUrl, '_blank');
-  }
-
-  // ─── EXPORT FUNCTIONS ──────────────────────────────────────────────
-  
-  void _exportSingleLanguage(String format, String language) {
-    setState(() => _isExporting = true);
-    final encodedLang = Uri.encodeComponent(language);
-    final exportUrl = '$flaskServerUrl/session_export_${format.toLowerCase()}/${widget.sessionId}?language=$encodedLang';
-    html.window.open(exportUrl, '_blank');
-    setState(() => _isExporting = false);
-  }
-
-  void _exportAllLanguages(String format) {
-    setState(() => _isExporting = true);
-    final exportUrl = '$flaskServerUrl/session_export_all_languages/${widget.sessionId}?format=${format.toLowerCase()}';
-    html.window.open(exportUrl, '_blank');
-    setState(() => _isExporting = false);
-  }
-
-  void _showLanguageSelectionDialog(String format, String formatName) {
-    if (_availableLanguages.isEmpty) {
-      // If no languages detected, just export all
-      _exportAllLanguages(format);
+  void _downloadAllFiles() async {
+    if (_files.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No files to download'),
+          backgroundColor: Colors.orange,
+        ),
+      );
       return;
     }
 
-    // Sort languages for display
-    final sortedLanguages = List<String>.from(_availableLanguages)..sort();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Preparing download... This may take a moment.'),
+        duration: Duration(seconds: 2),
+      ),
+    );
 
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Row(
-          children: [
-            Icon(_getFormatIcon(format), color: _getFormatColor(format)),
-            const SizedBox(width: 8),
-            Text('Export $formatName'),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Select language to export:',
-              style: TextStyle(fontWeight: FontWeight.bold),
+    try {
+      final token = await InternalAuthService.getToken();
+      // Use the endpoint that downloads from internal server first
+      final downloadUrl = '$flaskServerUrl/session_download_all/${widget.sessionId}';
+      
+      final response = await http.get(
+        Uri.parse(downloadUrl),
+        headers: {
+          'Authorization': 'Bearer ${token ?? ''}',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        String filename = 'session_${widget.sessionId}.zip';
+        final contentDisposition = response.headers['content-disposition'] ?? '';
+        final filenameMatch = RegExp(r'filename="([^"]+)"').firstMatch(contentDisposition);
+        if (filenameMatch != null) {
+          filename = filenameMatch.group(1)!;
+        }
+
+        final blob = html.Blob([response.bodyBytes], 'application/zip');
+        final url = html.Url.createObjectUrlFromBlob(blob);
+        html.AnchorElement(href: url)
+          ..setAttribute('download', filename)
+          ..click();
+        html.Url.revokeObjectUrl(url);
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('✅ Downloaded: $filename'),
+              backgroundColor: Colors.green,
             ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  // "All Languages" option
-                  _buildLanguageChip(
-                    label: '📦 All Languages',
-                    onTap: () {
-                      Navigator.pop(context);
-                      _exportAllLanguages(format);
-                    },
-                    isAllOption: true,
-                  ),
-                  // Individual languages
-                  ...sortedLanguages.map((lang) => _buildLanguageChip(
-                    label: lang,
-                    onTap: () {
-                      Navigator.pop(context);
-                      _exportSingleLanguage(format, lang);
-                    },
-                    isAllOption: false,
-                  )),
-                ],
-              ),
-            ),
-            if (_isLoadingLanguages)
-              const Padding(
-                padding: EdgeInsets.all(16.0),
-                child: Center(child: CircularProgressIndicator()),
-              ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
+          );
+        }
+      } else {
+        throw Exception('Failed to download ZIP: ${response.statusCode}');
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ Download failed: $e'),
+            backgroundColor: Colors.red,
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildLanguageChip({
-    required String label,
-    required VoidCallback onTap,
-    bool isAllOption = false,
-  }) {
-    return ActionChip(
-      label: Text(label),
-      onPressed: _isExporting ? null : onTap,
-      backgroundColor: isAllOption 
-          ? Colors.purple.withValues(alpha: 0.1)
-          : Colors.blue.withValues(alpha: 0.1),
-      side: BorderSide(
-        color: isAllOption 
-            ? Colors.purple.withValues(alpha: 0.3)
-            : Colors.blue.withValues(alpha: 0.3),
-      ),
-    );
-  }
-
-  IconData _getFormatIcon(String format) {
-    switch (format.toLowerCase()) {
-      case 'txt': return Icons.text_snippet;
-      case 'rtf': return Icons.description;
-      case 'docx': return Icons.file_present;
-      default: return Icons.file_download;
-    }
-  }
-
-  Color _getFormatColor(String format) {
-    switch (format.toLowerCase()) {
-      case 'txt': return Colors.grey;
-      case 'rtf': return Colors.orange;
-      case 'docx': return Colors.blue;
-      default: return Colors.purple;
+        );
+      }
     }
   }
 
   void _showExportDialog() {
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Row(
-          children: [
-            Icon(Icons.file_download, color: Colors.blue),
-            SizedBox(width: 8),
-            Text('Export Session'),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Choose export format:',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 16),
-            _buildExportButton(
-              icon: Icons.text_snippet,
-              label: 'TXT',
-              subtitle: 'Plain text format',
-              color: Colors.grey,
-              onPressed: () {
-                Navigator.pop(context);
-                _showLanguageSelectionDialog('txt', 'TXT');
-              },
-            ),
-            const SizedBox(height: 8),
-            _buildExportButton(
-              icon: Icons.description,
-              label: 'RTF',
-              subtitle: 'Rich Text Format',
-              color: Colors.orange,
-              onPressed: () {
-                Navigator.pop(context);
-                _showLanguageSelectionDialog('rtf', 'RTF');
-              },
-            ),
-            const SizedBox(height: 8),
-            _buildExportButton(
-              icon: Icons.file_present,
-              label: 'DOCX',
-              subtitle: 'Microsoft Word format',
-              color: Colors.blue,
-              onPressed: () {
-                Navigator.pop(context);
-                _showLanguageSelectionDialog('docx', 'DOCX');
-              },
-            ),
-            const Divider(height: 24),
-            _buildExportButton(
-              icon: Icons.folder_zip,
-              label: 'All Formats + All Languages',
-              subtitle: 'Export everything as ZIP',
-              color: Colors.purple,
-              onPressed: () {
-                Navigator.pop(context);
-                _exportAllLanguages('zip');
-              },
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-        ],
+      builder: (context) => ExportDialog(
+        sessionId: widget.sessionId,
+        languages: _transcripts.map((t) => t.language).toList(),
       ),
     );
   }
 
-  Widget _buildExportButton({
-    required IconData icon,
-    required String label,
-    required String subtitle,
-    required Color color,
-    required VoidCallback onPressed,
-  }) {
-    return SizedBox(
-      width: double.infinity,
-      child: OutlinedButton.icon(
-        icon: Icon(icon, color: color),
-        label: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  label,
-                  style: const TextStyle(fontWeight: FontWeight.bold),
-                ),
-                Text(
-                  subtitle,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Colors.grey[600],
-                  ),
-                ),
-              ],
-            ),
-            if (_isExporting)
-              const SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-            const Icon(Icons.chevron_right, size: 16, color: Colors.grey),
-          ],
-        ),
-        style: OutlinedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
-          ),
-        ),
-        onPressed: _isExporting ? null : onPressed,
-      ),
-    );
+  double _getVideoHeight() {
+    final screenHeight = MediaQuery.of(context).size.height;
+    return (screenHeight * 0.25).clamp(_minVideoHeight, _maxVideoHeight);
   }
 
   @override
   Widget build(BuildContext context) {
-    final sortedLanguages = List<String>.from(_availableLanguages)..sort();
+    final currentTranscript = _transcripts.firstWhere(
+      (t) => t.language == _selectedLanguage,
+      orElse: () => _transcripts.isNotEmpty ? _transcripts.first : TranscriptData.empty(),
+    );
 
     return Scaffold(
       appBar: AppBar(
@@ -380,268 +398,214 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         foregroundColor: Colors.white,
         actions: [
           IconButton(
-            icon: const Icon(Icons.file_download),
-            onPressed: _showExportDialog,
-            tooltip: 'Export Session',
+            icon: Icon(_showFileList ? Icons.description : Icons.folder),
+            onPressed: _toggleFileList,
+            tooltip: _showFileList ? 'Show Transcript' : 'Show Files',
+          ),
+          IconButton(
+            icon: Icon(_isSplitView ? Icons.view_column : Icons.view_column_outlined),
+            onPressed: _toggleSplitView,
+            tooltip: 'Toggle Split View',
           ),
           IconButton(
             icon: const Icon(Icons.download),
+            onPressed: _showExportDialog,
+            tooltip: 'Export Transcript',
+          ),
+          IconButton(
+            icon: const Icon(Icons.folder_zip),
             onPressed: _files.isNotEmpty ? _downloadAllFiles : null,
             tooltip: 'Download All Files',
           ),
           IconButton(
-            icon: const Icon(Icons.open_in_new),
-            onPressed: _openSessionInBrowser,
-            tooltip: 'Open in Browser',
-          ),
-          IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: _fetchSessionOutput,
+            onPressed: _loadSessionData,
             tooltip: 'Refresh',
           ),
         ],
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : _errorMessage.isNotEmpty
-              ? Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Icon(Icons.error_outline, size: 64, color: Colors.red),
-                      const SizedBox(height: 16),
-                      Text(_errorMessage),
-                      const SizedBox(height: 16),
-                      ElevatedButton(
-                        onPressed: _fetchSessionOutput,
-                        child: const Text('Retry'),
-                      ),
-                    ],
+      body: _buildBody(currentTranscript),
+    );
+  }
+
+  Widget _buildBody(TranscriptData currentTranscript) {
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_errorMessage.isNotEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.error_outline, size: 64, color: Colors.red),
+            const SizedBox(height: 16),
+            Text(_errorMessage, textAlign: TextAlign.center),
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed: _loadSessionData,
+              child: const Text('Retry'),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (_transcripts.isEmpty && _files.isEmpty) {
+      return const Center(
+        child: Text('No data available'),
+      );
+    }
+
+    final videoHeight = _getVideoHeight();
+    final screenWidth = MediaQuery.of(context).size.width;
+
+    return Column(
+      children: [
+        // Video Player with fixed height - centered
+        Container(
+          height: videoHeight,
+          color: Colors.black,
+          child: Stack(
+            children: [
+              // Video player
+              Center(
+                child: Container(
+                  constraints: BoxConstraints(
+                    maxWidth: screenWidth * 0.9,
+                    maxHeight: videoHeight,
                   ),
-                )
+                  child: VideoPlayerWidget(
+                    controller: _videoController,
+                    isReady: _isVideoReady,
+                    onPlayPause: _togglePlayPause,
+                    onSeek: _seekTo,
+                    height: videoHeight,
+                  ),
+                ),
+              ),
+              
+              // Chapter seekbar - thin overlay at the VERY BOTTOM
+              // Only show if there are chapters and video is ready
+              if (_chapters.isNotEmpty && _isVideoReady)
+                Positioned(
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  child: Container(
+                    height: 6, // Very thin
+                    color: Colors.transparent,
+                    child: ChapterSeekbar(
+                      chapters: _chapters,
+                      currentTime: _videoController?.value.position.inSeconds.toDouble() ?? 0,
+                      onTap: _jumpToChapter,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        
+        // Show either File List or Transcript
+        Expanded(
+          child: _showFileList
+              ? _buildFileList()
               : Column(
                   children: [
-
-                    // ─── VIDEO PREVIEW ──────────────────────────────────────
+                    // Language tabs
                     Container(
-                      margin: const EdgeInsets.all(12),
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: Colors.grey[50],
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: Colors.grey[300]!),
+                      constraints: BoxConstraints(
+                        maxWidth: screenWidth * 0.9,
                       ),
-                      child: Row(
-                        children: [
-                          // Small video thumbnail
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(4),
-                            child: Container(
-                              height: 50,
-                              width: 70,
-                              color: Colors.grey[300],
-                              child: const Icon(Icons.videocam, size: 20, color: Colors.grey),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Session: ${widget.sessionId}',
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 12,
-                                  ),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                Text(
-                                  '${_files.length} files available',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: Colors.grey[600],
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
+                      child: LanguageTabs(
+                        transcripts: _transcripts,
+                        selectedLanguage: _selectedLanguage,
+                        onLanguageSelected: _selectLanguage,
                       ),
                     ),
-
-                    // Info card with export buttons
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      margin: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: Colors.green[50],
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: Colors.green[200]!),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              const Icon(Icons.check_circle, color: Colors.green),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      '✅ Session ID: ${widget.sessionId}',
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                        color: Colors.green,
-                                      ),
-                                    ),
-                                    Text(
-                                      'Total Files: ${_files.length}',
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: Colors.grey[600],
-                                      ),
-                                    ),
-                                    if (_availableLanguages.isNotEmpty)
-                                      Text(
-                                        'Languages: ${_availableLanguages.length}',
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: Colors.blue[600],
-                                        ),
-                                      ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 12),
-                          // ─── EXPORT BUTTONS ROW ──────────────────
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 8,
-                            children: [
-                              _buildExportChip(
-                                label: 'TXT',
-                                icon: Icons.text_snippet,
-                                color: Colors.grey,
-                                onTap: () => _showLanguageSelectionDialog('txt', 'TXT'),
-                              ),
-                              _buildExportChip(
-                                label: 'RTF',
-                                icon: Icons.description,
-                                color: Colors.orange,
-                                onTap: () => _showLanguageSelectionDialog('rtf', 'RTF'),
-                              ),
-                              _buildExportChip(
-                                label: 'DOCX',
-                                icon: Icons.file_present,
-                                color: Colors.blue,
-                                onTap: () => _showLanguageSelectionDialog('docx', 'DOCX'),
-                              ),
-                              _buildExportChip(
-                                label: 'All Files (ZIP)',
-                                icon: Icons.folder_zip,
-                                color: Colors.purple,
-                                onTap: _downloadAllFiles,
-                              ),
-                              _buildExportChip(
-                                label: 'Open Session',
-                                icon: Icons.open_in_new,
-                                color: Colors.green,
-                                onTap: _openSessionInBrowser,
-                              ),
-                              if (_availableLanguages.isNotEmpty)
-                                _buildExportChip(
-                                  label: '📚 ${_availableLanguages.length} Languages',
-                                  icon: Icons.translate,
-                                  color: Colors.teal,
-                                  onTap: _showExportDialog,
-                                ),
-                            ],
-                          ),
-                          // ─── LANGUAGE INDICATOR ───────────────────
-                          if (_availableLanguages.isNotEmpty) ...[
-                            const SizedBox(height: 8),
-                            Wrap(
-                              spacing: 4,
-                              runSpacing: 4,
-                              children: sortedLanguages.map((lang) => Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: Colors.blue[100],
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                                child: Text(
-                                  lang,
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    color: Colors.blue[800],
-                                  ),
-                                ),
-                              )).toList(),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                    
-                    // File list
+                    // Transcript view
                     Expanded(
-                      child: _files.isEmpty
-                          ? const Center(
-                              child: Text('No files available'),
-                            )
-                          : ListView.builder(
-                              padding: const EdgeInsets.symmetric(horizontal: 16),
-                              itemCount: _files.length,
-                              itemBuilder: (context, index) {
-                                final file = _files[index];
-                                return Card(
-                                  margin: const EdgeInsets.only(bottom: 8),
-                                  child: ListTile(
-                                    leading: _getFileIcon(file['name']),
-                                    title: Text(file['name']),
-                                    subtitle: Text(
-                                      _formatFileSize(file['size'] ?? 0),
-                                    ),
-                                    trailing: IconButton(
-                                      icon: const Icon(Icons.download),
-                                      onPressed: () {
-                                        final url = '$flaskServerUrl/session_file/${widget.sessionId}/${file['name']}';
-                                        _downloadFile(url, file['name']);
-                                      },
-                                      tooltip: 'Download',
-                                    ),
-                                    onTap: () {
-                                      final url = '$flaskServerUrl/session_file/${widget.sessionId}/${file['name']}';
-                                      _downloadFile(url, file['name']);
-                                    },
-                                  ),
-                                );
-                              },
+                      child: _isSplitView
+                          ? _buildSplitTranscriptView()
+                          : TranscriptView(
+                              transcript: currentTranscript,
+                              highlightedIndex: _currentSegmentIndex,
+                              scrollController: _scrollController,
                             ),
                     ),
                   ],
                 ),
+        ),
+      ],
     );
   }
 
-  Widget _buildExportChip({
-    required String label,
-    required IconData icon,
-    required Color color,
-    required VoidCallback onTap,
-  }) {
-    return ActionChip(
-      label: Text(label),
-      avatar: Icon(icon, size: 16, color: color),
-      onPressed: _isExporting ? null : onTap,
-      backgroundColor: color.withValues(alpha: 0.1),
-      side: BorderSide(color: color.withValues(alpha: 0.3)),
+  Widget _buildFileList() {
+    if (_files.isEmpty) {
+      return const Center(
+        child: Text('No files available'),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      itemCount: _files.length,
+      itemBuilder: (context, index) {
+        final file = _files[index];
+        return Card(
+          margin: const EdgeInsets.only(bottom: 8),
+          child: ListTile(
+            leading: _getFileIcon(file.name),
+            title: Text(
+              file.name,
+              style: const TextStyle(fontSize: 14),
+            ),
+            subtitle: Text(
+              _formatFileSize(file.size),
+              style: const TextStyle(fontSize: 12),
+            ),
+            trailing: IconButton(
+              icon: const Icon(Icons.download, color: Colors.blue),
+              onPressed: () => _downloadFile(file),
+              tooltip: 'Download',
+            ),
+            onTap: () => _downloadFile(file),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildSplitTranscriptView() {
+    final languages = _transcripts.take(2).toList();
+    if (languages.length < 2) {
+      return TranscriptView(
+        transcript: languages.isNotEmpty ? languages.first : TranscriptData.empty(),
+        highlightedIndex: _currentSegmentIndex,
+        scrollController: _scrollController,
+      );
+    }
+
+    return Row(
+      children: [
+        Expanded(
+          child: TranscriptView(
+            transcript: languages[0],
+            highlightedIndex: _currentSegmentIndex,
+            scrollController: ScrollController(),
+            title: languages[0].language,
+          ),
+        ),
+        const VerticalDivider(width: 1),
+        Expanded(
+          child: TranscriptView(
+            transcript: languages[1],
+            highlightedIndex: _currentSegmentIndex,
+            scrollController: ScrollController(),
+            title: languages[1].language,
+          ),
+        ),
+      ],
     );
   }
 
@@ -672,7 +636,9 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   String _formatFileSize(int bytes) {
     if (bytes < 1024) return '$bytes B';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024) return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
   }
 }

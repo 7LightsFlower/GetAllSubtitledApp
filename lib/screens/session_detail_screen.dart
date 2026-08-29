@@ -1,6 +1,7 @@
 // session_detail_screen.dart
 import 'dart:convert';
 import 'package:asr_live_translator/constants.dart';
+import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -153,6 +154,25 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         builder: (_) => JobConfigurationScreen(
           videoKey: _detail!.key,
           videoName: _detail!.name,
+        ),
+      ),
+    );
+  }
+
+  void _viewOutput(String sessionId) {
+    if (sessionId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No session ID available')),
+      );
+      return;
+    }
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => JobConfigurationScreen(
+          videoKey: _detail!.key,
+          videoName: _detail!.name,
+          sessionId: sessionId,
         ),
       ),
     );
@@ -371,6 +391,35 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
               ),
             ),
           ),
+
+          // In _buildContent, after the work button:
+          FutureBuilder<String?>(
+            future: InternalAuthService.getSessionId(detail.key),
+            builder: (context, snapshot) {
+              if (snapshot.hasData && snapshot.data != null && snapshot.data!.isNotEmpty) {
+                return Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Center(
+                    child: ElevatedButton.icon(
+                      onPressed: () {
+                        _viewOutput(snapshot.data!);
+                      },
+                      icon: const Icon(Icons.folder_open),
+                      label: const Text('View Output'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                        textStyle: const TextStyle(fontSize: 16),
+                      ),
+                    ),
+                  ),
+                );
+              }
+              return const SizedBox.shrink();
+            },
+          ),
+
         ],
       ),
     );

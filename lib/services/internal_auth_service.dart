@@ -449,4 +449,16 @@ class InternalAuthService {
     final token = await getValidAccessToken();
     return token != null;
   }
+
+  // Add to internal_auth_service.dart
+  static Future<void> saveSessionId(String videoKey, String sessionId) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('session_$videoKey', sessionId);
+  }
+
+  static Future<String?> getSessionId(String videoKey) async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('session_$videoKey');
+  }
+
 }

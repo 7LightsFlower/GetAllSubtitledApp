@@ -10,15 +10,18 @@ import 'package:asr_live_translator/models/language_config.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 class JobConfigurationScreen extends StatefulWidget {
   final String videoKey;
   final String videoName;
+  final String? sessionId;
 
   const JobConfigurationScreen({
     super.key,
     required this.videoKey,
     required this.videoName,
+    this.sessionId,
   });
 
   @override
@@ -60,6 +63,9 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   bool _isConnected = false;
   bool _isConnecting = false;
 
+  // Settings panel collapsed state
+  bool _settingsExpanded = false;
+
   // Manual token state
   bool _showTokenInput = false;
   final TextEditingController _tokenController = TextEditingController();
@@ -79,8 +85,10 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   String _savedSessionUrl = '';
   bool _isCheckingOutput = false;
   String _outputStatus = '';
-  bool _outputReady = false;
-  int _outputFileCount = 0;
+
+  // Job history
+  List<Map<String, dynamic>> _jobHistory = [];
+  bool _isLoadingHistory = false;
 
   // --- Constants ---
   static const List<String> _availabilityOptions = [
@@ -106,6 +114,13 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     _topicNameController.text = _sessionNameController.text;
     _checkConnection();
     _fetchThumbnail();
+    _loadJobHistory();
+
+    if (widget.sessionId != null && widget.sessionId!.isNotEmpty) {
+      _savedSessionId = widget.sessionId!;
+      _hasSessionId = true;
+      _outputStatus = '✅ Session ID loaded: ${widget.sessionId}\nClick "Check Output" to see results.';
+    }
   }
 
   @override
@@ -128,6 +143,157 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         '${now.hour.toString().padLeft(2, '0')}:'
         '${now.minute.toString().padLeft(2, '0')}';
     return '${widget.videoName} – $dateTimeStr';
+  }
+
+  // --- Job History Management ---
+  Future<void> _loadJobHistory() async {
+    setState(() => _isLoadingHistory = true);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final key = 'job_history_${widget.videoKey}';
+      final jsonString = prefs.getString(key);
+      if (jsonString != null && jsonString.isNotEmpty) {
+        final List<dynamic> history = jsonDecode(jsonString);
+        setState(() {
+          _jobHistory = history.cast<Map<String, dynamic>>();
+          // Sort by date, newest first
+          _jobHistory.sort((a, b) => (b['timestamp'] ?? '').compareTo(a['timestamp'] ?? ''));
+        });
+      }
+    } catch (e) {
+      if (kDebugMode) print('Error loading job history: $e');
+    } finally {
+      if (mounted) setState(() => _isLoadingHistory = false);
+    }
+  }
+
+  Future<void> _saveJobToHistory({
+    required String sessionId,
+    required String sessionUrl,
+    required String sessionName,
+    required String status,
+    required bool hasOutput,
+    int outputFiles = 0,
+  }) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final key = 'job_history_${widget.videoKey}';
+      
+      // Check if this session already exists in history
+      final existingIndex = _jobHistory.indexWhere(
+        (job) => job['session_id'] == sessionId
+      );
+      
+      if (existingIndex != -1) {
+        // Update existing entry instead of creating new one
+        _jobHistory[existingIndex]['status'] = status;
+        _jobHistory[existingIndex]['has_output'] = hasOutput;
+        if (outputFiles > 0) {
+          _jobHistory[existingIndex]['output_files'] = outputFiles;
+        }
+      } else {
+        // Add new entry
+        final jobEntry = {
+          'session_id': sessionId,
+          'session_url': sessionUrl,
+          'session_name': sessionName,
+          'timestamp': DateTime.now().toIso8601String(),
+          'date': _date,
+          'status': status,
+          'has_output': hasOutput,
+          'output_files': outputFiles,
+          'input_languages': _inputLanguages.join(','),
+          'output_languages': _outputLanguages.join(','),
+          'availability': _availability,
+        };
+        
+        _jobHistory.insert(0, jobEntry);
+      }
+      
+      // Keep only last 20 jobs per video
+      if (_jobHistory.length > 20) {
+        _jobHistory = _jobHistory.sublist(0, 20);
+      }
+      
+      // Save to shared preferences
+      final jsonString = jsonEncode(_jobHistory);
+      await prefs.setString(key, jsonString);
+      
+      if (mounted) {
+        setState(() {});
+      }
+    } catch (e) {
+      if (kDebugMode) print('Error saving job history: $e');
+    }
+  }
+
+  Future<void> _deleteJobFromHistory(String sessionId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final key = 'job_history_${widget.videoKey}';
+      
+      _jobHistory.removeWhere((job) => job['session_id'] == sessionId);
+      
+      final jsonString = jsonEncode(_jobHistory);
+      await prefs.setString(key, jsonString);
+      
+      if (mounted) {
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Job removed from history')),
+        );
+      }
+    } catch (e) {
+      if (kDebugMode) print('Error deleting job: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error deleting job: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _clearAllHistory() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Clear All History?'),
+        content: Text('This will remove all ${_jobHistory.length} jobs for this video.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Clear All'),
+          ),
+        ],
+      ),
+    );
+    
+    if (confirm == true) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final key = 'job_history_${widget.videoKey}';
+        await prefs.remove(key);
+        setState(() {
+          _jobHistory.clear();
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('History cleared')),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error clearing history: $e')),
+          );
+        }
+      }
+    }
   }
 
   // --- Fetch thumbnail ---
@@ -269,7 +435,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
       setState(() {
         _isCheckingOutput = true;
         _outputStatus = '🔄 Checking for output files...';
-        _outputReady = false;
       });
     }
 
@@ -289,11 +454,34 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         final totalFiles = data['total_files'] ?? 0;
 
         if (totalFiles > 0) {
+          // Update job history - find and update existing entry instead of creating new one
+          final jobIndex = _jobHistory.indexWhere(
+            (job) => job['session_id'] == _savedSessionId
+          );
+          if (jobIndex != -1) {
+            // Update existing entry
+            setState(() {
+              _jobHistory[jobIndex]['has_output'] = true;
+              _jobHistory[jobIndex]['status'] = 'Completed ✅';
+              _jobHistory[jobIndex]['output_files'] = totalFiles;
+            });
+            // Save updated history
+            await _saveJobHistoryToPrefs();
+          } else {
+            // If not found in history, add it (shouldn't happen normally)
+            await _saveJobToHistory(
+              sessionId: _savedSessionId,
+              sessionUrl: _savedSessionUrl,
+              sessionName: _sessionNameController.text.trim(),
+              status: 'Completed ✅',
+              hasOutput: true,
+              outputFiles: totalFiles,
+            );
+          }
+
           if (mounted) {
             setState(() {
               _isCheckingOutput = false;
-              _outputReady = true;
-              _outputFileCount = totalFiles;
               _outputStatus = '✅ Output is ready! Found $totalFiles files.';
             });
             
@@ -309,7 +497,6 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           if (mounted) {
             setState(() {
               _isCheckingOutput = false;
-              _outputReady = false;
               _outputStatus = '⏳ Still processing... No output files found yet.\n'
                             'Please wait a few more minutes and try again.';
             });
@@ -333,25 +520,27 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     }
   }
 
-  void _viewOutput() {
-    if (_savedSessionId.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('No session available. Please upload a video first.'),
-          backgroundColor: Colors.orange,
-        ),
-      );
-      return;
+  // Helper method to save history to preferences
+  Future<void> _saveJobHistoryToPrefs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final key = 'job_history_${widget.videoKey}';
+      final jsonString = jsonEncode(_jobHistory);
+      await prefs.setString(key, jsonString);
+    } catch (e) {
+      if (kDebugMode) print('Error saving job history: $e');
     }
+  }
 
+  void _viewHistoricalOutput(String sessionId, String sessionUrl) {
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => SessionOutputScreen(
-          sessionId: _savedSessionId,
-          sessionUrl: _savedSessionUrl.isNotEmpty 
-              ? _savedSessionUrl 
-              : 'https://lt2srv-sscherrer.isl.iar.kit.edu/archivesession/$_savedSessionId',
+          sessionId: sessionId,
+          sessionUrl: sessionUrl.isNotEmpty 
+              ? sessionUrl 
+              : 'https://lt2srv-sscherrer.isl.iar.kit.edu/archivesession/$sessionId',
         ),
       ),
     );
@@ -562,6 +751,9 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     final responseText = request.responseText;
     final finalUrl = request.responseUrl;
 
+    // Flag to prevent duplicate history entries
+    bool historySaved = false;
+
     if (status >= 200 && status < 300) {
       // Store the response for display
       if (mounted) {
@@ -580,11 +772,20 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           });
           _printSessionLink();
         } catch (_) {
-          _parseHtmlResponse(responseText ?? '');
-          setState(() {
-            _responseMessage = responseText ?? 'Upload successful!';
-            _showResponse = true;
-          });
+          // Parse HTML response and save session ID
+          final parsedSessionId = _parseHtmlResponseAndReturnSessionId(responseText ?? '');
+          if (parsedSessionId != null && parsedSessionId.isNotEmpty) {
+            if (mounted) {
+              await InternalAuthService.saveSessionId(widget.videoKey, parsedSessionId);
+            }
+          }
+
+          if (mounted) {
+            setState(() {
+              _responseMessage = responseText ?? 'Upload successful!';
+              _showResponse = true;
+            });
+          }
           _printSessionLink();
         }
       }
@@ -600,17 +801,33 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             _savedSessionUrl = finalUrl;
             _hasSessionId = true;
             _outputStatus = '✅ Upload complete! Session ID: $sessionId\n'
-                           'Click "Check Output" to see if processing is finished.';
-            _outputReady = false;
+                          'Click "Check Output" to see if processing is finished.';
           });
+
+          // Save session ID
+          await InternalAuthService.saveSessionId(widget.videoKey, sessionId);
           
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('✅ Upload complete! Session ID: $sessionId'),
-              backgroundColor: Colors.green,
-              duration: const Duration(seconds: 4),
-            ),
-          );
+          // Save to job history ONLY if not already saved
+          if (!historySaved) {
+            await _saveJobToHistory(
+              sessionId: sessionId,
+              sessionUrl: finalUrl,
+              sessionName: _sessionNameController.text.trim(),
+              status: 'Processing... ⏳',
+              hasOutput: false,
+            );
+            historySaved = true;
+          }
+          
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('✅ Upload complete! Session ID: $sessionId'),
+                backgroundColor: Colors.green,
+                duration: const Duration(seconds: 4),
+              ),
+            );
+          }
         }
         return;
       }
@@ -628,17 +845,33 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               _savedSessionUrl = data['session_url'] ?? '';
               _hasSessionId = true;
               _outputStatus = '✅ Upload complete! Session ID: $sessionId\n'
-                             'Click "Check Output" to see if processing is finished.';
-              _outputReady = false;
+                            'Click "Check Output" to see if processing is finished.';
             });
             
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('✅ Upload complete! Session ID: $sessionId'),
-                backgroundColor: Colors.green,
-                duration: const Duration(seconds: 4),
-              ),
-            );
+            // Save session ID
+            await InternalAuthService.saveSessionId(widget.videoKey, sessionId);
+            
+            // Save to job history ONLY if not already saved
+            if (!historySaved) {
+              await _saveJobToHistory(
+                sessionId: sessionId,
+                sessionUrl: data['session_url'] ?? '',
+                sessionName: _sessionNameController.text.trim(),
+                status: 'Processing... ⏳',
+                hasOutput: false,
+              );
+              historySaved = true;
+            }
+            
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('✅ Upload complete! Session ID: $sessionId'),
+                  backgroundColor: Colors.green,
+                  duration: const Duration(seconds: 4),
+                ),
+              );
+            }
           }
           return;
         }
@@ -646,28 +879,10 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
 
       // If no session ID, just show the response and stay on this screen
       return;
-    } else {
-      // Handle error
-      String errorMsg = 'Upload failed (HTTP $status)';
-      try {
-        final errorBody = jsonDecode(responseText ?? '{}');
-        errorMsg = errorBody['error'] ?? errorBody['message'] ?? errorMsg;
-      } catch (_) {}
-      
-      if (mounted) {
-        setState(() {
-          _responseMessage = '❌ Error: $errorMsg';
-          _showResponse = true;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(errorMsg), backgroundColor: Colors.red),
-        );
-      }
-      throw Exception('Upload failed (HTTP $status): $responseText');
     }
   }
-
-  void _parseHtmlResponse(String html) {
+      
+  String? _parseHtmlResponseAndReturnSessionId(String html) {
     final RegExp linkRegex = RegExp(r'<a href="([^"]+)"[^>]*>([^<]+)</a>');
     final linkMatch = linkRegex.firstMatch(html);
     if (linkMatch != null) {
@@ -678,9 +893,12 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         _sessionUrl = cleanUrl;
         
         if (cleanUrl.contains('/archivesession/')) {
-          _sessionId = cleanUrl.split('/archivesession/')[-1].split('/')[0];
-          _sessionId = _sessionId.replaceAll(RegExp(r'\s+'), '');
-          _sessionId = _sessionId.split('"')[0];
+          final sessionId = cleanUrl.split('/archivesession/')[-1].split('/')[0];
+          final cleanedId = sessionId.replaceAll(RegExp(r'\s+'), '').split('"')[0];
+          if (cleanedId.isNotEmpty) {
+            _sessionId = cleanedId;
+            return cleanedId;
+          }
         }
       }
     }
@@ -696,16 +914,13 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
       final sessionMatch = sessionIdRegex.firstMatch(html);
       if (sessionMatch != null && sessionMatch.groupCount >= 1) {
         _sessionId = sessionMatch.group(1)?.trim() ?? '';
+        if (_sessionId.isNotEmpty) {
+          return _sessionId;
+        }
       }
     }
     
-    _responseHtml = html;
-    
-    if (kDebugMode) {
-      print('🔍 [PARSED] Session URL: $_sessionUrl');
-      print('🔍 [PARSED] Session ID: $_sessionId');
-      print('🔍 [PARSED] Video Key: $_videoKey');
-    }
+    return null;
   }
 
   void _printSessionLink() {
@@ -1016,9 +1231,324 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     );
   }
 
+  // Check output for a historical job
+  Future<void> _checkHistoricalOutput(String sessionId) async {
+    // Show loading indicator
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('🔄 Checking output status...'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+
+    try {
+      final token = await _getToken();
+      final url = '$flaskServerUrl/session_output/$sessionId';
+      
+      final response = await http.get(
+        Uri.parse(url),
+        headers: {
+          'Authorization': 'Bearer $token',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final totalFiles = data['total_files'] ?? 0;
+
+        // Find and update the job in history
+        final jobIndex = _jobHistory.indexWhere(
+          (job) => job['session_id'] == sessionId
+        );
+        
+        if (jobIndex != -1) {
+          if (totalFiles > 0) {
+            setState(() {
+              _jobHistory[jobIndex]['has_output'] = true;
+              _jobHistory[jobIndex]['status'] = 'Completed ✅';
+              _jobHistory[jobIndex]['output_files'] = totalFiles;
+            });
+            await _saveJobHistoryToPrefs();
+            
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('✅ Output ready! Found $totalFiles files.'),
+                  backgroundColor: Colors.green,
+                  duration: const Duration(seconds: 3),
+                ),
+              );
+              // Refresh the history display
+              setState(() {});
+            }
+          } else {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('⏳ Still processing... No output files found yet.'),
+                  duration: Duration(seconds: 3),
+                ),
+              );
+            }
+          }
+        }
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('❌ Failed to check output: ${response.statusCode}'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ Error checking output: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  // --- Job History Widget ---
+  Widget _buildJobHistory() {
+    if (_jobHistory.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.grey[50],
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.grey[300]!),
+        ),
+        child: Column(
+          children: [
+            Icon(Icons.history, size: 48, color: Colors.grey[400]),
+            const SizedBox(height: 8),
+            Text(
+              'No previous jobs for this video',
+              style: TextStyle(color: Colors.grey[600]),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Start your first processing job above',
+              style: TextStyle(color: Colors.grey[400], fontSize: 12),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.grey[50],
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.grey[300]!),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(
+              children: [
+                Icon(Icons.history, color: Colors.blue[700]),
+                const SizedBox(width: 8),
+                Text(
+                  'Job History (${_jobHistory.length})',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                  ),
+                ),
+                const Spacer(),
+                IconButton(
+                  icon: const Icon(Icons.delete_sweep, size: 20),
+                  onPressed: _clearAllHistory,
+                  tooltip: 'Clear all history',
+                  color: Colors.red,
+                ),
+              ],
+            ),
+          ),
+          // List
+          ListView.separated(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: _jobHistory.length,
+            separatorBuilder: (_, __) => Divider(color: Colors.grey[200]),
+            itemBuilder: (context, index) {
+              final job = _jobHistory[index];
+              final timestamp = DateTime.tryParse(job['timestamp'] ?? '');
+              final dateStr = timestamp != null
+                  ? '${timestamp.day}/${timestamp.month}/${timestamp.year} ${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}'
+                  : job['date'] ?? 'Unknown date';
+              final sessionName = job['session_name'] ?? 'Unknown Session';
+              final status = job['status'] ?? 'Unknown';
+              final hasOutput = job['has_output'] ?? false;
+              final sessionId = job['session_id'] ?? '';
+              final sessionUrl = job['session_url'] ?? '';
+              final outputFiles = job['output_files'] ?? 0;
+              final isProcessing = status.contains('Processing') || !hasOutput;
+
+              Color statusColor;
+              IconData statusIcon;
+              if (hasOutput) {
+                statusColor = Colors.green;
+                statusIcon = Icons.check_circle;
+              } else if (isProcessing) {
+                statusColor = Colors.orange;
+                statusIcon = Icons.hourglass_empty;
+              } else {
+                statusColor = Colors.grey;
+                statusIcon = Icons.help_outline;
+              }
+
+              return Material(
+                color: Colors.transparent,
+                child: ListTile(
+                  leading: CircleAvatar(
+                    backgroundColor: statusColor.withValues(alpha: 0.2),
+                    child: Icon(statusIcon, size: 20, color: statusColor),
+                  ),
+                  title: Text(
+                    sessionName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.w500),
+                  ),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'ID: ${sessionId.length > 20 ? '${sessionId.substring(0, 20)}...' : sessionId}',
+                        style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+                      ),
+                      Text(
+                        '📅 $dateStr • ${job['input_languages'] ?? 'N/A'} → ${job['output_languages'] ?? 'N/A'}',
+                        style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+                      ),
+                      if (hasOutput)
+                        Text(
+                          '📁 $outputFiles file${outputFiles > 1 ? 's' : ''} available',
+                          style: TextStyle(fontSize: 11, color: Colors.green[700]),
+                        ),
+                    ],
+                  ),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (hasOutput)
+                        Icon(
+                          Icons.file_download_done,
+                          size: 18,
+                          color: Colors.green[400],
+                        ),
+                      const SizedBox(width: 4),
+                      Text(
+                        status,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: statusColor,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      PopupMenuButton(
+                        icon: const Icon(Icons.more_vert, size: 20),
+                        onSelected: (value) {
+                          if (value == 'view' && sessionId.isNotEmpty) {
+                            _viewHistoricalOutput(sessionId, sessionUrl);
+                          } else if (value == 'check' && sessionId.isNotEmpty) {
+                            _checkHistoricalOutput(sessionId);
+                          } else if (value == 'delete') {
+                            _deleteJobFromHistory(sessionId);
+                          } else if (value == 'open' && sessionUrl.isNotEmpty) {
+                            html.window.open(sessionUrl, '_blank');
+                          }
+                        },
+                        itemBuilder: (context) => [
+                          if (hasOutput || sessionUrl.isNotEmpty)
+                            const PopupMenuItem(
+                              value: 'view',
+                              child: Row(
+                                children: [
+                                  Icon(Icons.folder_open, size: 18),
+                                  SizedBox(width: 8),
+                                  Text('View Output'),
+                                ],
+                              ),
+                            ),
+                          if (!hasOutput)
+                            const PopupMenuItem(
+                              value: 'check',
+                              child: Row(
+                                children: [
+                                  Icon(Icons.refresh, size: 18, color: Colors.blue),
+                                  SizedBox(width: 8),
+                                  Text('Check Status', style: TextStyle(color: Colors.blue)),
+                                ],
+                              ),
+                            ),
+                          if (sessionUrl.isNotEmpty)
+                            const PopupMenuItem(
+                              value: 'open',
+                              child: Row(
+                                children: [
+                                  Icon(Icons.open_in_new, size: 18),
+                                  SizedBox(width: 8),
+                                  Text('Open Session'),
+                                ],
+                              ),
+                            ),
+                          const PopupMenuItem(
+                            value: 'delete',
+                            child: Row(
+                              children: [
+                                Icon(Icons.delete, size: 18, color: Colors.red),
+                                SizedBox(width: 8),
+                                Text('Delete', style: TextStyle(color: Colors.red)),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  onTap: () {
+                    if (hasOutput) {
+                      _viewHistoricalOutput(sessionId, sessionUrl);
+                    } else {
+                      _checkHistoricalOutput(sessionId);
+                    }
+                  },
+                ),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
   // --- Output check section widget ---
   Widget _buildOutputCheckSection() {
     if (!_hasSessionId) return const SizedBox.shrink();
+    
+    // Find the current session in history
+    final currentJobIndex = _jobHistory.indexWhere(
+      (job) => job['session_id'] == _savedSessionId
+    );
+    final bool hasOutput = currentJobIndex != -1 && 
+                          (_jobHistory[currentJobIndex]['has_output'] ?? false);
+    final int outputFiles = currentJobIndex != -1 ? 
+                            (_jobHistory[currentJobIndex]['output_files'] ?? 0) : 0;
     
     return Container(
       margin: const EdgeInsets.only(top: 16),
@@ -1036,7 +1566,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               Icon(Icons.folder_outlined, color: Colors.blue),
               SizedBox(width: 8),
               Text(
-                'Session Output',
+                'Current Session',
                 style: TextStyle(
                   fontWeight: FontWeight.bold,
                   fontSize: 16,
@@ -1049,6 +1579,19 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             'Session ID: $_savedSessionId',
             style: const TextStyle(fontSize: 12),
           ),
+          if (hasOutput) ...[
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                const Icon(Icons.check_circle, size: 14, color: Colors.green),
+                const SizedBox(width: 4),
+                Text(
+                  '✅ Output ready ($outputFiles files)',
+                  style: TextStyle(fontSize: 12, color: Colors.green[700]),
+                ),
+              ],
+            ),
+          ],
           const SizedBox(height: 8),
           if (_outputStatus.isNotEmpty)
             Container(
@@ -1065,41 +1608,73 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           const SizedBox(height: 12),
           Row(
             children: [
-              Expanded(
-                child: ElevatedButton.icon(
-                  onPressed: _isCheckingOutput ? null : _checkOutput,
-                  icon: _isCheckingOutput
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Icon(Icons.refresh),
-                  label: Text(
-                    _isCheckingOutput ? 'Checking...' : 'Check Output',
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blue,
-                    foregroundColor: Colors.white,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              if (_outputReady)
+              if (!hasOutput)
                 Expanded(
                   child: ElevatedButton.icon(
-                    onPressed: _viewOutput,
+                    onPressed: _isCheckingOutput ? null : _checkOutput,
+                    icon: _isCheckingOutput
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Icon(Icons.refresh),
+                    label: Text(
+                      _isCheckingOutput ? 'Checking...' : 'Check Status',
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blue,
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+                ),
+              if (hasOutput) ...[
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      // Find the job and view its output
+                      final job = _jobHistory.firstWhere(
+                        (j) => j['session_id'] == _savedSessionId,
+                        orElse: () => {},
+                      );
+                      _viewHistoricalOutput(
+                        _savedSessionId, 
+                        job['session_url'] ?? _savedSessionUrl
+                      );
+                    },
                     icon: const Icon(Icons.folder_open),
-                    label: Text('View Output ($_outputFileCount files)'),
+                    label: Text('View Output ($outputFiles files)'),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.green,
                       foregroundColor: Colors.white,
                     ),
                   ),
                 ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _isCheckingOutput ? null : _checkOutput,
+                    icon: _isCheckingOutput
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                            ),
+                          )
+                        : const Icon(Icons.refresh, size: 16),
+                    label: Text(
+                      _isCheckingOutput ? 'Checking...' : 'Refresh',
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.blue,
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
         ],
@@ -1326,17 +1901,306 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     );
   }
 
+  // --- Build settings panel ---
+  Widget _buildSettingsPanel() {
+    final inputLangCodes = LanguageConfig.getSortedInputLanguages();
+    final outputLangCodes = LanguageConfig.getSortedOutputLanguages();
+    final audioLangCodes = LanguageConfig.getSortedAudioLanguages();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Session Name
+        TextFormField(
+          controller: _sessionNameController,
+          decoration: const InputDecoration(
+            labelText: 'Session Name',
+            border: OutlineInputBorder(),
+          ),
+          validator: (val) => val == null || val.trim().isEmpty
+              ? 'Please enter a name'
+              : null,
+          onChanged: (_) {
+            if (_topicNameController.text == _sessionNameController.text) {
+              _topicNameController.text = _sessionNameController.text;
+            }
+          },
+        ),
+        const SizedBox(height: 16),
+
+        // Topic, Date, Speaker
+        TextFormField(
+          controller: _topicNameController,
+          decoration: const InputDecoration(
+            labelText: 'Topic Name',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        const SizedBox(height: 16),
+        TextFormField(
+          initialValue: _date,
+          decoration: const InputDecoration(
+            labelText: 'Date (YYYY-MM-DD)',
+            border: OutlineInputBorder(),
+          ),
+          onChanged: (val) => _date = val,
+          validator: (val) {
+            if (val == null || val.isEmpty) return 'Date is required';
+            final reg = RegExp(r'^\d{4}-\d{2}-\d{2}$');
+            if (!reg.hasMatch(val)) return 'Use YYYY-MM-DD format';
+            return null;
+          },
+        ),
+        const SizedBox(height: 16),
+        TextFormField(
+          controller: _speakerNameController,
+          decoration: const InputDecoration(
+            labelText: 'Speaker Name',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // Input Languages
+        const Text('Input Languages', style: TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          children: inputLangCodes.map((code) {
+            final displayName = LanguageConfig.getInputLanguageName(code);
+            return FilterChip(
+              label: Text('$displayName ($code)'),
+              selected: _inputLanguages.contains(code),
+              onSelected: (selected) {
+                _toggleInputLanguage(code);
+              },
+            );
+          }).toList(),
+        ),
+        const SizedBox(height: 16),
+
+        // Output Languages
+        const Text('Output Languages (Translation)',
+            style: TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          children: outputLangCodes.map((code) {
+            final displayName = LanguageConfig.getOutputLanguageName(code);
+            return FilterChip(
+              label: Text('$displayName ($code)'),
+              selected: _outputLanguages.contains(code),
+              onSelected: (selected) {
+                _toggleOutputLanguage(code);
+              },
+            );
+          }).toList(),
+        ),
+        const SizedBox(height: 16),
+
+        // Audio Languages
+        const Text('Generated Audio Languages',
+            style: TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          children: audioLangCodes.map((code) {
+            final displayName = LanguageConfig.getAudioLanguageName(code);
+            return FilterChip(
+              label: Text('$displayName ($code)'),
+              selected: _audioLanguages.contains(code),
+              onSelected: (selected) {
+                _toggleAudioLanguage(code);
+              },
+            );
+          }).toList(),
+        ),
+        const SizedBox(height: 16),
+
+        // Availability
+        _buildDropdownField<String>(
+          label: 'Availability',
+          value: _availability,
+          options: _availabilityOptions,
+          onChanged: (val) => setState(() => _availability = val!),
+        ),
+        const SizedBox(height: 16),
+
+        // Format
+        _buildDropdownField<String>(
+          label: 'Presentation Format',
+          value: _format,
+          options: _formatOptions,
+          onChanged: (val) => setState(() => _format = val!),
+        ),
+        const SizedBox(height: 16),
+
+        // Smart Chaptering
+        _buildDropdownField<String>(
+          label: 'Smart Chaptering',
+          value: _smartChaptering,
+          options: _chapteringOptions,
+          onChanged: (val) => setState(() => _smartChaptering = val!),
+        ),
+        const SizedBox(height: 16),
+
+        // TTS Quality Mode
+        _buildDropdownField<String>(
+          label: 'TTS Quality Mode',
+          value: _ttsQualityMode,
+          options: _ttsQualityOptions,
+          onChanged: (val) => setState(() => _ttsQualityMode = val!),
+        ),
+        const SizedBox(height: 16),
+
+        // Error Correction
+        _buildDropdownField<String>(
+          label: 'Error Correction',
+          value: _errorCorrection,
+          options: _errorCorrectionOptions,
+          onChanged: (val) => setState(() => _errorCorrection = val!),
+        ),
+        const SizedBox(height: 16),
+
+        // Post-production
+        _buildMultiSelectChips(
+          label: 'Shortening (Post-production)',
+          selected: _postproduction,
+          allOptions: _postproductionOptions,
+          onChanged: (newList) => setState(() => _postproduction..clear()..addAll(newList)),
+        ),
+        const SizedBox(height: 16),
+
+        // Permanent Name
+        TextFormField(
+          controller: _shortenController,
+          decoration: const InputDecoration(
+            labelText: 'Permanent Name (alphanumeric only)',
+            border: OutlineInputBorder(),
+            hintText: 'Leave empty for random',
+          ),
+          validator: (val) {
+            if (val != null && val.isNotEmpty && !RegExp(r'^[A-Za-z0-9]*$').hasMatch(val)) {
+              return 'Only letters and numbers allowed';
+            }
+            return null;
+          },
+        ),
+        const SizedBox(height: 16),
+
+        // Mute & Pause
+        Row(
+          children: [
+            Expanded(
+              child: TextFormField(
+                controller: _muteController,
+                decoration: const InputDecoration(
+                  labelText: 'Notify timeout (minutes)',
+                  border: OutlineInputBorder(),
+                ),
+                keyboardType: TextInputType.number,
+                validator: (val) {
+                  if (val == null || val.isEmpty) return null;
+                  if (int.tryParse(val) == null) return 'Enter a number';
+                  return null;
+                },
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: TextFormField(
+                controller: _pauseController,
+                decoration: const InputDecoration(
+                  labelText: 'Speech segment timeout (seconds)',
+                  border: OutlineInputBorder(),
+                ),
+                keyboardType: TextInputType.number,
+                validator: (val) {
+                  if (val == null || val.isEmpty) return null;
+                  if (double.tryParse(val) == null) return 'Enter a number';
+                  return null;
+                },
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+
+        // Features
+        const Text('Features',
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+        Wrap(
+          spacing: 16,
+          children: [
+            CheckboxListTile(
+              title: const Text('Filter Profanity'),
+              value: _profanityFilter,
+              onChanged: (v) => setState(() => _profanityFilter = v!),
+              controlAffinity: ListTileControlAffinity.leading,
+              dense: true,
+            ),
+            CheckboxListTile(
+              title: const Text('Filter Music'),
+              value: _filterMusic,
+              onChanged: (v) => setState(() => _filterMusic = v!),
+              controlAffinity: ListTileControlAffinity.leading,
+              dense: true,
+            ),
+            CheckboxListTile(
+              title: const Text('Enable Summarization'),
+              value: _enableSummarization,
+              onChanged: (v) => setState(() => _enableSummarization = v!),
+              controlAffinity: ListTileControlAffinity.leading,
+              dense: true,
+            ),
+            CheckboxListTile(
+              title: const Text('Enable Live Notes'),
+              value: _enableLiveNotes,
+              onChanged: (v) => setState(() => _enableLiveNotes = v!),
+              controlAffinity: ListTileControlAffinity.leading,
+              dense: true,
+            ),
+            CheckboxListTile(
+              title: const Text('Enable Speaker Diarization'),
+              value: _enableDiarization,
+              onChanged: (v) => setState(() => _enableDiarization = v!),
+              controlAffinity: ListTileControlAffinity.leading,
+              dense: true,
+            ),
+            CheckboxListTile(
+              title: const Text('Enable AI Assistant'),
+              value: _enableAIAssistant,
+              onChanged: (v) => setState(() => _enableAIAssistant = v!),
+              controlAffinity: ListTileControlAffinity.leading,
+              dense: true,
+            ),
+            CheckboxListTile(
+              title: const Text('Save Session (logging)'),
+              value: _saveSession,
+              onChanged: (v) => setState(() => _saveSession = v!),
+              controlAffinity: ListTileControlAffinity.leading,
+              dense: true,
+            ),
+            CheckboxListTile(
+              title: const Text('Distinguish unknown speakers'),
+              value: _distinguishUnknownSpeakers,
+              onChanged: (v) => setState(() => _distinguishUnknownSpeakers = v!),
+              controlAffinity: ListTileControlAffinity.leading,
+              dense: true,
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
   // --- Build ---
   
   @override
   Widget build(BuildContext context) {
-    // Get sorted language codes with display names for each category
-    final inputLangCodes = LanguageConfig.getSortedInputLanguages();
-    final outputLangCodes = LanguageConfig.getSortedOutputLanguages();
-    final audioLangCodes = LanguageConfig.getSortedAudioLanguages();
-    
-    // Get screen height for thumbnail
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('Configure Job'),
@@ -1357,7 +2221,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // ─── Video Preview Card (from session_detail_screen) ──────
+              // ─── Video Preview Card ──────
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
@@ -1365,352 +2229,185 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(color: Colors.grey[300]!),
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                child: Row(
                   children: [
-                    // Video info row
-                    Row(
-                      children: [
-                        // Small thumbnail
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(6),
-                          child: _thumbnailUrl != null && _thumbnailUrl!.isNotEmpty
-                              ? Image.network(
-                                  _thumbnailUrl!,
-                                  height: 60,
-                                  width: 80,
-                                  fit: BoxFit.cover,
-                                  errorBuilder: (_, __, ___) => Container(
-                                    height: 60,
-                                    width: 80,
-                                    color: Colors.grey[300],
-                                    child: const Icon(Icons.videocam, size: 24),
-                                  ),
-                                )
-                              : Container(
-                                  height: 60,
-                                  width: 80,
-                                  color: Colors.grey[300],
-                                  child: const Icon(Icons.videocam, size: 24),
-                                ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                widget.videoName,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 14,
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: _thumbnailUrl != null && _thumbnailUrl!.isNotEmpty
+                          ? Image.network(
+                              _thumbnailUrl!,
+                              height: 60,
+                              width: 80,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, __, ___) => Container(
+                                height: 60,
+                                width: 80,
+                                color: Colors.grey[300],
+                                child: const Icon(Icons.videocam, size: 24),
                               ),
-                              Text(
-                                'Key: ${widget.videoKey.substring(0, 32)}...',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  color: Colors.grey[500],
-                                ),
-                              ),
-                            ],
+                            )
+                          : Container(
+                              height: 60,
+                              width: 80,
+                              color: Colors.grey[300],
+                              child: const Icon(Icons.videocam, size: 24),
+                            ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            widget.videoName,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                        ),
-                      ],
+                          Text(
+                            'Key: ${widget.videoKey.substring(0, 32)}...',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Colors.grey[500],
+                            ),
+                          ),
+                          if (_jobHistory.isNotEmpty)
+                            Text(
+                              '📋 ${_jobHistory.length} job${_jobHistory.length > 1 ? 's' : ''} processed',
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: Colors.blue[600],
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
                   ],
                 ),
               ),
               const SizedBox(height: 16),
 
-              // Session Name
-              TextFormField(
-                controller: _sessionNameController,
-                decoration: const InputDecoration(
-                  labelText: 'Session Name',
-                  border: OutlineInputBorder(),
+              // ─── Job History ───
+              Card(
+                elevation: 2,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
                 ),
-                validator: (val) => val == null || val.trim().isEmpty
-                    ? 'Please enter a name'
-                    : null,
-                onChanged: (_) {
-                  if (_topicNameController.text == _sessionNameController.text) {
-                    _topicNameController.text = _sessionNameController.text;
-                  }
-                },
-              ),
-              const SizedBox(height: 16),
-
-              // Topic, Date, Speaker
-              TextFormField(
-                controller: _topicNameController,
-                decoration: const InputDecoration(
-                  labelText: 'Topic Name',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                initialValue: _date,
-                decoration: const InputDecoration(
-                  labelText: 'Date (YYYY-MM-DD)',
-                  border: OutlineInputBorder(),
-                ),
-                onChanged: (val) => _date = val,
-                validator: (val) {
-                  if (val == null || val.isEmpty) return 'Date is required';
-                  final reg = RegExp(r'^\d{4}-\d{2}-\d{2}$');
-                  if (!reg.hasMatch(val)) return 'Use YYYY-MM-DD format';
-                  return null;
-                },
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: _speakerNameController,
-                decoration: const InputDecoration(
-                  labelText: 'Speaker Name',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 16),
-
-              // Input Languages - Use inputLanguages map
-              const Text('Input Languages', style: TextStyle(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                children: inputLangCodes.map((code) {
-                  final displayName = LanguageConfig.getInputLanguageName(code);
-                  return FilterChip(
-                    label: Text('$displayName ($code)'),
-                    selected: _inputLanguages.contains(code),
-                    onSelected: (selected) {
-                      _toggleInputLanguage(code);
-                    },
-                  );
-                }).toList(),
-              ),
-              const SizedBox(height: 16),
-
-              // Output Languages - Use outputLanguages map
-              const Text('Output Languages (Translation)',
-                  style: TextStyle(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                children: outputLangCodes.map((code) {
-                  final displayName = LanguageConfig.getOutputLanguageName(code);
-                  return FilterChip(
-                    label: Text('$displayName ($code)'),
-                    selected: _outputLanguages.contains(code),
-                    onSelected: (selected) {
-                      _toggleOutputLanguage(code);
-                    },
-                  );
-                }).toList(),
-              ),
-              const SizedBox(height: 16),
-
-              // Audio Languages - Use audioLanguages map
-              const Text('Generated Audio Languages',
-                  style: TextStyle(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                children: audioLangCodes.map((code) {
-                  final displayName = LanguageConfig.getAudioLanguageName(code);
-                  return FilterChip(
-                    label: Text('$displayName ($code)'),
-                    selected: _audioLanguages.contains(code),
-                    onSelected: (selected) {
-                      _toggleAudioLanguage(code);
-                    },
-                  );
-                }).toList(),
-              ),
-              const SizedBox(height: 16),
-
-              // Availability
-              _buildDropdownField<String>(
-                label: 'Availability',
-                value: _availability,
-                options: _availabilityOptions,
-                onChanged: (val) => setState(() => _availability = val!),
-              ),
-              const SizedBox(height: 16),
-
-              // Format
-              _buildDropdownField<String>(
-                label: 'Presentation Format',
-                value: _format,
-                options: _formatOptions,
-                onChanged: (val) => setState(() => _format = val!),
-              ),
-              const SizedBox(height: 16),
-
-              // Smart Chaptering
-              _buildDropdownField<String>(
-                label: 'Smart Chaptering',
-                value: _smartChaptering,
-                options: _chapteringOptions,
-                onChanged: (val) => setState(() => _smartChaptering = val!),
-              ),
-              const SizedBox(height: 16),
-
-              // TTS Quality Mode
-              _buildDropdownField<String>(
-                label: 'TTS Quality Mode',
-                value: _ttsQualityMode,
-                options: _ttsQualityOptions,
-                onChanged: (val) => setState(() => _ttsQualityMode = val!),
-              ),
-              const SizedBox(height: 16),
-
-              // Error Correction
-              _buildDropdownField<String>(
-                label: 'Error Correction',
-                value: _errorCorrection,
-                options: _errorCorrectionOptions,
-                onChanged: (val) => setState(() => _errorCorrection = val!),
-              ),
-              const SizedBox(height: 16),
-
-              // Post-production (multi-select)
-              _buildMultiSelectChips(
-                label: 'Shortening (Post-production)',
-                selected: _postproduction,
-                allOptions: _postproductionOptions,
-                onChanged: (newList) => setState(() => _postproduction..clear()..addAll(newList)),
-              ),
-              const SizedBox(height: 16),
-
-              // Permanent Name
-              TextFormField(
-                controller: _shortenController,
-                decoration: const InputDecoration(
-                  labelText: 'Permanent Name (alphanumeric only)',
-                  border: OutlineInputBorder(),
-                  hintText: 'Leave empty for random',
-                ),
-                validator: (val) {
-                  if (val != null && val.isNotEmpty && !RegExp(r'^[A-Za-z0-9]*$').hasMatch(val)) {
-                    return 'Only letters and numbers allowed';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 16),
-
-              // Mute & Pause
-              Row(
-                children: [
-                  Expanded(
-                    child: TextFormField(
-                      controller: _muteController,
-                      decoration: const InputDecoration(
-                        labelText: 'Notify timeout (minutes)',
-                        border: OutlineInputBorder(),
-                      ),
-                      keyboardType: TextInputType.number,
-                      validator: (val) {
-                        if (val == null || val.isEmpty) return null;
-                        if (int.tryParse(val) == null) return 'Enter a number';
-                        return null;
-                      },
+                child: Theme(
+                  data: Theme.of(context).copyWith(
+                    dividerColor: Colors.transparent,
+                  ),
+                  child: ExpansionTile(
+                    leading: Icon(
+                      Icons.history,
+                      color: _jobHistory.isNotEmpty ? Colors.blue : Colors.grey,
                     ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: TextFormField(
-                      controller: _pauseController,
-                      decoration: const InputDecoration(
-                        labelText: 'Speech segment timeout (seconds)',
-                        border: OutlineInputBorder(),
-                      ),
-                      keyboardType: TextInputType.number,
-                      validator: (val) {
-                        if (val == null || val.isEmpty) return null;
-                        if (double.tryParse(val) == null) return 'Enter a number';
-                        return null;
-                      },
+                    title: Row(
+                      children: [
+                        const Text(
+                          'Job History',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 16,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        if (_jobHistory.isNotEmpty)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.blue.shade100,
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(
+                              '${_jobHistory.length}',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.blue.shade700,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
+                    initiallyExpanded: _jobHistory.isNotEmpty,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: _isLoadingHistory
+                            ? const Center(child: CircularProgressIndicator())
+                            : _buildJobHistory(),
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
               const SizedBox(height: 16),
 
-              // Features (checkboxes)
-              const Text('Features',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-              Wrap(
-                spacing: 16,
-                children: [
-                  CheckboxListTile(
-                    title: const Text('Filter Profanity'),
-                    value: _profanityFilter,
-                    onChanged: (v) => setState(() => _profanityFilter = v!),
-                    controlAffinity: ListTileControlAffinity.leading,
-                    dense: true,
+              // ─── Expandable Settings Panel ───
+              Card(
+                elevation: 2,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Theme(
+                  data: Theme.of(context).copyWith(
+                    dividerColor: Colors.transparent,
                   ),
-                  CheckboxListTile(
-                    title: const Text('Filter Music'),
-                    value: _filterMusic,
-                    onChanged: (v) => setState(() => _filterMusic = v!),
-                    controlAffinity: ListTileControlAffinity.leading,
-                    dense: true,
+                  child: ExpansionTile(
+                    leading: Icon(
+                      _settingsExpanded ? Icons.settings : Icons.settings,
+                      color: Colors.blue,
+                    ),
+                    title: Row(
+                      children: [
+                        const Text(
+                          'Job Settings',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 16,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.shade100,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            '${_inputLanguages.length} in · ${_outputLanguages.length} out',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Colors.blue.shade700,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    initiallyExpanded: _settingsExpanded,
+                    onExpansionChanged: (expanded) {
+                      setState(() {
+                        _settingsExpanded = expanded;
+                      });
+                    },
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: _buildSettingsPanel(),
+                      ),
+                    ],
                   ),
-                  CheckboxListTile(
-                    title: const Text('Enable Summarization'),
-                    value: _enableSummarization,
-                    onChanged: (v) => setState(() => _enableSummarization = v!),
-                    controlAffinity: ListTileControlAffinity.leading,
-                    dense: true,
-                  ),
-                  CheckboxListTile(
-                    title: const Text('Enable Live Notes'),
-                    value: _enableLiveNotes,
-                    onChanged: (v) => setState(() => _enableLiveNotes = v!),
-                    controlAffinity: ListTileControlAffinity.leading,
-                    dense: true,
-                  ),
-                  CheckboxListTile(
-                    title: const Text('Enable Speaker Diarization'),
-                    value: _enableDiarization,
-                    onChanged: (v) => setState(() => _enableDiarization = v!),
-                    controlAffinity: ListTileControlAffinity.leading,
-                    dense: true,
-                  ),
-                  CheckboxListTile(
-                    title: const Text('Enable AI Assistant'),
-                    value: _enableAIAssistant,
-                    onChanged: (v) => setState(() => _enableAIAssistant = v!),
-                    controlAffinity: ListTileControlAffinity.leading,
-                    dense: true,
-                  ),
-                  CheckboxListTile(
-                    title: const Text('Save Session (logging)'),
-                    value: _saveSession,
-                    onChanged: (v) => setState(() => _saveSession = v!),
-                    controlAffinity: ListTileControlAffinity.leading,
-                    dense: true,
-                  ),
-                  CheckboxListTile(
-                    title: const Text('Distinguish unknown speakers'),
-                    value: _distinguishUnknownSpeakers,
-                    onChanged: (v) => setState(() => _distinguishUnknownSpeakers = v!),
-                    controlAffinity: ListTileControlAffinity.leading,
-                    dense: true,
-                  ),
-                ],
+                ),
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: 16),
 
-              // Connect / Token section
+              // ─── Connect / Token section ───
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
@@ -1838,7 +2535,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ),
               const SizedBox(height: 16),
 
-              // Start Processing
+              // ─── Start Processing ───
               ElevatedButton(
                 onPressed: _isSubmitting ? null : _submitJob,
                 style: ElevatedButton.styleFrom(
@@ -1853,10 +2550,10 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                     : const Text('Start Processing'),
               ),
               
-              // Output check section
+              // ─── Output check section ───
               _buildOutputCheckSection(),
               
-              // Response display
+              // ─── Response display ───
               _buildResponseDisplay(),
             ],
           ),

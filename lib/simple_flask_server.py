@@ -26,6 +26,7 @@ from docx.shared import Pt, RGBColor
 has_bs4 = False
 try:
     from bs4 import BeautifulSoup
+
     has_bs4 = True
 except ImportError:
     logging.warning("BeautifulSoup not installed. Export functions will be limited.")
@@ -184,9 +185,6 @@ def process_job(job_id):
             job["segments"] = generate_mock_segments()
 
 
-# ─── VIDEO THUMBNAIL GENERATION ────────────────────────────────────────
-
-
 def generate_video_thumbnail(video_path, thumbnail_path, time_offset=1.0):
     """
     Generate a thumbnail from a video file using ffmpeg.
@@ -194,7 +192,6 @@ def generate_video_thumbnail(video_path, thumbnail_path, time_offset=1.0):
     """
     try:
         subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
-
         cmd = [
             "ffmpeg",
             "-i",
@@ -210,17 +207,13 @@ def generate_video_thumbnail(video_path, thumbnail_path, time_offset=1.0):
             "-y",
             thumbnail_path,
         ]
-
         result = subprocess.run(
             cmd, capture_output=True, text=True, check=False, timeout=30
         )
-
         if result.returncode == 0 and os.path.exists(thumbnail_path):
             return True
-        else:
-            logging.warning("FFmpeg failed: %s", result.stderr)
-            return False
-
+        logging.warning("FFmpeg failed: %s", result.stderr)
+        return False
     except subprocess.TimeoutExpired:
         logging.warning("FFmpeg timeout generating thumbnail")
         return False
@@ -247,7 +240,6 @@ def get_video_metadata(video_path):
             "json",
             video_path,
         ]
-
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=10, check=False
         )
@@ -257,14 +249,12 @@ def get_video_metadata(video_path):
             if streams:
                 stream = streams[0]
                 duration = float(stream.get("duration", 120.0))
-
                 fps_str = stream.get("r_frame_rate", "30/1")
                 if "/" in fps_str:
                     num, den = fps_str.split("/")
                     fps = float(num) / float(den) if float(den) > 0 else 30.0
                 else:
                     fps = float(fps_str)
-
                 return duration, fps
     except (
         subprocess.SubprocessError,
@@ -275,11 +265,7 @@ def get_video_metadata(video_path):
         OSError,
     ) as e:
         logging.warning("Failed to get video metadata: %s", e)
-
     return 120.0, 30.0
-
-
-# ─── CURL DOWNLOAD FUNCTIONS ──────────────────────────────────────────
 
 
 def curl_download(url, output_path, token):
@@ -305,16 +291,12 @@ def curl_download(url, output_path, token):
             output_path,
             url,
         ]
-
         subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
-
         if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
             return True
-        else:
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            return False
-
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return False
     except subprocess.TimeoutExpired as e:
         logging.warning("Curl timeout for %s: %s", url, str(e))
         return False
@@ -347,16 +329,12 @@ def curl_download_with_headers(url, output_path, token):
             output_path,
             url,
         ]
-
         subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
-
         if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
             return True
-        else:
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            return False
-
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return False
     except subprocess.TimeoutExpired as e:
         logging.warning("Curl timeout for %s: %s", url, str(e))
         return False
@@ -369,10 +347,8 @@ def extract_text_from_file(file_path):
     """Extract transcript text from a file."""
     if not os.path.exists(file_path):
         return None
-
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         content = f.read()
-
     try:
         data = json.loads(content)
         text = extract_text_from_json(data)
@@ -380,15 +356,12 @@ def extract_text_from_file(file_path):
             return text
     except json.JSONDecodeError:
         pass
-
     if file_path.endswith((".vtt", ".srt")):
         text = extract_text_from_subtitle(content)
         if text:
             return text
-
     if content and len(content) > 10:
         return content
-
     return None
 
 
@@ -398,7 +371,6 @@ def extract_text_from_json(data):
         for key in ["text", "content", "transcript", "seq"]:
             if key in data and data[key] and isinstance(data[key], str):
                 return data[key]
-
         if "messages" in data and isinstance(data["messages"], list):
             texts = []
             for msg in data["messages"]:
@@ -408,7 +380,6 @@ def extract_text_from_json(data):
                         texts.append(text)
             if texts:
                 return "\n".join(texts)
-
         if "data" in data and isinstance(data["data"], list):
             texts = []
             for item in data["data"]:
@@ -417,13 +388,11 @@ def extract_text_from_json(data):
                     texts.append(text)
             if texts:
                 return "\n".join(texts)
-
         for key, value in data.items():
             if isinstance(value, (dict, list)):
                 text = extract_text_from_json(value)
                 if text:
                     return text
-
     elif isinstance(data, list):
         texts = []
         for item in data:
@@ -432,7 +401,6 @@ def extract_text_from_json(data):
                 texts.append(text)
         if texts:
             return "\n".join(texts)
-
     return None
 
 
@@ -470,7 +438,6 @@ def get_actual_file_url(session_id, filename, html_content=None):
                 if url.startswith("/"):
                     url = f"{INTERNAL_SERVER_URL}{url}"
                 return url
-
         if filename.startswith("subtitles_") and filename.endswith(".vtt"):
             label = filename.replace("subtitles_", "").replace(".vtt", "")
             match = re.search(
@@ -481,7 +448,6 @@ def get_actual_file_url(session_id, filename, html_content=None):
                 if url.startswith("/"):
                     url = f"{INTERNAL_SERVER_URL}{url}"
                 return url
-
         if filename.endswith(".wav"):
             match = re.search(r'<source src="([^"]+)"[^>]*type="audio/', html_content)
             if match:
@@ -489,21 +455,16 @@ def get_actual_file_url(session_id, filename, html_content=None):
                 if url.startswith("/"):
                     url = f"{INTERNAL_SERVER_URL}{url}"
                 return url
-
     if filename == "messages.json":
         return f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/messages.json"
-
     if filename.endswith(".vtt"):
         label = filename.replace(".vtt", "")
         return f"{INTERNAL_SERVER_URL}/archivemedia/{session_id}/vtt/{label}"
-
     if filename == "video.mp4":
         return f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/video.mp4"
-
     if filename.endswith(".wav"):
         encoded_name = filename.replace(" ", "%20")
         return f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/{encoded_name}"
-
     encoded_name = filename.replace(" ", "%20")
     return f"{INTERNAL_SERVER_URL}/archivesession/{session_id}/{encoded_name}"
 
@@ -600,6 +561,20 @@ def download_session_files(session_id, token):
     return len(files) > 0
 
 
+def safe_float(value, default=0.0):
+    """Safely convert a value to float, handling strings and None."""
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+    return default
+
+
 def extract_transcripts_from_messages(messages_path):
     """Extract transcripts from messages.json file with proper structure handling."""
     if not os.path.exists(messages_path) or os.path.getsize(messages_path) < 100:
@@ -610,7 +585,6 @@ def extract_transcripts_from_messages(messages_path):
             messages_data = json.load(f)
 
         transcripts = []
-
         language_map = {}
         numeric_language_map = {}
 
@@ -676,7 +650,9 @@ def extract_transcripts_from_messages(messages_path):
                         start_val = msg_data.get("start", 0)
                         end_val = msg_data.get("end", 0)
                         try:
-                            start_float = float(start_val) if start_val is not None else 0.0
+                            start_float = (
+                                float(start_val) if start_val is not None else 0.0
+                            )
                         except (ValueError, TypeError):
                             start_float = 0.0
                         try:
@@ -692,6 +668,13 @@ def extract_transcripts_from_messages(messages_path):
                             "markup": msg_data.get("markup"),
                             "words": msg_data.get("words"),
                             "word_id": msg_data.get("word_id"),
+                            "source_tokens": msg_data.get("sourceTokens"),
+                            "speaker_name": msg_data.get("speakerName"),
+                            "refined_sentence_cluster": msg_data.get(
+                                "refined_sentence_cluster"
+                            ),
+                            "unstable": msg_data.get("unstable", False),
+                            "message_id": msg_data.get("message_id"),
                         }
 
                         if existing:
@@ -711,7 +694,6 @@ def extract_transcripts_from_messages(messages_path):
                             )
 
         organized_transcripts = organize_transcripts(transcripts)
-
         return organized_transcripts
 
     except json.JSONDecodeError as e:
@@ -733,13 +715,13 @@ def extract_language_from_sender(sender, lang_id, numeric_language_map):
             return numeric_language_map[num_id]
         return f"Transcript (Original ASR - Language {lang_id})"
 
-    elif sender.startswith("mt:"):
+    if sender.startswith("mt:"):
         num_id = sender.replace("mt:", "")
         if num_id in numeric_language_map:
             return f"{numeric_language_map[num_id]} Translation"
         return f"Translation (Language {lang_id})"
 
-    elif sender.startswith("textstructurer:0_"):
+    if sender.startswith("textstructurer:0_"):
         lang_code = sender.replace("textstructurer:0_", "")
         language_names = {
             "en": "English",
@@ -767,7 +749,7 @@ def extract_language_from_sender(sender, lang_id, numeric_language_map):
             return f"Transcript (Structured - {language_names[lang_code]})"
         return f"Transcript (Structured - {lang_code})"
 
-    elif sender.startswith("saasr"):
+    if sender.startswith("saasr"):
         return f"Transcript (SAASR - Language {lang_id})"
 
     language_names = {
@@ -829,20 +811,19 @@ def get_language_name_from_sender(sender, lang_id):
 
     if sender.startswith("asr:"):
         return f"Transcript (Original ASR - Language {lang_id})"
-    elif sender.startswith("mt:"):
+    if sender.startswith("mt:"):
         return f"Translation (Language {lang_id})"
-    elif sender.startswith("textstructurer:0_"):
+    if sender.startswith("textstructurer:0_"):
         lang_code = sender.replace("textstructurer:0_", "")
         if lang_code in language_names:
             return f"Transcript (Structured - {language_names[lang_code]})"
         return f"Transcript (Structured - {lang_code})"
-    elif sender.startswith("saasr"):
+    if sender.startswith("saasr"):
         return f"Transcript (SAASR - Language {lang_id})"
-    else:
-        for code, name in language_names.items():
-            if f"_{code}" in sender or f":{code}" in sender:
-                return f"Transcript ({name})"
-        return f"Transcript (Language {lang_id})"
+    for code, name in language_names.items():
+        if f"_{code}" in sender or f":{code}" in sender:
+            return f"Transcript ({name})"
+    return f"Transcript (Language {lang_id})"
 
 
 def organize_transcripts(transcripts):
@@ -862,6 +843,9 @@ def organize_transcripts(transcripts):
                 "summaries": [],
                 "post_edited": [],
                 "notes": [],
+                "global_summaries": [],
+                "speakers": {},
+                "paragraph_breaks": [],
             }
         if organized[lang]["text"]:
             organized[lang]["text"] += "\n"
@@ -870,21 +854,23 @@ def organize_transcripts(transcripts):
         if "segments" in t:
             organized[lang]["segments"].extend(t.get("segments", []))
 
+    for lang, transcript in organized.items():
+        if "segments" in transcript:
+            transcript["segments"].sort(key=lambda x: safe_float(x.get("start", 0)))
+
     result = list(organized.values())
 
     def sort_key(item):
         lang = item.get("language", "")
         if "Original" in lang:
             return 0
-        elif "Structured" in lang:
+        if "Structured" in lang:
             return 1
-        elif "Translation" in lang:
+        if "Translation" in lang:
             return 2
-        else:
-            return 3
+        return 3
 
     result.sort(key=sort_key)
-
     return result
 
 
@@ -895,17 +881,7 @@ def save_transcripts_to_files(session_dir, transcripts):
 
     json_path = os.path.join(session_dir, "transcripts.json")
     with open(json_path, "w", encoding="utf-8") as f:
-        json_data = []
-        for t in transcripts:
-            clean_t = {
-                "language": t.get("language", "Unknown"),
-                "source_file": t.get("source_file", ""),
-                "text": t.get("text", ""),
-            }
-            if "segments" in t:
-                clean_t["segments"] = t.get("segments", [])
-            json_data.append(clean_t)
-        json.dump(json_data, f, ensure_ascii=False, indent=2)
+        json.dump(transcripts, f, ensure_ascii=False, indent=2)
     logging.info("Saved transcripts to %s", json_path)
 
     txt_path = os.path.join(session_dir, "transcript.txt")
@@ -913,39 +889,31 @@ def save_transcripts_to_files(session_dir, transcripts):
         for t in transcripts:
             f.write(f"{'=' * 60}\n")
             f.write(f"Language: {t.get('language', 'Unknown')}\n")
-            f.write(f"Source: {t.get('source_file', 'N/A')}\n")
-            if "sender" in t:
-                f.write(f"Sender: {t.get('sender', 'N/A')}\n")
-            f.write(f"{'=' * 60}\n")
-            f.write(t.get("text", ""))
-            f.write("\n\n")
+            f.write(f"{'=' * 60}\n\n")
+            segments = t.get("segments", [])
+            segments.sort(key=lambda x: safe_float(x.get("start", 0)))
+            for seg in segments:
+                start = safe_float(seg.get("start", 0))
+                end = safe_float(seg.get("end", 0))
+                sender = seg.get("sender", "")
+                text = seg.get("text", "")
+                msg_markup = seg.get("markup", "")
+                # Skip empty segments but don't skip based on <br> tags
+                if not text or not text.strip():
+                    continue
+                if msg_markup:
+                    f.write(
+                        f"[{start:.1f}s - {end:.1f}s] [{sender}] [{msg_markup}] {text}\n"
+                    )
+                else:
+                    f.write(f"[{start:.1f}s - {end:.1f}s] [{sender}] {text}\n")
+            f.write("\n")
     logging.info("Saved plain text to %s", txt_path)
-
-
-# ─── HELPER: SAFE FLOAT CONVERSION ────────────────────────────────────
-
-
-def safe_float(value, default=0.0):
-    """Safely convert a value to float, handling strings and None."""
-    if value is None:
-        return default
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except (ValueError, TypeError):
-            return default
-    return default
-
-
-# ─── STRUCTURED EXPORT FUNCTIONS ──────────────────────────────────────
 
 
 def extract_structured_data_from_session(session_dir, language_filter=None):
     """
-    Extract fully structured data from a session including chapters, summaries,
-    speaker tags, and post-edited content.
+    Extract fully structured data from a session matching the window view.
     """
     json_path = os.path.join(session_dir, "transcripts.json")
     if not os.path.exists(json_path):
@@ -955,11 +923,12 @@ def extract_structured_data_from_session(session_dir, language_filter=None):
         all_transcripts = json.load(f)
 
     if language_filter:
-        transcripts = [t for t in all_transcripts if t.get("language") == language_filter]
+        transcripts = [
+            t for t in all_transcripts if t.get("language") == language_filter
+        ]
     else:
         transcripts = all_transcripts
 
-    # Try to load messages.json for richer structured data
     messages_path = os.path.join(session_dir, "messages.json")
     structured_messages = []
     if os.path.exists(messages_path):
@@ -970,7 +939,11 @@ def extract_structured_data_from_session(session_dir, language_filter=None):
                 for item in messages_data:
                     if isinstance(item, list) and len(item) >= 2:
                         try:
-                            msg_data = json.loads(item[1]) if isinstance(item[1], str) else item[1]
+                            msg_data = (
+                                json.loads(item[1])
+                                if isinstance(item[1], str)
+                                else item[1]
+                            )
                             if isinstance(msg_data, dict):
                                 structured_messages.append(msg_data)
                         except (json.JSONDecodeError, TypeError):
@@ -978,7 +951,6 @@ def extract_structured_data_from_session(session_dir, language_filter=None):
         except (json.JSONDecodeError, TypeError, OSError):
             pass
 
-    # Build structured data
     structured_data = {
         "transcripts": [],
         "chapters": [],
@@ -987,19 +959,22 @@ def extract_structured_data_from_session(session_dir, language_filter=None):
         "post_edited": [],
         "notes": [],
         "global_summaries": [],
+        "paragraph_breaks": [],
     }
 
     for t in transcripts:
         transcript_entry = {
             "language": t.get("language", "Unknown"),
             "text": t.get("text", ""),
-            "segments": t.get("segments", []),
+            "segments": sorted(
+                t.get("segments", []), key=lambda x: safe_float(x.get("start", 0))
+            ),
             "sender": t.get("sender", ""),
         }
         structured_data["transcripts"].append(transcript_entry)
 
-    # Extract chapters, summaries, speaker info from structured messages
-    for msg in structured_messages:
+    chapter_stack = []
+    for msg in sorted(structured_messages, key=lambda x: safe_float(x.get("start", 0))):
         markup = msg.get("markup")
         sender = msg.get("sender", "")
         seq = msg.get("seq", "")
@@ -1007,49 +982,67 @@ def extract_structured_data_from_session(session_dir, language_filter=None):
         end = safe_float(msg.get("end", 0))
 
         if markup == "chapterBreak":
-            structured_data["chapters"].append({
+            chapter = {
                 "start": start,
                 "end": end,
                 "index": len(structured_data["chapters"]),
-            })
-        elif markup == "heading":
-            if structured_data["chapters"]:
-                structured_data["chapters"][-1]["heading"] = seq
+                "heading": "",
+                "segments": [],
+            }
+            structured_data["chapters"].append(chapter)
+            chapter_stack.append(chapter)
+
+        elif markup == "heading" and chapter_stack:
+            chapter_stack[-1]["heading"] = seq
+
+        elif markup == "paragraphBreak":
+            structured_data["paragraph_breaks"].append({"start": start, "end": end})
+
         elif markup == "summary":
-            structured_data["summaries"].append({
-                "text": seq,
-                "start": start,
-                "end": end,
-                "sender": sender,
-            })
+            structured_data["summaries"].append(
+                {
+                    "text": seq,
+                    "start": start,
+                    "end": end,
+                    "sender": sender,
+                }
+            )
+
         elif markup == "postedited":
             compression_rate = "90"
-            if ':' in sender:
-                parts = sender.split(':')
-                if len(parts) > 1 and '_' in parts[1]:
-                    compression_rate = parts[1].split('_')[0]
-            structured_data["post_edited"].append({
-                "text": seq,
-                "start": start,
-                "end": end,
-                "compression_rate": compression_rate,
-                "sender": sender,
-            })
-        elif markup == "notes":
-            structured_data["notes"].append({
-                "text": seq,
-                "start": start,
-                "end": end,
-                "nested_level": msg.get("nested_level", 0),
-                "chapter_index": msg.get("chapter_index", 0),
-            })
-        elif markup == "global_summary":
-            structured_data["global_summaries"].append({
-                "text": seq,
-                "sender": sender,
-            })
+            if ":" in sender:
+                parts = sender.split(":")
+                if len(parts) > 1 and "_" in parts[1]:
+                    compression_rate = parts[1].split("_")[0]
+            structured_data["post_edited"].append(
+                {
+                    "text": seq,
+                    "start": start,
+                    "end": end,
+                    "compression_rate": compression_rate,
+                    "sender": sender,
+                }
+            )
 
-        # Extract speaker info from refined_sentence_cluster
+        elif markup == "notes":
+            structured_data["notes"].append(
+                {
+                    "text": seq,
+                    "start": start,
+                    "end": end,
+                    "nested_level": msg.get("nested_level", 0),
+                    "chapter_index": msg.get("chapter_index", 0),
+                }
+            )
+
+        elif markup == "global_summary":
+            structured_data["global_summaries"].append(
+                {
+                    "text": seq,
+                    "sender": sender,
+                }
+            )
+
         if "refined_sentence_cluster" in msg:
             speaker = msg.get("refined_sentence_cluster")
             if speaker:
@@ -1060,14 +1053,395 @@ def extract_structured_data_from_session(session_dir, language_filter=None):
                     "last_seen": datetime.datetime.now().isoformat(),
                 }
 
+    for transcript in structured_data["transcripts"]:
+        for seg in transcript.get("segments", []):
+            seg_start = safe_float(seg.get("start", 0))
+            for ch in structured_data["chapters"]:
+                ch_start = safe_float(ch.get("start", 0))
+                ch_end = safe_float(ch.get("end", 0))
+                if ch_start <= seg_start < ch_end or (
+                    ch == structured_data["chapters"][-1] and seg_start >= ch_start
+                ):
+                    if "segments" not in ch:
+                        ch["segments"] = []
+                    ch["segments"].append(seg)
+                    break
+
     return structured_data
 
 
+# ─── HELPER FUNCTIONS FOR EXPORT ──────────────────────────────────────
+
+
+def clean_html_tags(text):
+    """Remove HTML tags only, preserve everything else including music notes."""
+    if not text:
+        return ""
+    # Remove HTML tags only (replace with space)
+    clean = re.sub(r"<[^>]+>", " ", text)
+    # Remove multiple spaces (but keep single spaces)
+    clean = re.sub(r"\s+", " ", clean)
+    # Trim leading/trailing spaces
+    return clean.strip()
+
+
+def escape_rtf(text):
+    """Escape special characters for RTF format, preserving Unicode characters."""
+    if not text:
+        return ""
+    # Escape backslashes and braces
+    escaped = text.replace("\\", "\\\\")
+    escaped = escaped.replace("{", "\\{")
+    escaped = escaped.replace("}", "\\}")
+    # Handle Unicode characters (preserve them)
+    result = []
+    for char in escaped:
+        code = ord(char)
+        if code > 127:
+            result.append(f"\\u{code}?")
+        else:
+            result.append(char)
+    return "".join(result)
+
+
+def get_paragraph_number(sender):
+    """
+    Convert textstructurer: tags to sequential paragraph numbers.
+    Only textstructurer: tags get numbers.
+    """
+    if not sender:
+        return 0
+
+    # Only textstructurer gets paragraph numbers
+    if sender.startswith("textstructurer:"):
+        if ":" in sender:
+            parts = sender.split(":")
+            if len(parts) >= 2:
+                second_part = parts[1]
+                match = re.search(r"^(\d+)", second_part)
+                if match:
+                    return int(match.group(1)) + 1
+    return 0
+
+
+def is_asr_or_mt(sender):
+    """Check if sender is ASR or MT type."""
+    if not sender:
+        return False
+    return (
+        sender.startswith("asr:")
+        or sender.startswith("mt:")
+        or sender.startswith("translation:")
+    )
+
+
+def is_textstructurer(sender):
+    """Check if sender is textstructurer type."""
+    if not sender:
+        return False
+    return sender.startswith("textstructurer:")
+
+
+def is_summarizer(sender):
+    """Check if sender is summarizer type."""
+    if not sender:
+        return False
+    return sender.startswith("summarizer:")
+
+
+def format_sender_for_export(sender):
+    """
+    Format sender tag for export:
+    - textstructurer: -> [1], [2], [3] (paragraph numbers)
+    - asr: and mt: -> plain text (no marker)
+    - Other senders -> [sender]
+    """
+    if not sender:
+        return ""
+
+    # textstructurer gets paragraph numbers
+    if is_textstructurer(sender):
+        num = get_paragraph_number(sender)
+        if num > 0:
+            return f"[{num}]"
+
+    # asr and mt are plain text - return nothing (they're just markers)
+    if is_asr_or_mt(sender):
+        return ""
+
+    # Other senders (summarizer, etc.) keep their name
+    if is_summarizer(sender):
+        return f"[{sender}]"
+
+    return f"[{sender}]"
+
+
+def format_text_for_export(text, sender):
+    """
+    Format text based on sender type:
+    - textstructurer: -> keep as is (paragraph text)
+    - summarizer: -> format with "Summary:" prefix
+    - asr: / mt: -> plain text
+    """
+    clean_text = clean_html_tags(text)
+    if not clean_text:
+        return ""
+
+    # Summarizer gets special formatting
+    if is_summarizer(sender):
+        return f"Summary: {clean_text}"
+
+    # textstructurer is paragraph text
+    if is_textstructurer(sender):
+        return clean_text
+
+    # asr and mt are plain text
+    return clean_text
+
+
+def extract_lang_code(language_name):
+    """Extract language code from language name."""
+    if not language_name:
+        return None
+    for code in [
+        "en",
+        "de",
+        "fr",
+        "es",
+        "it",
+        "pt",
+        "nl",
+        "ru",
+        "ja",
+        "ko",
+        "zh",
+        "ar",
+        "hi",
+        "pl",
+        "tr",
+        "uk",
+        "vi",
+        "th",
+        "id",
+        "ms",
+    ]:
+        if f"({code})" in language_name or f" - {code}" in language_name:
+            return code
+    return None
+
+
+def filter_summaries_by_language(summaries, lang_code):
+    """Filter summaries by language code."""
+    if not lang_code:
+        return summaries
+    filtered = []
+    for s in summaries:
+        sender = s.get("sender", "")
+        if f"_{lang_code}" in sender:
+            filtered.append(s)
+    return filtered if filtered else summaries
+
+
+def format_structured_text(structured_data, language_filter=None):
+    """Format structured data to match the website view, preserving music notes."""
+    if not structured_data:
+        return "No structured data available."
+
+    lines = []
+
+    # Get the language-specific data
+    transcripts_data = structured_data.get("transcripts", [])
+
+    # If we have a language filter, find the specific transcript
+    selected_transcript = None
+    if language_filter:
+        for t in transcripts_data:
+            if t.get("language") == language_filter:
+                selected_transcript = t
+                break
+        if not selected_transcript and transcripts_data:
+            selected_transcript = transcripts_data[0]
+    else:
+        # No filter - use first transcript
+        if transcripts_data:
+            selected_transcript = transcripts_data[0]
+
+    # Extract language code for filename
+    lang_code = None
+    if selected_transcript:
+        lang = selected_transcript.get("language", "")
+        lang_code = extract_lang_code(lang)
+
+    # Filter summaries by language
+    all_summaries = structured_data.get("summaries", [])
+    filtered_summaries = filter_summaries_by_language(all_summaries, lang_code)
+
+    # Filter global summaries
+    all_global_summaries = structured_data.get("global_summaries", [])
+    filtered_global_summaries = filter_summaries_by_language(
+        all_global_summaries, lang_code
+    )
+
+    # Filter post-edited
+    all_post_edited = structured_data.get("post_edited", [])
+    filtered_post_edited = filter_summaries_by_language(all_post_edited, lang_code)
+
+    # Table of Contents (only if chapters exist)
+    if structured_data.get("chapters") and len(structured_data["chapters"]) > 1:
+        lines.append("TABLE OF CONTENTS")
+        lines.append("-" * 40)
+        for ch in structured_data["chapters"]:
+            idx = ch.get("index", 0) + 1
+            heading = ch.get("heading", "")
+            if heading:
+                lines.append(f"  {idx}. {heading}")
+            else:
+                lines.append(f"  {idx}. Chapter {idx}")
+        lines.append("")
+
+    # Transcript with chapters
+    has_chapters = (
+        structured_data.get("chapters") and len(structured_data["chapters"]) > 0
+    )
+
+    # Track paragraph numbering for textstructurer
+    paragraph_counter = 0
+
+    if has_chapters:
+        for ch in structured_data["chapters"]:
+            idx = ch.get("index", 0) + 1
+            heading = ch.get("heading", "")
+            if heading:
+                lines.append(f"--- Chapter {idx}: {heading} ---")
+            else:
+                lines.append(f"--- Chapter {idx} ---")
+
+            segments = ch.get("segments", [])
+            current_sender = None
+            has_content = False
+
+            for seg in segments:
+                text = seg.get("text", "")
+                sender = seg.get("sender", "")
+
+                # Only clean HTML tags, preserve everything else
+                clean_text = clean_html_tags(text)
+                if not clean_text:
+                    continue
+
+                has_content = True
+
+                # For textstructurer: show as paragraph with number
+                if is_textstructurer(sender):
+                    paragraph_counter += 1
+                    lines.append(f"[{paragraph_counter}]")
+                    lines.append(clean_text)
+                    lines.append("")  # Single blank line between paragraphs
+                # For asr and mt: show as plain text (no marker)
+                elif is_asr_or_mt(sender):
+                    if clean_text:
+                        lines.append(clean_text)
+                # For summarizer: show with "Summary:" prefix
+                elif is_summarizer(sender):
+                    lines.append(f"Summary: {clean_text}")
+                # For other senders: show with sender name
+                else:
+                    if sender != current_sender and sender:
+                        current_sender = sender
+                        lines.append(f"[{sender}]")
+                    lines.append(clean_text)
+
+            if not has_content:
+                lines.append("(No content yet)")
+
+            lines.append("")  # Single blank line between chapters
+    else:
+        # No chapters - show all transcripts
+        if selected_transcript:
+            lang = selected_transcript.get("language", "Unknown")
+            lines.append(f"--- {lang} ---")
+            segments = selected_transcript.get("segments", [])
+            current_sender = None
+
+            for seg in segments:
+                text = seg.get("text", "")
+                sender = seg.get("sender", "")
+
+                clean_text = clean_html_tags(text)
+                if not clean_text:
+                    continue
+
+                if is_textstructurer(sender):
+                    paragraph_counter += 1
+                    lines.append(f"[{paragraph_counter}]")
+                    lines.append(clean_text)
+                    lines.append("")
+                elif is_asr_or_mt(sender):
+                    if clean_text:
+                        lines.append(clean_text)
+                elif is_summarizer(sender):
+                    lines.append(f"Summary: {clean_text}")
+                else:
+                    if sender != current_sender and sender:
+                        current_sender = sender
+                        lines.append(f"[{sender}]")
+                    lines.append(clean_text)
+
+    # Summaries (filtered by language) - formatted differently
+    if filtered_summaries:
+        lines.append("=" * 60)
+        lines.append("SUMMARIES")
+        lines.append("-" * 40)
+        for s in filtered_summaries:
+            text = clean_html_tags(s.get("text", ""))
+            lines.append(f"  📋 {text}")
+        lines.append("")
+
+    # Global Summaries (filtered by language) - formatted differently
+    if filtered_global_summaries:
+        lines.append("=" * 60)
+        lines.append("GLOBAL SUMMARIES")
+        lines.append("-" * 40)
+        for gs in filtered_global_summaries:
+            text = clean_html_tags(gs.get("text", ""))
+            lines.append(f"  🌐 {text}")
+        lines.append("")
+
+    # Post-edited content (filtered by language)
+    if filtered_post_edited:
+        lines.append("=" * 60)
+        lines.append("POST-EDITED CONTENT")
+        lines.append("-" * 40)
+        for pe in filtered_post_edited:
+            rate = pe.get("compression_rate", "N/A")
+            text = clean_html_tags(pe.get("text", ""))
+            lines.append(f"  [Compression: {rate}%] {text}")
+        lines.append("")
+
+    # Remove trailing empty lines and join with single newlines
+    return "\n".join(lines).strip()
+
+
+def export_structured_txt(session_id, session_dir, language_filter=None):
+    """Export structured data as plain text matching the window view."""
+    structured_data = extract_structured_data_from_session(session_dir, language_filter)
+    if not structured_data:
+        return io.BytesIO(b"No structured data available.")
+
+    text = format_structured_text(structured_data, language_filter)
+
+    header = "=" * 80 + "\n"
+    header += f"SESSION: {session_id}\n"
+    if language_filter:
+        header += f"FILTER: {language_filter}\n"
+    header += f"Export Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    header += "=" * 80 + "\n\n"
+
+    return io.BytesIO((header + text).encode("utf-8"))
+
+
 def export_structured_docx(session_id, session_dir, language_filter=None):
-    """
-    Export session data as DOCX with full structure including chapters, summaries,
-    speaker tags, and post-edited content.
-    """
+    """Export session data as DOCX matching the window view."""
     structured_data = extract_structured_data_from_session(session_dir, language_filter)
     if not structured_data:
         doc = Document()
@@ -1076,128 +1450,219 @@ def export_structured_docx(session_id, session_dir, language_filter=None):
 
     doc = Document()
 
-    # Title
     title = f"Session: {session_id}"
     if language_filter:
         title += f" - {language_filter}"
     doc.add_heading(title, 0)
 
-    # Metadata
     doc.add_paragraph(f"Session ID: {session_id}")
     doc.add_paragraph(
         f"Export Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     )
-    doc.add_paragraph(f"Total Languages: {len(structured_data['transcripts'])}")
-    doc.add_paragraph(f"Total Chapters: {len(structured_data['chapters'])}")
-    doc.add_paragraph(f"Total Summaries: {len(structured_data['summaries'])}")
-    doc.add_paragraph(f"Total Speakers: {len(structured_data['speakers'])}")
     doc.add_paragraph("")
 
-    # ─── SPEAKERS ──────────────────────────────────────────────────────
-    if structured_data["speakers"]:
-        doc.add_heading("Speakers", level=1)
-        for speaker_name in sorted(structured_data["speakers"].keys()):
-            p = doc.add_paragraph()
-            run = p.add_run("• ")
-            run.bold = True
-            p.add_run(speaker_name)
-        doc.add_paragraph("")
+    # Get language-specific data
+    transcripts_data = structured_data.get("transcripts", [])
+    selected_transcript = None
+    lang_code = None
 
-    # ─── CHAPTERS ──────────────────────────────────────────────────────
-    if structured_data["chapters"]:
+    if language_filter:
+        for t in transcripts_data:
+            if t.get("language") == language_filter:
+                selected_transcript = t
+                break
+        if not selected_transcript and transcripts_data:
+            selected_transcript = transcripts_data[0]
+    else:
+        if transcripts_data:
+            selected_transcript = transcripts_data[0]
+
+    # Extract language code
+    if selected_transcript:
+        lang = selected_transcript.get("language", "")
+        lang_code = extract_lang_code(lang)
+
+    # Filter summaries by language
+    all_summaries = structured_data.get("summaries", [])
+    filtered_summaries = filter_summaries_by_language(all_summaries, lang_code)
+
+    # Filter global summaries
+    all_global_summaries = structured_data.get("global_summaries", [])
+    filtered_global_summaries = filter_summaries_by_language(
+        all_global_summaries, lang_code
+    )
+
+    # Filter post-edited
+    all_post_edited = structured_data.get("post_edited", [])
+    filtered_post_edited = filter_summaries_by_language(all_post_edited, lang_code)
+
+    # Table of Contents
+    if structured_data.get("chapters") and len(structured_data["chapters"]) > 1:
         doc.add_heading("Table of Contents", level=1)
-        for i, chapter in enumerate(structured_data["chapters"]):
+        for ch in structured_data["chapters"]:
+            idx = ch.get("index", 0) + 1
+            heading = ch.get("heading", "")
             p = doc.add_paragraph()
-            run = p.add_run(f"Chapter {i + 1}")
-            run.bold = True
-            if "heading" in chapter:
-                p.add_run(f": {chapter['heading']}")
-            start = safe_float(chapter.get("start", 0))
-            if start > 0:
-                p.add_run(f" ({start:.1f}s)")
+            p.add_run(f"{idx}. ").bold = True
+            if heading:
+                p.add_run(f"{heading}")
+            else:
+                p.add_run(f"Chapter {idx}")
         doc.add_paragraph("")
 
-    # ─── TRANSCRIPTS WITH STRUCTURE ──────────────────────────────────
-    doc.add_heading("Transcripts", level=1)
+    # Transcripts with chapters
+    doc.add_heading("Transcript", level=1)
 
-    for transcript in structured_data["transcripts"]:
-        lang = transcript.get("language", "Unknown")
-        doc.add_heading(lang, level=2)
+    has_chapters = (
+        structured_data.get("chapters") and len(structured_data["chapters"]) > 0
+    )
 
-        segments = transcript.get("segments", [])
-        if segments:
+    paragraph_counter = 0
+
+    if has_chapters:
+        for ch in structured_data["chapters"]:
+            idx = ch.get("index", 0) + 1
+            heading = ch.get("heading", "")
+            if heading:
+                doc.add_heading(f"Chapter {idx}: {heading}", level=2)
+            else:
+                doc.add_heading(f"Chapter {idx}", level=2)
+
+            segments = ch.get("segments", [])
+            current_sender = None
+            has_content = False
+
             for seg in segments:
                 text = seg.get("text", "")
-                start = safe_float(seg.get("start", 0))
-                end = safe_float(seg.get("end", 0))
                 sender = seg.get("sender", "")
-                markup = seg.get("markup", "")
 
+                if not text or not text.strip():
+                    continue
+
+                clean_text = clean_html_tags(text)
+                if not clean_text:
+                    continue
+
+                has_content = True
+
+                # textstructurer: paragraph with number
+                if is_textstructurer(sender):
+                    paragraph_counter += 1
+                    p = doc.add_paragraph()
+                    run = p.add_run(f"[{paragraph_counter}]")
+                    run.bold = True
+                    run.font.color.rgb = RGBColor(0, 102, 204)
+                    p = doc.add_paragraph()
+                    p.add_run(clean_text)
+
+                # asr and mt: plain text (no marker)
+                elif is_asr_or_mt(sender):
+                    p = doc.add_paragraph()
+                    p.add_run(clean_text)
+
+                # summarizer: with "Summary:" prefix
+                elif is_summarizer(sender):
+                    p = doc.add_paragraph()
+                    run = p.add_run("Summary: ")
+                    run.bold = True
+                    run.font.color.rgb = RGBColor(255, 165, 0)  # Orange
+                    p.add_run(clean_text)
+
+                # other senders
+                else:
+                    if sender != current_sender and sender:
+                        current_sender = sender
+                        p = doc.add_paragraph()
+                        run = p.add_run(f"[{sender}]")
+                        run.bold = True
+                        run.font.color.rgb = RGBColor(0, 102, 204)
+
+                    p = doc.add_paragraph()
+                    p.add_run(clean_text)
+
+            if not has_content:
                 p = doc.add_paragraph()
-                run = p.add_run(f"[{start:.1f}s - {end:.1f}s] ")
-                run.italic = True
-                run.font.size = Pt(9)
+                p.add_run("(No content yet)")
+                p.italic = True
+                p.font.size = Pt(10)
 
-                # Speaker tag
-                if sender:
-                    spk_run = p.add_run(f"[{sender}] ")
-                    spk_run.bold = True
-                    spk_run.font.color.rgb = RGBColor(0, 102, 204)
+            doc.add_paragraph("")
+    else:
+        # No chapters - show selected transcript
+        if selected_transcript:
+            lang = selected_transcript.get("language", "Unknown")
+            doc.add_heading(lang, level=2)
+            segments = selected_transcript.get("segments", [])
+            current_sender = None
+            for seg in segments:
+                text = seg.get("text", "")
+                sender = seg.get("sender", "")
 
-                # Text
-                text_run = p.add_run(text)
-                text_run.font.size = Pt(11)
+                if not text or not text.strip():
+                    continue
 
-                # Markup indicator
-                if markup:
-                    p.add_run(f" ({markup})").italic = True
+                clean_text = clean_html_tags(text)
+                if not clean_text:
+                    continue
 
-        else:
-            doc.add_paragraph(transcript.get("text", ""))
-        doc.add_paragraph("")
+                if is_textstructurer(sender):
+                    paragraph_counter += 1
+                    p = doc.add_paragraph()
+                    run = p.add_run(f"[{paragraph_counter}]")
+                    run.bold = True
+                    run.font.color.rgb = RGBColor(0, 102, 204)
+                    p = doc.add_paragraph()
+                    p.add_run(clean_text)
+                elif is_asr_or_mt(sender):
+                    p = doc.add_paragraph()
+                    p.add_run(clean_text)
+                elif is_summarizer(sender):
+                    p = doc.add_paragraph()
+                    run = p.add_run("Summary: ")
+                    run.bold = True
+                    run.font.color.rgb = RGBColor(255, 165, 0)
+                    p.add_run(clean_text)
+                else:
+                    if sender != current_sender and sender:
+                        current_sender = sender
+                        p = doc.add_paragraph()
+                        run = p.add_run(f"[{sender}]")
+                        run.bold = True
+                        run.font.color.rgb = RGBColor(0, 102, 204)
 
-    # ─── SUMMARIES ─────────────────────────────────────────────────────
-    if structured_data["summaries"]:
+                    p = doc.add_paragraph()
+                    p.add_run(clean_text)
+            doc.add_paragraph("")
+
+    # Summaries (filtered by language) - formatted with special style
+    if filtered_summaries:
         doc.add_heading("Summaries", level=1)
-        for summary in structured_data["summaries"]:
-            start = safe_float(summary.get("start", 0))
+        for s in filtered_summaries:
+            text = clean_html_tags(s.get("text", ""))
             p = doc.add_paragraph()
-            p.add_run(f"[{start:.1f}s] ").italic = True
-            p.add_run(summary.get("text", ""))
-            if summary.get("sender"):
-                p.add_run(f" ({summary['sender']})").italic = True
+            p.add_run("📋 ").bold = True
+            p.add_run(text)
         doc.add_paragraph("")
 
-    # ─── POST-EDITED CONTENT ──────────────────────────────────────────
-    if structured_data["post_edited"]:
-        doc.add_heading("Post-Edited Content", level=1)
-        for pe in structured_data["post_edited"]:
-            start = safe_float(pe.get("start", 0))
-            p = doc.add_paragraph()
-            p.add_run(f"[{start:.1f}s] ").italic = True
-            rate_run = p.add_run(f"Compression: {pe.get('compression_rate', 'N/A')}% ")
-            rate_run.bold = True
-            p.add_run(pe.get("text", ""))
-        doc.add_paragraph("")
-
-    # ─── GLOBAL SUMMARIES ─────────────────────────────────────────────
-    if structured_data["global_summaries"]:
+    # Global Summaries (filtered by language)
+    if filtered_global_summaries:
         doc.add_heading("Global Summaries", level=1)
-        for gs in structured_data["global_summaries"]:
+        for gs in filtered_global_summaries:
+            text = clean_html_tags(gs.get("text", ""))
             p = doc.add_paragraph()
-            p.add_run(gs.get("text", ""))
-            if gs.get("sender"):
-                p.add_run(f" ({gs['sender']})").italic = True
+            p.add_run("🌐 ").bold = True
+            p.add_run(text)
         doc.add_paragraph("")
 
-    # ─── NOTES ─────────────────────────────────────────────────────────
-    if structured_data["notes"]:
-        doc.add_heading("Notes", level=1)
-        for note in structured_data["notes"]:
-            start = safe_float(note.get("start", 0))
+    # Post-edited content (filtered by language)
+    if filtered_post_edited:
+        doc.add_heading("Post-Edited Content", level=1)
+        for pe in filtered_post_edited:
+            rate = pe.get("compression_rate", "N/A")
+            text = clean_html_tags(pe.get("text", ""))
             p = doc.add_paragraph()
-            p.add_run(f"[{start:.1f}s] ").italic = True
-            p.add_run(note.get("text", ""))
+            p.add_run(f"[Compression: {rate}%] ").bold = True
+            p.add_run(text)
         doc.add_paragraph("")
 
     doc_buffer = io.BytesIO()
@@ -1207,7 +1672,7 @@ def export_structured_docx(session_id, session_dir, language_filter=None):
 
 
 def export_structured_rtf(session_id, session_dir, language_filter=None):
-    """Export structured data as RTF with rich formatting."""
+    """Export structured data as RTF matching the window view."""
     structured_data = extract_structured_data_from_session(session_dir, language_filter)
     if not structured_data:
         return io.BytesIO(b"{\\rtf1\\ansi No structured data available.}")
@@ -1228,204 +1693,326 @@ def export_structured_rtf(session_id, session_dir, language_filter=None):
         + r"\b0\par\par"
     )
 
-    # Speakers
-    if structured_data["speakers"]:
-        rtf_parts.append(r"\b\fs26 Speakers\b0\par")
-        for speaker_name in sorted(structured_data["speakers"].keys()):
-            escaped = speaker_name.replace("\\", "\\\\")
-            rtf_parts.append(r"\bullet " + escaped + r"\par")
-        rtf_parts.append(r"\par")
+    # Get language-specific data
+    transcripts_data = structured_data.get("transcripts", [])
+    selected_transcript = None
+    lang_code = None
 
-    # Chapters
-    if structured_data["chapters"]:
+    if language_filter:
+        for t in transcripts_data:
+            if t.get("language") == language_filter:
+                selected_transcript = t
+                break
+        if not selected_transcript and transcripts_data:
+            selected_transcript = transcripts_data[0]
+    else:
+        if transcripts_data:
+            selected_transcript = transcripts_data[0]
+
+    # Extract language code
+    if selected_transcript:
+        lang = selected_transcript.get("language", "")
+        lang_code = extract_lang_code(lang)
+
+    # Filter summaries by language
+    all_summaries = structured_data.get("summaries", [])
+    filtered_summaries = filter_summaries_by_language(all_summaries, lang_code)
+
+    # Filter global summaries
+    all_global_summaries = structured_data.get("global_summaries", [])
+    filtered_global_summaries = filter_summaries_by_language(
+        all_global_summaries, lang_code
+    )
+
+    # Filter post-edited
+    all_post_edited = structured_data.get("post_edited", [])
+    filtered_post_edited = filter_summaries_by_language(all_post_edited, lang_code)
+
+    # Table of Contents
+    if structured_data.get("chapters") and len(structured_data["chapters"]) > 1:
         rtf_parts.append(r"\b\fs26 Table of Contents\b0\par")
-        for i, chapter in enumerate(structured_data["chapters"]):
-            heading = f"Chapter {i + 1}"
-            if "heading" in chapter:
-                heading += f": {chapter['heading']}"
-            start = safe_float(chapter.get("start", 0))
-            if start > 0:
-                heading += f" ({start:.1f}s)"
-            rtf_parts.append(r"\bullet " + heading.replace("\\", "\\\\") + r"\par")
+        for ch in structured_data["chapters"]:
+            idx = ch.get("index", 0) + 1
+            heading = ch.get("heading", "")
+            text = f"{idx}. "
+            if heading:
+                text += f"{heading}"
+            else:
+                text += f"Chapter {idx}"
+            rtf_parts.append(r"\bullet " + escape_rtf(text) + r"\par")
         rtf_parts.append(r"\par")
 
-    # Transcripts
-    rtf_parts.append(r"\b\fs26 Transcripts\b0\par")
-    for transcript in structured_data["transcripts"]:
-        lang = transcript.get("language", "Unknown")
-        rtf_parts.append(r"\b\fs24 " + lang + r"\b0\par")
+    # Transcripts with chapters
+    has_chapters = (
+        structured_data.get("chapters") and len(structured_data["chapters"]) > 0
+    )
 
-        segments = transcript.get("segments", [])
-        if segments:
+    paragraph_counter = 0
+
+    if has_chapters:
+        for ch in structured_data["chapters"]:
+            idx = ch.get("index", 0) + 1
+            heading = ch.get("heading", "")
+            if heading:
+                rtf_parts.append(
+                    r"\b\fs24 Chapter "
+                    + str(idx)
+                    + ": "
+                    + escape_rtf(heading)
+                    + r"\b0\par"
+                )
+            else:
+                rtf_parts.append(r"\b\fs24 Chapter " + str(idx) + r"\b0\par")
+
+            segments = ch.get("segments", [])
+            current_sender = None
+            has_content = False
+
             for seg in segments:
-                text = seg.get("text", "").replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
-                start = safe_float(seg.get("start", 0))
-                end = safe_float(seg.get("end", 0))
+                text = seg.get("text", "")
                 sender = seg.get("sender", "")
 
-                time_str = f"[{start:.1f}s - {end:.1f}s]"
-                rtf_parts.append(r"\i " + time_str + r"\i0 ")
+                clean_text = clean_html_tags(text)
+                if not clean_text:
+                    continue
 
-                if sender:
-                    rtf_parts.append(r"\b " + sender.replace("\\", "\\\\") + r" \b0")
+                has_content = True
 
-                rtf_parts.append(text + r"\par")
-        else:
-            text = transcript.get("text", "").replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
-            rtf_parts.append(text + r"\par")
-        rtf_parts.append(r"\par")
+                if is_textstructurer(sender):
+                    paragraph_counter += 1
+                    rtf_parts.append(
+                        r"\b " + escape_rtf(f"[{paragraph_counter}]") + r"\b0\par"
+                    )
+                    rtf_parts.append(escape_rtf(clean_text) + r"\par")
+                elif is_asr_or_mt(sender):
+                    rtf_parts.append(escape_rtf(clean_text) + r"\par")
+                elif is_summarizer(sender):
+                    rtf_parts.append(
+                        r"\b "
+                        + "Summary: "
+                        + r"\b0 "
+                        + escape_rtf(clean_text)
+                        + r"\par"
+                    )
+                else:
+                    if sender != current_sender and sender:
+                        current_sender = sender
+                        rtf_parts.append(
+                            r"\b " + escape_rtf(f"[{sender}]") + r"\b0\par"
+                        )
 
-    # Summaries
-    if structured_data["summaries"]:
+                    rtf_parts.append(escape_rtf(clean_text) + r"\par")
+
+            if not has_content:
+                rtf_parts.append(r"\i (No content yet)\i0\par")
+
+            rtf_parts.append(r"\par")
+    else:
+        # No chapters - show selected transcript
+        if selected_transcript:
+            lang = selected_transcript.get("language", "Unknown")
+            rtf_parts.append(r"\b\fs24 " + escape_rtf(lang) + r"\b0\par")
+            segments = selected_transcript.get("segments", [])
+            current_sender = None
+            for seg in segments:
+                text = seg.get("text", "")
+                sender = seg.get("sender", "")
+
+                clean_text = clean_html_tags(text)
+                if not clean_text:
+                    continue
+
+                if is_textstructurer(sender):
+                    paragraph_counter += 1
+                    rtf_parts.append(
+                        r"\b " + escape_rtf(f"[{paragraph_counter}]") + r"\b0\par"
+                    )
+                    rtf_parts.append(escape_rtf(clean_text) + r"\par")
+                elif is_asr_or_mt(sender):
+                    rtf_parts.append(escape_rtf(clean_text) + r"\par")
+                elif is_summarizer(sender):
+                    rtf_parts.append(
+                        r"\b "
+                        + "Summary: "
+                        + r"\b0 "
+                        + escape_rtf(clean_text)
+                        + r"\par"
+                    )
+                else:
+                    if sender != current_sender and sender:
+                        current_sender = sender
+                        rtf_parts.append(
+                            r"\b " + escape_rtf(f"[{sender}]") + r"\b0\par"
+                        )
+
+                    rtf_parts.append(escape_rtf(clean_text) + r"\par")
+            rtf_parts.append(r"\par")
+
+    # Summaries (filtered by language) - formatted with special style
+    if filtered_summaries:
         rtf_parts.append(r"\b\fs26 Summaries\b0\par")
-        for summary in structured_data["summaries"]:
-            text = summary.get("text", "").replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
-            start = safe_float(summary.get("start", 0))
-            rtf_parts.append(r"\i [" + f"{start:.1f}s]" + r"\i0 " + text + r"\par")
+        for s in filtered_summaries:
+            text = clean_html_tags(s.get("text", ""))
+            if text:
+                rtf_parts.append(r"\b " + "📋 " + r"\b0 " + escape_rtf(text) + r"\par")
         rtf_parts.append(r"\par")
 
-    # Post-edited
-    if structured_data["post_edited"]:
-        rtf_parts.append(r"\b\fs26 Post-Edited Content\b0\par")
-        for pe in structured_data["post_edited"]:
-            text = pe.get("text", "").replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
-            start = safe_float(pe.get("start", 0))
-            rate = pe.get("compression_rate", "N/A")
-            rtf_parts.append(
-                r"\i [" + f"{start:.1f}s]" + r"\i0 "
-                + r"\b Compression: " + rate + r"%\b0 " + text + r"\par"
-            )
-        rtf_parts.append(r"\par")
-
-    # Global summaries
-    if structured_data["global_summaries"]:
+    # Global Summaries (filtered by language)
+    if filtered_global_summaries:
         rtf_parts.append(r"\b\fs26 Global Summaries\b0\par")
-        for gs in structured_data["global_summaries"]:
-            text = gs.get("text", "").replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
-            rtf_parts.append(text + r"\par")
+        for gs in filtered_global_summaries:
+            text = clean_html_tags(gs.get("text", ""))
+            if text:
+                rtf_parts.append(r"\b " + "🌐 " + r"\b0 " + escape_rtf(text) + r"\par")
         rtf_parts.append(r"\par")
 
-    # Notes
-    if structured_data["notes"]:
-        rtf_parts.append(r"\b\fs26 Notes\b0\par")
-        for note in structured_data["notes"]:
-            text = note.get("text", "").replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
-            start = safe_float(note.get("start", 0))
-            rtf_parts.append(r"\i [" + f"{start:.1f}s]" + r"\i0 " + text + r"\par")
+    # Post-edited content (filtered by language)
+    if filtered_post_edited:
+        rtf_parts.append(r"\b\fs26 Post-Edited Content\b0\par")
+        for pe in filtered_post_edited:
+            rate = pe.get("compression_rate", "N/A")
+            text = clean_html_tags(pe.get("text", ""))
+            if text:
+                rtf_parts.append(
+                    r"\b [Compression: "
+                    + str(rate)
+                    + r"%]\b0 "
+                    + escape_rtf(text)
+                    + r"\par"
+                )
         rtf_parts.append(r"\par")
 
     rtf_parts.append("}")
-
-    rtf_string = "".join(rtf_parts)
-    return io.BytesIO(rtf_string.encode("utf-8"))
+    return io.BytesIO("".join(rtf_parts).encode("utf-8"))
 
 
-def export_structured_txt(session_id, session_dir, language_filter=None):
-    """Export structured data as plain text with clear formatting."""
-    structured_data = extract_structured_data_from_session(session_dir, language_filter)
-    if not structured_data:
-        return io.BytesIO(b"No structured data available.")
+def _resolve_export_language_name(session_dir, language):
+    """Return the transcript language label for export filenames."""
+    json_path = os.path.join(session_dir, "transcripts.json")
+    if not os.path.exists(json_path):
+        return "transcript"
 
-    lines = []
-    lines.append("=" * 80)
-    lines.append(f"SESSION: {session_id}")
-    if language_filter:
-        lines.append(f"FILTER: {language_filter}")
-    lines.append(f"Export Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append("=" * 80)
-    lines.append("")
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            transcripts = json.load(f)
+    except (OSError, ValueError, TypeError):
+        return "transcript"
 
-    # Speakers
-    if structured_data["speakers"]:
-        lines.append("SPEAKERS:")
-        lines.append("-" * 40)
-        for speaker_name in sorted(structured_data["speakers"].keys()):
-            lines.append(f"  • {speaker_name}")
-        lines.append("")
+    if not transcripts:
+        return "transcript"
 
-    # Chapters / TOC
-    if structured_data["chapters"]:
-        lines.append("TABLE OF CONTENTS:")
-        lines.append("-" * 40)
-        for i, chapter in enumerate(structured_data["chapters"]):
-            heading = f"Chapter {i + 1}"
-            if "heading" in chapter:
-                heading += f": {chapter['heading']}"
-            start = safe_float(chapter.get("start", 0))
-            if start > 0:
-                heading += f" ({start:.1f}s)"
-            lines.append(f"  {i + 1}. {heading}")
-        lines.append("")
+    if language:
+        for transcript in transcripts:
+            lang = str(transcript.get("language", "")).strip()
+            if not lang:
+                continue
+            if lang == language or language.lower() in lang.lower():
+                return lang
 
-    # Transcripts
-    lines.append("TRANSCRIPTS:")
-    lines.append("=" * 80)
+    first_lang = transcripts[0].get("language", "transcript")
+    return first_lang if first_lang else "transcript"
 
-    for transcript in structured_data["transcripts"]:
-        lang = transcript.get("language", "Unknown")
-        lines.append(f"\n--- {lang} ---")
-        lines.append("-" * 40)
 
-        segments = transcript.get("segments", [])
-        if segments:
-            for seg in segments:
-                text = seg.get("text", "")
-                start = safe_float(seg.get("start", 0))
-                end = safe_float(seg.get("end", 0))
-                sender = seg.get("sender", "")
+@app.route("/session_export_txt/<session_id>", methods=["GET"])
+def session_export_txt(session_id):
+    """Export all session data as structured plain text matching the window view."""
+    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    if not os.path.exists(session_dir):
+        return jsonify({"error": "Session not found"}), 404
 
-                line = f"[{start:.1f}s - {end:.1f}s]"
-                if sender:
-                    line += f" [{sender}]"
-                line += f" {text}"
-                lines.append(line)
-        else:
-            lines.append(transcript.get("text", ""))
-        lines.append("")
+    language = request.args.get("language")
+    actual_lang_name = _resolve_export_language_name(session_dir, language)
 
-    # Summaries
-    if structured_data["summaries"]:
-        lines.append("\nSUMMARIES:")
-        lines.append("-" * 40)
-        for summary in structured_data["summaries"]:
-            start = safe_float(summary.get("start", 0))
-            text = summary.get("text", "")
-            lines.append(f"[{start:.1f}s] {text}")
-        lines.append("")
+    # Clean the language name for filename
+    clean_name = actual_lang_name.replace(" ", "_").replace("(", "").replace(")", "")
+    clean_name = clean_name.replace("/", "_").replace("\\", "_").replace(":", "_")
+    clean_name = re.sub(r"[^a-zA-Z0-9_-]", "", clean_name)
+    if len(clean_name) > 50:
+        clean_name = clean_name[:50]
 
-    # Post-edited
-    if structured_data["post_edited"]:
-        lines.append("\nPOST-EDITED CONTENT:")
-        lines.append("-" * 40)
-        for pe in structured_data["post_edited"]:
-            start = safe_float(pe.get("start", 0))
-            rate = pe.get("compression_rate", "N/A")
-            text = pe.get("text", "")
-            lines.append(f"[{start:.1f}s] [Compression: {rate}%] {text}")
-        lines.append("")
+    # Use the language name as filename (no session_id)
+    filename = f"{clean_name}.txt"
 
-    # Global summaries
-    if structured_data["global_summaries"]:
-        lines.append("\nGLOBAL SUMMARIES:")
-        lines.append("-" * 40)
-        for gs in structured_data["global_summaries"]:
-            lines.append(gs.get("text", ""))
-        lines.append("")
+    txt_buffer = export_structured_txt(session_id, session_dir, language)
 
-    # Notes
-    if structured_data["notes"]:
-        lines.append("\nNOTES:")
-        lines.append("-" * 40)
-        for note in structured_data["notes"]:
-            start = safe_float(note.get("start", 0))
-            text = note.get("text", "")
-            lines.append(f"[{start:.1f}s] {text}")
-        lines.append("")
+    return send_file(
+        txt_buffer,
+        mimetype="text/plain",
+        as_attachment=True,
+        download_name=filename,
+    )
 
-    lines.append("\n" + "=" * 80)
-    lines.append("END OF EXPORT")
 
-    return io.BytesIO("\n".join(lines).encode("utf-8"))
+@app.route("/session_export_docx/<session_id>", methods=["GET"])
+def session_export_docx(session_id):
+    """Export session as a structured DOCX file matching the window view."""
+    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    if not os.path.exists(session_dir):
+        return jsonify({"error": "Session not found"}), 404
+
+    language = request.args.get("language")
+    actual_lang_name = _resolve_export_language_name(session_dir, language)
+
+    # Clean the language name for filename
+    clean_name = actual_lang_name.replace(" ", "_").replace("(", "").replace(")", "")
+    clean_name = clean_name.replace("/", "_").replace("\\", "_").replace(":", "_")
+    clean_name = re.sub(r"[^a-zA-Z0-9_-]", "", clean_name)
+    if len(clean_name) > 50:
+        clean_name = clean_name[:50]
+
+    # Use the language name as filename (no session_id)
+    filename = f"{clean_name}.docx"
+
+    try:
+        doc_buffer = export_structured_docx(session_id, session_dir, language)
+    except ImportError:
+        return (
+            jsonify(
+                {
+                    "error": "python-docx not installed. "
+                    "Please install: pip install python-docx"
+                }
+            ),
+            500,
+        )
+
+    return send_file(
+        doc_buffer,
+        mimetype="application/vnd.openxmlformats-officedocument"
+        ".wordprocessingml.document",
+        as_attachment=True,
+        download_name=filename,
+    )
+
+
+@app.route("/session_export_rtf/<session_id>", methods=["GET"])
+def session_export_rtf(session_id):
+    """Export all session data as a structured RTF document."""
+    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    if not os.path.exists(session_dir):
+        return jsonify({"error": "Session not found"}), 404
+
+    language = request.args.get("language")
+    actual_lang_name = _resolve_export_language_name(session_dir, language)
+
+    # Clean the language name for filename
+    clean_name = actual_lang_name.replace(" ", "_").replace("(", "").replace(")", "")
+    clean_name = clean_name.replace("/", "_").replace("\\", "_").replace(":", "_")
+    clean_name = re.sub(r"[^a-zA-Z0-9_-]", "", clean_name)
+    if len(clean_name) > 50:
+        clean_name = clean_name[:50]
+
+    # Use the language name as filename (no session_id)
+    filename = f"{clean_name}.rtf"
+
+    rtf_buffer = export_structured_rtf(session_id, session_dir, language)
+
+    return send_file(
+        rtf_buffer,
+        mimetype="text/rtf",
+        as_attachment=True,
+        download_name=filename,
+    )
 
 
 def get_available_languages(session_dir):
@@ -1475,91 +2062,7 @@ def session_export(session_id):
     return send_file(
         doc_buffer,
         mimetype="application/vnd.openxmlformats-officedocument"
-                 ".wordprocessingml.document",
-        as_attachment=True,
-        download_name=f"{filename}.docx",
-    )
-
-
-@app.route("/session_export_rtf/<session_id>", methods=["GET"])
-def session_export_rtf(session_id):
-    """Export all session data as a structured RTF document."""
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
-    if not os.path.exists(session_dir):
-        return jsonify({"error": "Session not found"}), 404
-
-    language = request.args.get("language")
-
-    rtf_buffer = export_structured_rtf(session_id, session_dir, language)
-
-    filename = f"session_{session_id}"
-    if language:
-        clean_lang = language.replace(" ", "_").replace("(", "").replace(")", "")
-        filename = f"session_{session_id}_{clean_lang}"
-
-    return send_file(
-        rtf_buffer,
-        mimetype="text/rtf",
-        as_attachment=True,
-        download_name=f"{filename}.rtf",
-    )
-
-
-@app.route("/session_export_txt/<session_id>", methods=["GET"])
-def session_export_txt(session_id):
-    """Export all session data as structured plain text."""
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
-    if not os.path.exists(session_dir):
-        return jsonify({"error": "Session not found"}), 404
-
-    language = request.args.get("language")
-
-    txt_buffer = export_structured_txt(session_id, session_dir, language)
-
-    filename = f"session_{session_id}"
-    if language:
-        clean_lang = language.replace(" ", "_").replace("(", "").replace(")", "")
-        filename = f"session_{session_id}_{clean_lang}"
-
-    return send_file(
-        txt_buffer,
-        mimetype="text/plain",
-        as_attachment=True,
-        download_name=f"{filename}.txt",
-    )
-
-
-@app.route("/session_export_docx/<session_id>", methods=["GET"])
-def session_export_docx(session_id):
-    """Export session as a structured DOCX file."""
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
-    if not os.path.exists(session_dir):
-        return jsonify({"error": "Session not found"}), 404
-
-    language = request.args.get("language")
-
-    try:
-        doc_buffer = export_structured_docx(session_id, session_dir, language)
-    except ImportError:
-        return (
-            jsonify(
-                {
-                    "error": "python-docx not installed. "
-                    "Please install: pip install python-docx"
-                }
-            ),
-            500,
-        )
-
-    filename = f"session_{session_id}"
-    if language:
-        clean_lang = language.replace(" ", "_").replace("(", "").replace(")", "")
-        filename = f"session_{session_id}_{clean_lang}"
-
-    return send_file(
-        doc_buffer,
-        mimetype="application/vnd.openxmlformats-officedocument"
-                 ".wordprocessingml.document",
+        ".wordprocessingml.document",
         as_attachment=True,
         download_name=f"{filename}.docx",
     )
@@ -1578,7 +2081,45 @@ def session_export_structured_json(session_id):
     if not structured_data:
         return jsonify({"error": "No structured data available"}), 404
 
-    return jsonify(structured_data), 200
+    json_str = json.dumps(structured_data, ensure_ascii=False, indent=2)
+
+    # Get the actual language name from transcripts.json
+    actual_lang_name = None
+    json_path = os.path.join(session_dir, "transcripts.json")
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                transcripts = json.load(f)
+            if transcripts:
+                if language:
+                    for t in transcripts:
+                        lang = t.get("language", "")
+                        if lang == language or language.lower() in lang.lower():
+                            actual_lang_name = lang
+                            break
+                if not actual_lang_name:
+                    actual_lang_name = transcripts[0].get("language", "transcript")
+        except (OSError, TypeError, ValueError):
+            actual_lang_name = "transcript"
+    else:
+        actual_lang_name = "transcript"
+
+    # Clean the language name for filename
+    clean_name = actual_lang_name.replace(" ", "_").replace("(", "").replace(")", "")
+    clean_name = clean_name.replace("/", "_").replace("\\", "_").replace(":", "_")
+    clean_name = re.sub(r"[^a-zA-Z0-9_-]", "", clean_name)
+    if len(clean_name) > 50:
+        clean_name = clean_name[:50]
+
+    # Use the language name as filename (no session_id)
+    filename = f"{clean_name}.json"
+
+    return send_file(
+        io.BytesIO(json_str.encode("utf-8")),
+        mimetype="application/json",
+        as_attachment=True,
+        download_name=filename,
+    )
 
 
 @app.route("/session_export_all_languages/<session_id>", methods=["GET"])
@@ -1598,6 +2139,9 @@ def session_export_all_languages(session_id):
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
         for lang in languages:
             clean_lang = lang.replace(" ", "_").replace("(", "").replace(")", "")
+            clean_lang = clean_lang.replace("/", "_").replace("\\", "_")
+            if len(clean_lang) > 50:
+                clean_lang = clean_lang[:50]
 
             formats_to_export = []
             if export_format == "all":
@@ -1631,7 +2175,7 @@ def session_export_all_languages(session_id):
                         f"{clean_lang}.json",
                         json.dumps(
                             structured_data, ensure_ascii=False, indent=2
-                        ).encode("utf-8")
+                        ).encode("utf-8"),
                     )
 
     zip_buffer.seek(0)
@@ -1640,7 +2184,7 @@ def session_export_all_languages(session_id):
         zip_buffer,
         mimetype="application/zip",
         as_attachment=True,
-        download_name=f"session_{session_id}_all_languages.zip",
+        download_name="transcript_all_languages.zip",
     )
 
 
@@ -1653,7 +2197,6 @@ def session_languages(session_id):
 
     languages = get_available_languages(session_dir)
     return jsonify({"languages": languages}), 200
-
 
 @app.route("/session_transcript_json/<session_id>", methods=["GET"])
 def session_transcript_json(session_id):
@@ -1748,7 +2291,7 @@ def session_download_all(session_id):
     return download_session_zip(session_id)
 
 
-# ─── Auth endpoints ──────────────────────────────────────────────────────
+# ─── AUTH ENDPOINTS ─────────────────────────────────────────────────────
 
 
 @app.route("/register", methods=["POST"])
@@ -1783,7 +2326,7 @@ def login():
     return jsonify({"token": str(uuid.uuid4()), "message": "Login successful"}), 200
 
 
-# ─── Video endpoints ──────────────────────────────────────────────────────
+# ─── VIDEO ENDPOINTS ────────────────────────────────────────────────────
 
 
 @app.route("/videos", methods=["GET"])
@@ -1913,7 +2456,7 @@ def finish_upload():
     return jsonify({"message": "Upload finished", "project": project}), 200
 
 
-# ─── Job endpoints ──────────────────────────────────────────────────────
+# ─── JOB ENDPOINTS ──────────────────────────────────────────────────────
 
 
 @app.route("/start_job/<video_key>", methods=["POST"])
@@ -1955,7 +2498,7 @@ def job_status(job_id):
     )
 
 
-# ─── Session output endpoints ──────────────────────────────────────────
+# ─── SESSION OUTPUT ENDPOINTS ──────────────────────────────────────────
 
 
 @app.route("/session_output/<session_id>", methods=["GET"])
@@ -2009,7 +2552,7 @@ def get_session_file(session_id, filename):
     return send_file(file_path, as_attachment=True)
 
 
-# ─── Upload endpoint ────────────────────────────────────────────────────
+# ─── UPLOAD ENDPOINT ────────────────────────────────────────────────────
 
 
 @app.route("/upload", methods=["POST", "OPTIONS"])
@@ -2104,7 +2647,7 @@ def upload_lecture():
                 yield f'Content-Disposition: form-data; name="videofile"; filename="{filename}"\r\n'
                 yield f"Content-Type: {mimetype}\r\n\r\n"
 
-                chunk_size = 8192
+                chunk_size = 16384
                 while True:
                     chunk = f.read(chunk_size)
                     if not chunk:
@@ -2115,7 +2658,7 @@ def upload_lecture():
                 yield f"--{boundary}--\r\n"
 
             class MultipartGenerator:
-                """Generate multipart form-data payload chunks for file uploads."""
+                """Generate multipart form data chunks for streaming upload."""
 
                 def __init__(self, generator_func):
                     self.generator = generator_func()
@@ -2137,7 +2680,7 @@ def upload_lecture():
                 data=body_gen,
                 headers={**headers, "Content-Type": content_type},
                 cookies=cookies,
-                timeout=(30, 3600),
+                timeout=(60, 3600),
                 verify=False,
                 allow_redirects=True,
             )
@@ -2245,7 +2788,7 @@ def upload_lecture():
         return jsonify({"error": f"Upload failed: {str(e)}"}), 500
 
 
-# ─── Proxy endpoints ────────────────────────────────────────────────────
+# ─── PROXY ENDPOINTS ────────────────────────────────────────────────────
 
 
 @app.route("/check-session", methods=["GET"])
@@ -2313,7 +2856,7 @@ def dex_userinfo():
         return jsonify({"error": f"Proxy error: {str(e)}"}), 500
 
 
-# ─── Debug endpoints ────────────────────────────────────────────────────
+# ─── DEBUG ENDPOINTS ────────────────────────────────────────────────────
 
 
 @app.route("/debug-videos", methods=["GET"])
@@ -2349,7 +2892,7 @@ def clear_videos():
     return jsonify({"message": "Cleared"}), 200
 
 
-# ─── Dummy project with thumbnail ──────────────────────────────────────
+# ─── DUMMY PROJECT ──────────────────────────────────────────────────────
 
 dummy_project = {
     "key": "dummy-key-123",
@@ -2377,6 +2920,7 @@ users["testuser@example.com"] = {
 if __name__ == "__main__":
     try:
         import urllib3
+
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     except ImportError:
         pass
