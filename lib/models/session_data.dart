@@ -152,15 +152,19 @@ class ChapterData {
   int get hashCode => Object.hash(start, end, index, heading, segments);
 }
 
+// models/session_data.dart - Update the SessionFile class
+
 class SessionFile {
   final String name;
   final int size;
   final String url;
+  final String? modified; // Add modification date
 
   const SessionFile({
     required this.name,
     required this.size,
     required this.url,
+    this.modified,
   });
 
   factory SessionFile.fromJson(Map<String, dynamic> json) {
@@ -168,6 +172,7 @@ class SessionFile {
       name: json['name'] ?? '',
       size: json['size'] ?? 0,
       url: json['url'] ?? '',
+      modified: json['modified'], // Get modification date
     );
   }
 
@@ -177,9 +182,10 @@ class SessionFile {
     return other is SessionFile &&
         other.name == name &&
         other.size == size &&
-        other.url == url;
+        other.url == url &&
+        other.modified == modified;
   }
 
   @override
-  int get hashCode => Object.hash(name, size, url);
+  int get hashCode => Object.hash(name, size, url, modified);
 }

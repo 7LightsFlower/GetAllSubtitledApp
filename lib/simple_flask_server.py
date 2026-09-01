@@ -8,6 +8,7 @@ import json
 import logging
 import mimetypes
 import os
+import pickle
 import re
 import subprocess
 import tempfile
@@ -56,6 +57,7 @@ TARGET_URL = f"{INTERNAL_SERVER_URL}/upload_lecture"
 BASE_URL = INTERNAL_SERVER_URL
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
 SESSION_FOLDER = os.path.join(os.path.dirname(__file__), "sessions")
+STATE_FILE = os.path.join(os.path.dirname(__file__), "server_state.pkl")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(SESSION_FOLDER, exist_ok=True)
 
@@ -67,6 +69,96 @@ sessions = {}
 internal_session = requests.Session()
 internal_session.verify = False
 _state = {"token": None}
+
+
+# ─── STATE PERSISTENCE ──────────────────────────────────────────────────
+
+
+def save_state():
+    """Save server state to disk."""
+    try:
+        state = {
+            "users": users,
+            "videos": videos,
+            "jobs": jobs,
+            "sessions": sessions,
+            "timestamp": datetime.datetime.now().isoformat(),
+        }
+        with open(STATE_FILE, "wb") as f:
+            pickle.dump(state, f)
+        logging.info("State saved to %s", STATE_FILE)
+    except (OSError, pickle.PickleError, TypeError, ValueError) as e:
+        logging.error("Failed to save state: %s", e)
+
+
+def load_state():
+    """Load server state from disk."""
+    if not os.path.exists(STATE_FILE):
+        logging.info("No state file found. Starting with default state.")
+        return False
+
+    try:
+        with open(STATE_FILE, "rb") as f:
+            state = pickle.load(f)
+
+        loaded_state = {
+            "users": state.get("users", {}),
+            "videos": state.get("videos", []),
+            "jobs": state.get("jobs", {}),
+            "sessions": state.get("sessions", {}),
+        }
+        globals().update(loaded_state)
+
+        logging.info("State loaded from %s", STATE_FILE)
+        logging.info("  - Users: %d", len(users))
+        logging.info("  - Videos: %d", len(videos))
+        logging.info("  - Jobs: %d", len(jobs))
+        logging.info("  - Sessions: %d", len(sessions))
+
+        # Verify video files still exist and update status
+        for video in videos:
+            file_name = video.get("file_name")
+            if file_name:
+                file_path = os.path.join(UPLOAD_FOLDER, file_name)
+                if not os.path.exists(file_path):
+                    logging.warning("Video file missing: %s", file_path)
+                    video["file_missing"] = True
+                else:
+                    video["file_missing"] = False
+
+        return True
+    except (
+        FileNotFoundError,
+        OSError,
+        pickle.PickleError,
+        EOFError,
+        AttributeError,
+        TypeError,
+        ValueError,
+    ) as e:
+        logging.error("Failed to load state: %s", e)
+        return False
+
+
+def cleanup_orphaned_files():
+    """Remove video files that are no longer in the videos list."""
+    try:
+        # Get all video files from the videos list
+        active_files = set()
+        for video in videos:
+            file_name = video.get("file_name")
+            if file_name:
+                active_files.add(file_name)
+
+        # Scan uploads folder and remove orphaned files
+        for file_name in os.listdir(UPLOAD_FOLDER):
+            if file_name not in active_files and not file_name.startswith("."):
+                file_path = os.path.join(UPLOAD_FOLDER, file_name)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+                    logging.info("Removed orphaned file: %s", file_name)
+    except (FileNotFoundError, OSError, TypeError, ValueError) as e:
+        logging.error("Failed to cleanup orphaned files: %s", e)
 
 
 def parse_html_with_bs4(html_content):
@@ -183,6 +275,7 @@ def process_job(job_id):
             job["status"] = "completed"
             job["transcript"] = generate_mock_transcript()
             job["segments"] = generate_mock_segments()
+        save_state()
 
 
 def generate_video_thumbnail(video_path, thumbnail_path, time_offset=1.0):
@@ -2198,6 +2291,7 @@ def session_languages(session_id):
     languages = get_available_languages(session_dir)
     return jsonify({"languages": languages}), 200
 
+
 @app.route("/session_transcript_json/<session_id>", methods=["GET"])
 def session_transcript_json(session_id):
     """Export session transcripts as JSON."""
@@ -2291,6 +2385,450 @@ def session_download_all(session_id):
     return download_session_zip(session_id)
 
 
+@app.route("/session_transcript_save_and_vtt/<session_id>", methods=["POST"])
+def session_transcript_save_and_vtt(session_id):
+    """
+    Save transcript and generate VTT in one call.
+    Expects JSON: { "language": "en", "segments": [...] }
+    """
+    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    if not os.path.exists(session_dir):
+        return jsonify({"error": "Session not found"}), 404
+
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Invalid JSON data"}), 400
+
+        language = data.get("language")
+        segments = data.get("segments", [])
+
+        if not language:
+            return jsonify({"error": "Language is required"}), 400
+
+        if not segments:
+            return jsonify({"error": "No segments provided"}), 400
+
+        # First, save the transcript
+        json_path = os.path.join(session_dir, "transcripts.json")
+        transcripts = []
+        if os.path.exists(json_path):
+            with open(json_path, "r", encoding="utf-8") as f:
+                transcripts = json.load(f)
+
+        updated = False
+        for i, transcript in enumerate(transcripts):
+            if transcript.get("language") == language:
+                transcript["segments"] = segments
+                transcript["text"] = " ".join([s.get("text", "") for s in segments])
+                transcripts[i] = transcript
+                updated = True
+                break
+
+        if not updated:
+            transcripts.append(
+                {
+                    "language": language,
+                    "text": " ".join([s.get("text", "") for s in segments]),
+                    "segments": segments,
+                    "sender": segments[0].get("sender", "") if segments else "",
+                }
+            )
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(transcripts, f, ensure_ascii=False, indent=2)
+
+        # Then generate VTT
+        vtt_lines = ["WEBVTT", ""]
+        for i, seg in enumerate(segments):
+            start = safe_float(seg.get("start", 0))
+            end = safe_float(seg.get("end", 0))
+            text = seg.get("text", "")
+
+            if not text or not text.strip():
+                continue
+
+            start_time = _format_vtt_timestamp(start)
+            end_time = _format_vtt_timestamp(end)
+
+            vtt_lines.append(f"{i + 1}")
+            vtt_lines.append(f"{start_time} --> {end_time}")
+
+            speaker_name = seg.get("speakerName") or seg.get("speaker_name")
+            if speaker_name and speaker_name.strip():
+                vtt_lines.append(f"<v {speaker_name}>{text}</v>")
+            else:
+                vtt_lines.append(text)
+            vtt_lines.append("")
+
+        vtt_content = "\n".join(vtt_lines)
+
+        # Save VTT file with language-specific name
+        vtt_filename = f"subtitles_{language}.vtt"
+        vtt_path = os.path.join(session_dir, vtt_filename)
+        with open(vtt_path, "w", encoding="utf-8") as f:
+            f.write(vtt_content)
+
+        # Also save generic subtitles.vtt for default language
+        if language.lower() in ["en", "english"]:
+            generic_path = os.path.join(session_dir, "subtitles.vtt")
+            with open(generic_path, "w", encoding="utf-8") as f:
+                f.write(vtt_content)
+
+        # Update transcript.txt
+        txt_path = os.path.join(session_dir, "transcript.txt")
+        with open(txt_path, "w", encoding="utf-8") as f:
+            for t in transcripts:
+                f.write(f"{'=' * 60}\n")
+                f.write(f"Language: {t.get('language', 'Unknown')}\n")
+                f.write(f"{'=' * 60}\n\n")
+                segs = t.get("segments", [])
+                segs.sort(key=lambda x: safe_float(x.get("start", 0)))
+                for seg in segs:
+                    start = safe_float(seg.get("start", 0))
+                    end = safe_float(seg.get("end", 0))
+                    sender = seg.get("sender", "")
+                    text = seg.get("text", "")
+                    markup = seg.get("markup", "")
+                    if not text or not text.strip():
+                        continue
+                    if markup:
+                        f.write(
+                            f"[{start:.1f}s - {end:.1f}s] [{sender}] [{markup}] {text}\n"
+                        )
+                    else:
+                        f.write(f"[{start:.1f}s - {end:.1f}s] [{sender}] {text}\n")
+                f.write("\n")
+
+        logging.info(
+            "Saved transcript and VTT for language '%s' in session %s",
+            language,
+            session_id,
+        )
+
+        # Get the updated file list with modification dates
+        files = []
+        for file in os.listdir(session_dir):
+            file_path = os.path.join(session_dir, file)
+            if os.path.isfile(file_path) and os.path.getsize(file_path) > 1000:
+                mtime = os.path.getmtime(file_path)
+                mod_time = datetime.datetime.fromtimestamp(mtime).isoformat()
+                files.append(
+                    {
+                        "name": file,
+                        "size": os.path.getsize(file_path),
+                        "url": f"/session_file/{session_id}/{file}",
+                        "modified": mod_time,
+                    }
+                )
+
+        # Save state after changes
+        save_state()
+
+        return (
+            jsonify(
+                {
+                    "success": True,
+                    "message": f"Transcript and VTT saved for language: {language}",
+                    "language": language,
+                    "vtt_filename": vtt_filename,
+                    "segments_count": len(segments),
+                    "files": files,
+                }
+            ),
+            200,
+        )
+
+    except json.JSONDecodeError as e:
+        return jsonify({"error": f"Invalid JSON: {str(e)}"}), 400
+    except (OSError, TypeError, KeyError) as e:
+        logging.error("Error saving transcript and VTT: %s", e, exc_info=True)
+        return jsonify({"error": f"Failed to save: {str(e)}"}), 500
+
+
+# Add/update this endpoint in simple_flask_server.py
+
+
+@app.route("/session_transcript_save_vtt/<session_id>", methods=["POST"])
+def session_transcript_save_vtt(session_id):
+    """
+    Save transcript and update all related files (messages.json, transcripts.json, VTT)
+    """
+    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    if not os.path.exists(session_dir):
+        return jsonify({"error": "Session not found"}), 404
+
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Invalid JSON data"}), 400
+
+        language = data.get("language")
+        segments = data.get("segments", [])
+        filename = data.get("filename")
+
+        if not language:
+            return jsonify({"error": "Language is required"}), 400
+
+        if not segments:
+            return jsonify({"error": "No segments provided"}), 400
+
+        # Filter out summary/global_summary segments (start == 0 and end == 0)
+        # Also filter out markup-only segments
+        filtered_segments = []
+        for seg in segments:
+            # Skip if start and end are both 0 (summaries, global summaries)
+            if seg.get("start", 0) == 0 and seg.get("end", 0) == 0:
+                continue
+            # Skip if markup is paragraphBreak, chapterBreak, or heading
+            markup = seg.get("markup")
+            if markup in ["paragraphBreak", "chapterBreak", "heading"]:
+                continue
+            # Skip empty text
+            if not seg.get("text", "").strip():
+                continue
+            filtered_segments.append(seg)
+
+        if not filtered_segments:
+            return jsonify({"error": "No valid segments to save"}), 400
+
+        # --- 1. Update transcripts.json ---
+        json_path = os.path.join(session_dir, "transcripts.json")
+        transcripts = []
+        if os.path.exists(json_path):
+            with open(json_path, "r", encoding="utf-8") as f:
+                transcripts = json.load(f)
+
+        updated = False
+        for i, transcript in enumerate(transcripts):
+            if transcript.get("language") == language:
+                # Update segments (keep the filtered ones)
+                transcript["segments"] = filtered_segments
+                # Rebuild text from segments
+                transcript["text"] = " ".join(
+                    [s.get("text", "") for s in filtered_segments]
+                )
+                transcripts[i] = transcript
+                updated = True
+                break
+
+        if not updated:
+            transcripts.append(
+                {
+                    "language": language,
+                    "text": " ".join([s.get("text", "") for s in filtered_segments]),
+                    "segments": filtered_segments,
+                    "sender": (
+                        filtered_segments[0].get("sender", "")
+                        if filtered_segments
+                        else ""
+                    ),
+                }
+            )
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(transcripts, f, ensure_ascii=False, indent=2)
+
+        # --- 2. Update messages.json ---
+        messages_path = os.path.join(session_dir, "messages.json")
+        if os.path.exists(messages_path):
+            try:
+                with open(messages_path, "r", encoding="utf-8") as f:
+                    messages_data = json.load(f)
+
+                # messages.json is a list of [lang, json_string] pairs
+                if isinstance(messages_data, list):
+                    for i, item in enumerate(messages_data):
+                        if isinstance(item, list) and len(item) >= 2:
+                            # Check if this language matches
+                            msg_lang = item[0]
+                            if msg_lang == language or language in msg_lang:
+                                try:
+                                    msg_str = item[1]
+                                    if isinstance(msg_str, str):
+                                        msg_data = json.loads(msg_str)
+                                    elif isinstance(msg_str, dict):
+                                        msg_data = msg_str
+                                    else:
+                                        continue
+
+                                    # Check if this is a message with segments (has seq, start, end)
+                                    if (
+                                        "seq" in msg_data
+                                        and "start" in msg_data
+                                        and "end" in msg_data
+                                    ):
+                                        # Find matching segment by start time
+                                        start_time = msg_data.get("start", 0)
+                                        # Convert to float if it's a string
+                                        if isinstance(start_time, str):
+                                            try:
+                                                start_time = float(start_time)
+                                            except ValueError:
+                                                start_time = 0
+
+                                        for seg in filtered_segments:
+                                            seg_start = seg.get("start", 0)
+                                            if abs(seg_start - start_time) < 0.01:
+                                                # Update the text
+                                                msg_data["seq"] = seg.get("text", "")
+                                                # Update other fields if present in segment
+                                                if "markup" in seg:
+                                                    msg_data["markup"] = seg.get(
+                                                        "markup"
+                                                    )
+                                                if "speakerName" in seg:
+                                                    msg_data["speakerName"] = seg.get(
+                                                        "speakerName"
+                                                    )
+                                                if "words" in seg:
+                                                    msg_data["words"] = seg.get("words")
+                                                if "word_id" in seg:
+                                                    msg_data["word_id"] = seg.get(
+                                                        "word_id"
+                                                    )
+
+                                                # Update the message in the list
+                                                if isinstance(msg_str, str):
+                                                    messages_data[i][1] = json.dumps(
+                                                        msg_data
+                                                    )
+                                                else:
+                                                    messages_data[i][1] = msg_data
+                                                break
+                                except (json.JSONDecodeError, TypeError, ValueError):
+                                    continue
+
+                    # Save updated messages
+                    with open(messages_path, "w", encoding="utf-8") as f:
+                        json.dump(messages_data, f, ensure_ascii=False, indent=2)
+            except (json.JSONDecodeError, TypeError, OSError) as e:
+                logging.warning("Could not update messages.json: %s", e)
+
+        # --- 3. Generate VTT content from filtered segments ---
+        vtt_lines = ["WEBVTT", ""]
+        cue_index = 0
+        for seg in filtered_segments:
+            start = safe_float(seg.get("start", 0))
+            end = safe_float(seg.get("end", 0))
+            text = seg.get("text", "")
+
+            if not text or not text.strip():
+                continue
+
+            cue_index += 1
+            start_time = _format_vtt_timestamp(start)
+            end_time = _format_vtt_timestamp(end)
+
+            vtt_lines.append(f"{cue_index}")
+            vtt_lines.append(f"{start_time} --> {end_time}")
+
+            speaker_name = seg.get("speakerName") or seg.get("speaker_name")
+            if speaker_name and speaker_name.strip():
+                vtt_lines.append(f"<v {speaker_name}>{text}</v>")
+            else:
+                vtt_lines.append(text)
+            vtt_lines.append("")
+
+        vtt_content = "\n".join(vtt_lines)
+
+        # Determine the filename
+        if not filename:
+            clean_lang = language.replace(" ", "_").replace("(", "").replace(")", "")
+            filename = f"subtitles_{clean_lang}.vtt"
+
+        # Save VTT file (overwrite existing)
+        vtt_path = os.path.join(session_dir, filename)
+        with open(vtt_path, "w", encoding="utf-8") as f:
+            f.write(vtt_content)
+
+        # Also update generic subtitles.vtt if this is the main language
+        if language.lower() in ["en", "english"] or "Original ASR" in language:
+            generic_path = os.path.join(session_dir, "subtitles.vtt")
+            with open(generic_path, "w", encoding="utf-8") as f:
+                f.write(vtt_content)
+
+        # --- 4. Update transcript.txt ---
+        txt_path = os.path.join(session_dir, "transcript.txt")
+        with open(txt_path, "w", encoding="utf-8") as f:
+            for t in transcripts:
+                f.write(f"{'=' * 60}\n")
+                f.write(f"Language: {t.get('language', 'Unknown')}\n")
+                f.write(f"{'=' * 60}\n\n")
+                segs = t.get("segments", [])
+                segs.sort(key=lambda x: safe_float(x.get("start", 0)))
+                for seg in segs:
+                    start = safe_float(seg.get("start", 0))
+                    end = safe_float(seg.get("end", 0))
+                    sender = seg.get("sender", "")
+                    text = seg.get("text", "")
+                    markup = seg.get("markup", "")
+                    if not text or not text.strip():
+                        continue
+                    if markup:
+                        f.write(
+                            f"[{start:.1f}s - {end:.1f}s] [{sender}] [{markup}] {text}\n"
+                        )
+                    else:
+                        f.write(f"[{start:.1f}s - {end:.1f}s] [{sender}] {text}\n")
+                f.write("\n")
+
+        logging.info(
+            "Saved transcript and updated all files for language '%s' in session %s",
+            language,
+            session_id,
+        )
+
+        # Get the updated file list with modification dates
+        files = []
+        for file in os.listdir(session_dir):
+            file_path = os.path.join(session_dir, file)
+            if os.path.isfile(file_path) and os.path.getsize(file_path) > 1000:
+                mtime = os.path.getmtime(file_path)
+                mod_time = datetime.datetime.fromtimestamp(mtime).isoformat()
+                files.append(
+                    {
+                        "name": file,
+                        "size": os.path.getsize(file_path),
+                        "url": f"/session_file/{session_id}/{file}",
+                        "modified": mod_time,
+                    }
+                )
+
+        # Save state after changes
+        save_state()
+
+        return (
+            jsonify(
+                {
+                    "success": True,
+                    "message": f"Transcript saved and all files updated for language: {language}",
+                    "language": language,
+                    "vtt_filename": filename,
+                    "segments_count": len(filtered_segments),
+                    "files": files,
+                }
+            ),
+            200,
+        )
+
+    except json.JSONDecodeError as e:
+        return jsonify({"error": f"Invalid JSON: {str(e)}"}), 400
+    except (OSError, TypeError, KeyError) as e:
+        logging.error("Error saving transcript: %s", e, exc_info=True)
+        return jsonify({"error": f"Failed to save: {str(e)}"}), 500
+
+
+def _format_vtt_timestamp(seconds):
+    """Format seconds to VTT timestamp format: HH:MM:SS.mmm"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int((seconds % 1) * 1000)
+
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+
+
 # ─── AUTH ENDPOINTS ─────────────────────────────────────────────────────
 
 
@@ -2305,6 +2843,7 @@ def register():
     if email in users:
         return jsonify({"message": "User already exists"}), 400
     users[email] = {"name": name, "password": password}
+    save_state()
     return (
         jsonify(
             {"token": str(uuid.uuid4()), "message": "User registered successfully"}
@@ -2453,6 +2992,7 @@ def finish_upload():
     }
     videos.append(project)
     del chunk_storage[filename]
+    save_state()
     return jsonify({"message": "Upload finished", "project": project}), 200
 
 
@@ -2476,6 +3016,7 @@ def start_job(video_key):
     }
     jobs[job_id] = job
     threading.Thread(target=process_job, args=(job_id,), daemon=True).start()
+    save_state()
     return jsonify({"job_id": job_id, "status": "processing"}), 200
 
 
@@ -2501,6 +3042,9 @@ def job_status(job_id):
 # ─── SESSION OUTPUT ENDPOINTS ──────────────────────────────────────────
 
 
+# In simple_flask_server.py, make sure the session_output endpoint returns files with proper URLs
+
+
 @app.route("/session_output/<session_id>", methods=["GET"])
 def get_session_output(session_id):
     """Get the session output as a JSON response with file URLs."""
@@ -2510,20 +3054,35 @@ def get_session_output(session_id):
     if not token:
         token = request.cookies.get("_forward_auth", "")
 
+    # Only download if files don't exist or are very small
     if token:
-        logging.info("Downloading session %s from internal server", session_id)
-        download_session_files(session_id, token)
+        json_path = os.path.join(session_dir, "transcripts.json")
+        messages_path = os.path.join(session_dir, "messages.json")
+
+        # Check if we need to download
+        need_download = False
+        if not os.path.exists(json_path) or os.path.getsize(json_path) < 100:
+            need_download = True
+        if not os.path.exists(messages_path) or os.path.getsize(messages_path) < 100:
+            need_download = True
+
+        if need_download:
+            logging.info("Downloading session %s from internal server", session_id)
+            download_session_files(session_id, token)
 
     files = []
     if os.path.exists(session_dir):
         for file in os.listdir(session_dir):
             file_path = os.path.join(session_dir, file)
             if os.path.isfile(file_path) and os.path.getsize(file_path) > 1000:
+                mtime = os.path.getmtime(file_path)
+                mod_time = datetime.datetime.fromtimestamp(mtime).isoformat()
                 files.append(
                     {
                         "name": file,
                         "size": os.path.getsize(file_path),
                         "url": f"/session_file/{session_id}/{file}",
+                        "modified": mod_time,
                     }
                 )
 
@@ -2547,8 +3106,15 @@ def get_session_file(session_id, filename):
     """Download a specific file from the session."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
     file_path = os.path.join(session_dir, filename)
+
+    # Check if file exists
     if not os.path.exists(file_path):
         return jsonify({"error": "File not found"}), 404
+
+    # For VTT files, serve with correct MIME type
+    if filename.endswith(".vtt"):
+        return send_file(file_path, as_attachment=False, mimetype="text/vtt")
+
     return send_file(file_path, as_attachment=True)
 
 
@@ -2733,6 +3299,7 @@ def upload_lecture():
             threading.Thread(
                 target=process_job, args=(session_id,), daemon=True
             ).start()
+            save_state()
 
         try:
             response_data = json.loads(content)
@@ -2889,6 +3456,7 @@ def clear_videos():
     videos.append(dummy_with_thumb)
     chunk_storage.clear()
     jobs.clear()
+    save_state()
     return jsonify({"message": "Cleared"}), 200
 
 
@@ -2924,5 +3492,13 @@ if __name__ == "__main__":
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     except ImportError:
         pass
+
+    # Load saved state
+    load_state()
+
+    # Clean up orphaned files
+    cleanup_orphaned_files()
+
     logging.info("Starting merged server on http://localhost:5000")
+    logging.info("State file: %s", STATE_FILE)
     app.run(host="0.0.0.0", port=5000, debug=True)
