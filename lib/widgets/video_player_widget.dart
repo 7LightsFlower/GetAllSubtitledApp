@@ -1,13 +1,17 @@
-// widgets/video_player_widget.dart
+// video_player_widget.dart
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
+import 'package:asr_live_translator/models/subtitle_track.dart'; // Import the shared model
 
 class VideoPlayerWidget extends StatefulWidget {
   final VideoPlayerController? controller;
   final bool isReady;
   final VoidCallback onPlayPause;
   final Function(double) onSeek;
-  final double? height; // Optional height parameter
+  final double height;
+  final List<SubtitleTrack>? subtitleTracks;
+  final String? selectedSubtitle;
+  final Function(String?)? onSubtitleChanged; // Note: nullable parameter
 
   const VideoPlayerWidget({
     super.key,
@@ -15,7 +19,10 @@ class VideoPlayerWidget extends StatefulWidget {
     required this.isReady,
     required this.onPlayPause,
     required this.onSeek,
-    this.height,
+    required this.height,
+    this.subtitleTracks,
+    this.selectedSubtitle,
+    this.onSubtitleChanged,
   });
 
   @override
@@ -23,129 +30,146 @@ class VideoPlayerWidget extends StatefulWidget {
 }
 
 class _VideoPlayerWidgetState extends State<VideoPlayerWidget> {
-  bool _showControls = true;
+  bool _isDragging = false;
+  double _currentPosition = 0.0;
 
   @override
   Widget build(BuildContext context) {
     if (!widget.isReady || widget.controller == null) {
-      return SizedBox(
-        height: widget.height ?? 200,
-        child: const Center(
-          child: CircularProgressIndicator(color: Colors.white),
-        ),
+      return const Center(
+        child: CircularProgressIndicator(color: Colors.white),
       );
     }
 
-    return GestureDetector(
-      onTap: () {
-        setState(() {
-          _showControls = !_showControls;
-        });
-      },
-      child: SizedBox(
-        height: widget.height,
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            // Video fills the container with proper aspect ratio
-            Center(
-              child: AspectRatio(
-                aspectRatio: widget.controller!.value.aspectRatio,
-                child: VideoPlayer(widget.controller!),
+    final controller = widget.controller!;
+    final duration = controller.value.duration;
+    final position = controller.value.position;
+    _currentPosition = position.inSeconds.toDouble();
+
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        // Video player
+        Expanded(
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              // Video
+              AspectRatio(
+                aspectRatio: controller.value.aspectRatio,
+                child: VideoPlayer(controller),
               ),
-            ),
-            
-            // Play/Pause overlay button
-            if (_showControls)
-              Container(
-                color: Colors.transparent,
+              
+              // Play/Pause overlay button
+              Center(
                 child: IconButton(
                   icon: Icon(
-                    widget.controller!.value.isPlaying ? Icons.pause : Icons.play_arrow,
-                    color: Colors.white,
+                    controller.value.isPlaying ? Icons.pause : Icons.play_arrow,
+                    color: Colors.white.withValues(alpha: 0.7), // Fixed: withValues instead of withOpacity
                     size: 48,
                   ),
                   onPressed: widget.onPlayPause,
                 ),
               ),
-            
-            // Bottom controls
-            if (_showControls)
-              Positioned(
-                bottom: 0,
-                left: 0,
-                right: 0,
-                child: _buildControls(),
-              ),
-          ],
+            ],
+          ),
         ),
-      ),
+        
+        // Controls
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          color: Colors.black.withValues(alpha: 0.6), // Fixed: withValues instead of withOpacity
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Subtitle selector
+              if (widget.subtitleTracks != null && widget.subtitleTracks!.isNotEmpty)
+                _buildSubtitleSelector(),
+              
+              // Progress slider
+              Row(
+                children: [
+                  Text(
+                    _formatDuration(position),
+                    style: const TextStyle(color: Colors.white, fontSize: 12),
+                  ),
+                  Expanded(
+                    child: Slider(
+                      value: _isDragging ? _currentPosition : position.inSeconds.toDouble(),
+                      min: 0,
+                      max: duration.inSeconds.toDouble(),
+                      onChanged: (value) {
+                        setState(() {
+                          _isDragging = true;
+                          _currentPosition = value;
+                        });
+                      },
+                      onChangeEnd: (value) {
+                        _isDragging = false;
+                        widget.onSeek(value);
+                      },
+                      activeColor: Colors.blue,
+                      inactiveColor: Colors.grey,
+                    ),
+                  ),
+                  Text(
+                    _formatDuration(duration),
+                    style: const TextStyle(color: Colors.white, fontSize: 12),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
-  Widget _buildControls() {
-    final controller = widget.controller!;
+  Widget _buildSubtitleSelector() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.bottomCenter,
-          end: Alignment.topCenter,
-          colors: [
-            Colors.black.withValues(alpha: 0.7),
-            Colors.transparent,
-          ],
-        ),
-      ),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          IconButton(
-            icon: Icon(
-              controller.value.isPlaying ? Icons.pause : Icons.play_arrow,
-              color: Colors.white,
-              size: 20,
-            ),
-            onPressed: widget.onPlayPause,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(),
+          const Icon(
+            Icons.closed_caption,
+            color: Colors.white,
+            size: 16,
           ),
           const SizedBox(width: 8),
-          Expanded(
-            child: Slider(
-              value: controller.value.position.inSeconds.toDouble(),
-              max: controller.value.duration.inSeconds.toDouble(),
-              onChanged: (value) {
-                widget.onSeek(value);
-              },
-              activeColor: Colors.blue,
-              inactiveColor: Colors.white30,
-              thumbColor: Colors.blue,
+          SizedBox(
+            width: 200,
+            height: 30,
+            child: DropdownButtonHideUnderline(
+              child: DropdownButton<String>(
+                value: widget.selectedSubtitle,
+                isExpanded: true,
+                dropdownColor: Colors.grey[900],
+                style: const TextStyle(color: Colors.white, fontSize: 12),
+                icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
+                items: [
+                  const DropdownMenuItem<String>(
+                    value: null,
+                    child: Text('Off', style: TextStyle(color: Colors.grey)),
+                  ),
+                  // Fixed: removed unnecessary toList()
+                  ...widget.subtitleTracks!.map((track) {
+                    return DropdownMenuItem<String>(
+                      value: track.language,
+                      child: Text(
+                        track.label,
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                    );
+                  }),
+                ],
+                onChanged: (value) {
+                  if (widget.onSubtitleChanged != null) {
+                    widget.onSubtitleChanged!(value);
+                  }
+                },
+              ),
             ),
-          ),
-          const SizedBox(width: 8),
-          Text(
-            _formatDuration(controller.value.position),
-            style: const TextStyle(color: Colors.white, fontSize: 11),
-          ),
-          const SizedBox(width: 4),
-          Text(
-            _formatDuration(controller.value.duration),
-            style: const TextStyle(color: Colors.white70, fontSize: 11),
-          ),
-          const SizedBox(width: 8),
-          IconButton(
-            icon: Icon(
-              controller.value.volume == 0 ? Icons.volume_off : Icons.volume_up,
-              color: Colors.white,
-              size: 18,
-            ),
-            onPressed: () {
-              controller.setVolume(
-                controller.value.volume == 0 ? 1 : 0,
-              );
-            },
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(),
           ),
         ],
       ),
@@ -153,8 +177,12 @@ class _VideoPlayerWidgetState extends State<VideoPlayerWidget> {
   }
 
   String _formatDuration(Duration duration) {
-    final minutes = duration.inMinutes;
-    final seconds = duration.inSeconds % 60;
-    return '$minutes:${seconds.toString().padLeft(2, '0')}';
+    final minutes = duration.inMinutes.remainder(60);
+    final seconds = duration.inSeconds.remainder(60);
+    if (duration.inHours > 0) {
+      final hours = duration.inHours;
+      return '$hours:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+    }
+    return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
   }
 }
