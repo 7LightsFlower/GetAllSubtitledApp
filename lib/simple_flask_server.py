@@ -668,6 +668,16 @@ def safe_float(value, default=0.0):
     return default
 
 
+def _format_vtt_timestamp(seconds):
+    """Format seconds to VTT timestamp format: HH:MM:SS.mmm"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int((seconds % 1) * 1000)
+
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+
+
 def extract_transcripts_from_messages(messages_path):
     """Extract transcripts from messages.json file with proper structure handling."""
     if not os.path.exists(messages_path) or os.path.getsize(messages_path) < 100:
@@ -2372,187 +2382,16 @@ def download_session_zip(session_id):
     )
 
 
-@app.route("/session_download_all/<session_id>", methods=["GET"])
-def session_download_all(session_id):
-    """Download all files from a session in a single ZIP."""
-    token = request.headers.get("Authorization", "").replace("Bearer ", "")
-    if not token:
-        token = request.cookies.get("_forward_auth", "")
-
-    if token:
-        download_session_files(session_id, token)
-
-    return download_session_zip(session_id)
+# Add this endpoint after /session_download_all or before the auth endpoints
 
 
-@app.route("/session_transcript_save_and_vtt/<session_id>", methods=["POST"])
-def session_transcript_save_and_vtt(session_id):
-    """
-    Save transcript and generate VTT in one call.
-    Expects JSON: { "language": "en", "segments": [...] }
-    """
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
-    if not os.path.exists(session_dir):
-        return jsonify({"error": "Session not found"}), 404
-
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "Invalid JSON data"}), 400
-
-        language = data.get("language")
-        segments = data.get("segments", [])
-
-        if not language:
-            return jsonify({"error": "Language is required"}), 400
-
-        if not segments:
-            return jsonify({"error": "No segments provided"}), 400
-
-        # First, save the transcript
-        json_path = os.path.join(session_dir, "transcripts.json")
-        transcripts = []
-        if os.path.exists(json_path):
-            with open(json_path, "r", encoding="utf-8") as f:
-                transcripts = json.load(f)
-
-        updated = False
-        for i, transcript in enumerate(transcripts):
-            if transcript.get("language") == language:
-                transcript["segments"] = segments
-                transcript["text"] = " ".join([s.get("text", "") for s in segments])
-                transcripts[i] = transcript
-                updated = True
-                break
-
-        if not updated:
-            transcripts.append(
-                {
-                    "language": language,
-                    "text": " ".join([s.get("text", "") for s in segments]),
-                    "segments": segments,
-                    "sender": segments[0].get("sender", "") if segments else "",
-                }
-            )
-
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(transcripts, f, ensure_ascii=False, indent=2)
-
-        # Then generate VTT
-        vtt_lines = ["WEBVTT", ""]
-        for i, seg in enumerate(segments):
-            start = safe_float(seg.get("start", 0))
-            end = safe_float(seg.get("end", 0))
-            text = seg.get("text", "")
-
-            if not text or not text.strip():
-                continue
-
-            start_time = _format_vtt_timestamp(start)
-            end_time = _format_vtt_timestamp(end)
-
-            vtt_lines.append(f"{i + 1}")
-            vtt_lines.append(f"{start_time} --> {end_time}")
-
-            speaker_name = seg.get("speakerName") or seg.get("speaker_name")
-            if speaker_name and speaker_name.strip():
-                vtt_lines.append(f"<v {speaker_name}>{text}</v>")
-            else:
-                vtt_lines.append(text)
-            vtt_lines.append("")
-
-        vtt_content = "\n".join(vtt_lines)
-
-        # Save VTT file with language-specific name
-        vtt_filename = f"subtitles_{language}.vtt"
-        vtt_path = os.path.join(session_dir, vtt_filename)
-        with open(vtt_path, "w", encoding="utf-8") as f:
-            f.write(vtt_content)
-
-        # Also save generic subtitles.vtt for default language
-        if language.lower() in ["en", "english"]:
-            generic_path = os.path.join(session_dir, "subtitles.vtt")
-            with open(generic_path, "w", encoding="utf-8") as f:
-                f.write(vtt_content)
-
-        # Update transcript.txt
-        txt_path = os.path.join(session_dir, "transcript.txt")
-        with open(txt_path, "w", encoding="utf-8") as f:
-            for t in transcripts:
-                f.write(f"{'=' * 60}\n")
-                f.write(f"Language: {t.get('language', 'Unknown')}\n")
-                f.write(f"{'=' * 60}\n\n")
-                segs = t.get("segments", [])
-                segs.sort(key=lambda x: safe_float(x.get("start", 0)))
-                for seg in segs:
-                    start = safe_float(seg.get("start", 0))
-                    end = safe_float(seg.get("end", 0))
-                    sender = seg.get("sender", "")
-                    text = seg.get("text", "")
-                    markup = seg.get("markup", "")
-                    if not text or not text.strip():
-                        continue
-                    if markup:
-                        f.write(
-                            f"[{start:.1f}s - {end:.1f}s] [{sender}] [{markup}] {text}\n"
-                        )
-                    else:
-                        f.write(f"[{start:.1f}s - {end:.1f}s] [{sender}] {text}\n")
-                f.write("\n")
-
-        logging.info(
-            "Saved transcript and VTT for language '%s' in session %s",
-            language,
-            session_id,
-        )
-
-        # Get the updated file list with modification dates
-        files = []
-        for file in os.listdir(session_dir):
-            file_path = os.path.join(session_dir, file)
-            if os.path.isfile(file_path) and os.path.getsize(file_path) > 1000:
-                mtime = os.path.getmtime(file_path)
-                mod_time = datetime.datetime.fromtimestamp(mtime).isoformat()
-                files.append(
-                    {
-                        "name": file,
-                        "size": os.path.getsize(file_path),
-                        "url": f"/session_file/{session_id}/{file}",
-                        "modified": mod_time,
-                    }
-                )
-
-        # Save state after changes
-        save_state()
-
-        return (
-            jsonify(
-                {
-                    "success": True,
-                    "message": f"Transcript and VTT saved for language: {language}",
-                    "language": language,
-                    "vtt_filename": vtt_filename,
-                    "segments_count": len(segments),
-                    "files": files,
-                }
-            ),
-            200,
-        )
-
-    except json.JSONDecodeError as e:
-        return jsonify({"error": f"Invalid JSON: {str(e)}"}), 400
-    except (OSError, TypeError, KeyError) as e:
-        logging.error("Error saving transcript and VTT: %s", e, exc_info=True)
-        return jsonify({"error": f"Failed to save: {str(e)}"}), 500
-
-
-# Add/update this endpoint in simple_flask_server.py
+# In simple_flask_server.py - Update session_transcript_save_vtt
 
 
 @app.route("/session_transcript_save_vtt/<session_id>", methods=["POST"])
 def session_transcript_save_vtt(session_id):
     """
-    Save transcript and update all related files (messages.json, transcripts.json, VTT)
+    Save transcript and update VTT file with proper naming.
     """
     session_dir = os.path.join(SESSION_FOLDER, session_id)
     if not os.path.exists(session_dir):
@@ -2573,18 +2412,14 @@ def session_transcript_save_vtt(session_id):
         if not segments:
             return jsonify({"error": "No segments provided"}), 400
 
-        # Filter out summary/global_summary segments (start == 0 and end == 0)
-        # Also filter out markup-only segments
+        # Filter out summary/global_summary segments
         filtered_segments = []
         for seg in segments:
-            # Skip if start and end are both 0 (summaries, global summaries)
             if seg.get("start", 0) == 0 and seg.get("end", 0) == 0:
                 continue
-            # Skip if markup is paragraphBreak, chapterBreak, or heading
             markup = seg.get("markup")
             if markup in ["paragraphBreak", "chapterBreak", "heading"]:
                 continue
-            # Skip empty text
             if not seg.get("text", "").strip():
                 continue
             filtered_segments.append(seg)
@@ -2602,9 +2437,7 @@ def session_transcript_save_vtt(session_id):
         updated = False
         for i, transcript in enumerate(transcripts):
             if transcript.get("language") == language:
-                # Update segments (keep the filtered ones)
                 transcript["segments"] = filtered_segments
-                # Rebuild text from segments
                 transcript["text"] = " ".join(
                     [s.get("text", "") for s in filtered_segments]
                 )
@@ -2629,83 +2462,39 @@ def session_transcript_save_vtt(session_id):
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(transcripts, f, ensure_ascii=False, indent=2)
 
-        # --- 2. Update messages.json ---
-        messages_path = os.path.join(session_dir, "messages.json")
-        if os.path.exists(messages_path):
-            try:
-                with open(messages_path, "r", encoding="utf-8") as f:
-                    messages_data = json.load(f)
+        # --- 2. Determine the correct filename ---
+        # If filename was provided and exists, use it
+        if filename:
+            vtt_filename = filename
+        else:
+            # Try to find an existing VTT file for this language
+            existing_vtt = None
 
-                # messages.json is a list of [lang, json_string] pairs
-                if isinstance(messages_data, list):
-                    for i, item in enumerate(messages_data):
-                        if isinstance(item, list) and len(item) >= 2:
-                            # Check if this language matches
-                            msg_lang = item[0]
-                            if msg_lang == language or language in msg_lang:
-                                try:
-                                    msg_str = item[1]
-                                    if isinstance(msg_str, str):
-                                        msg_data = json.loads(msg_str)
-                                    elif isinstance(msg_str, dict):
-                                        msg_data = msg_str
-                                    else:
-                                        continue
+            # Extract simple language name
+            simple_name = _extract_simple_language_name(language)
 
-                                    # Check if this is a message with segments (has seq, start, end)
-                                    if (
-                                        "seq" in msg_data
-                                        and "start" in msg_data
-                                        and "end" in msg_data
-                                    ):
-                                        # Find matching segment by start time
-                                        start_time = msg_data.get("start", 0)
-                                        # Convert to float if it's a string
-                                        if isinstance(start_time, str):
-                                            try:
-                                                start_time = float(start_time)
-                                            except ValueError:
-                                                start_time = 0
+            # Look for existing VTT files
+            for f in os.listdir(session_dir):
+                if f.endswith(".vtt") and f != "subtitles.vtt":
+                    # Check if this file matches our language
+                    if (
+                        simple_name in f
+                        or language in f
+                        or f.startswith(f"subtitles_{simple_name}")
+                    ):
+                        existing_vtt = f
+                        break
 
-                                        for seg in filtered_segments:
-                                            seg_start = seg.get("start", 0)
-                                            if abs(seg_start - start_time) < 0.01:
-                                                # Update the text
-                                                msg_data["seq"] = seg.get("text", "")
-                                                # Update other fields if present in segment
-                                                if "markup" in seg:
-                                                    msg_data["markup"] = seg.get(
-                                                        "markup"
-                                                    )
-                                                if "speakerName" in seg:
-                                                    msg_data["speakerName"] = seg.get(
-                                                        "speakerName"
-                                                    )
-                                                if "words" in seg:
-                                                    msg_data["words"] = seg.get("words")
-                                                if "word_id" in seg:
-                                                    msg_data["word_id"] = seg.get(
-                                                        "word_id"
-                                                    )
+            if existing_vtt:
+                vtt_filename = existing_vtt
+            else:
+                # Create a new filename with simple name
+                clean_lang = (
+                    simple_name.replace(" ", "_").replace("(", "").replace(")", "")
+                )
+                vtt_filename = f"subtitles_{clean_lang}.vtt"
 
-                                                # Update the message in the list
-                                                if isinstance(msg_str, str):
-                                                    messages_data[i][1] = json.dumps(
-                                                        msg_data
-                                                    )
-                                                else:
-                                                    messages_data[i][1] = msg_data
-                                                break
-                                except (json.JSONDecodeError, TypeError, ValueError):
-                                    continue
-
-                    # Save updated messages
-                    with open(messages_path, "w", encoding="utf-8") as f:
-                        json.dump(messages_data, f, ensure_ascii=False, indent=2)
-            except (json.JSONDecodeError, TypeError, OSError) as e:
-                logging.warning("Could not update messages.json: %s", e)
-
-        # --- 3. Generate VTT content from filtered segments ---
+        # --- 3. Generate VTT content ---
         vtt_lines = ["WEBVTT", ""]
         cue_index = 0
         for seg in filtered_segments:
@@ -2732,18 +2521,13 @@ def session_transcript_save_vtt(session_id):
 
         vtt_content = "\n".join(vtt_lines)
 
-        # Determine the filename
-        if not filename:
-            clean_lang = language.replace(" ", "_").replace("(", "").replace(")", "")
-            filename = f"subtitles_{clean_lang}.vtt"
-
-        # Save VTT file (overwrite existing)
-        vtt_path = os.path.join(session_dir, filename)
+        # Save VTT file
+        vtt_path = os.path.join(session_dir, vtt_filename)
         with open(vtt_path, "w", encoding="utf-8") as f:
             f.write(vtt_content)
 
-        # Also update generic subtitles.vtt if this is the main language
-        if language.lower() in ["en", "english"] or "Original ASR" in language:
+        # Also update subtitles.vtt for the main language
+        if "Original ASR" in language or language.lower() in ["english", "en"]:
             generic_path = os.path.join(session_dir, "subtitles.vtt")
             with open(generic_path, "w", encoding="utf-8") as f:
                 f.write(vtt_content)
@@ -2774,12 +2558,12 @@ def session_transcript_save_vtt(session_id):
                 f.write("\n")
 
         logging.info(
-            "Saved transcript and updated all files for language '%s' in session %s",
+            "Saved transcript and updated VTT for language '%s' in session %s",
             language,
             session_id,
         )
 
-        # Get the updated file list with modification dates
+        # Get the updated file list
         files = []
         for file in os.listdir(session_dir):
             file_path = os.path.join(session_dir, file)
@@ -2795,16 +2579,15 @@ def session_transcript_save_vtt(session_id):
                     }
                 )
 
-        # Save state after changes
         save_state()
 
         return (
             jsonify(
                 {
                     "success": True,
-                    "message": f"Transcript saved and all files updated for language: {language}",
+                    "message": f"Transcript saved and VTT updated: {vtt_filename}",
                     "language": language,
-                    "vtt_filename": filename,
+                    "vtt_filename": vtt_filename,
                     "segments_count": len(filtered_segments),
                     "files": files,
                 }
@@ -2819,14 +2602,43 @@ def session_transcript_save_vtt(session_id):
         return jsonify({"error": f"Failed to save: {str(e)}"}), 500
 
 
-def _format_vtt_timestamp(seconds):
-    """Format seconds to VTT timestamp format: HH:MM:SS.mmm"""
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    millis = int((seconds % 1) * 1000)
+def _extract_simple_language_name(language):
+    """Extract a simple language name from the full language string."""
+    # Try to extract from parentheses
+    match = re.search(r"\(([^)]+)\)", language)
+    if match:
+        code = match.group(1)
+        # Map language codes to simple names
+        code_map = {
+            "en": "English",
+            "de": "German",
+            "ja": "Japanese",
+            "fa": "Persian",
+            "ru": "Russian",
+            "fr": "French",
+            "es": "Spanish",
+            "it": "Italian",
+            "pt": "Portuguese",
+            "nl": "Dutch",
+            "zh": "Chinese",
+            "ar": "Arabic",
+            "hi": "Hindi",
+            "ko": "Korean",
+            "tr": "Turkish",
+            "vi": "Vietnamese",
+            "th": "Thai",
+            "id": "Indonesian",
+            "pl": "Polish",
+            "uk": "Ukrainian",
+        }
+        return code_map.get(code, code)
 
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+    # Clean up the language name
+    clean = language.replace("Translation (Language ", "").replace("Transcript (", "")
+    clean = clean.replace("Original ASR - ", "").replace("Structured - ", "")
+    clean = clean.replace(")", "").strip()
+
+    return clean
 
 
 # ─── AUTH ENDPOINTS ─────────────────────────────────────────────────────
@@ -3040,9 +2852,7 @@ def job_status(job_id):
 
 
 # ─── SESSION OUTPUT ENDPOINTS ──────────────────────────────────────────
-
-
-# In simple_flask_server.py, make sure the session_output endpoint returns files with proper URLs
+# In simple_flask_server.py - Update get_session_output
 
 
 @app.route("/session_output/<session_id>", methods=["GET"])
@@ -3077,11 +2887,18 @@ def get_session_output(session_id):
             if os.path.isfile(file_path) and os.path.getsize(file_path) > 1000:
                 mtime = os.path.getmtime(file_path)
                 mod_time = datetime.datetime.fromtimestamp(mtime).isoformat()
+
+                # For VTT files, use the local file URL
+                if file.endswith(".vtt"):
+                    url = f"/session_file/{session_id}/{file}"
+                else:
+                    url = f"/session_file/{session_id}/{file}"
+
                 files.append(
                     {
                         "name": file,
                         "size": os.path.getsize(file_path),
-                        "url": f"/session_file/{session_id}/{file}",
+                        "url": url,
                         "modified": mod_time,
                     }
                 )
@@ -3111,9 +2928,16 @@ def get_session_file(session_id, filename):
     if not os.path.exists(file_path):
         return jsonify({"error": "File not found"}), 404
 
-    # For VTT files, serve with correct MIME type
+    # For VTT files, serve with correct MIME type and no cache
     if filename.endswith(".vtt"):
-        return send_file(file_path, as_attachment=False, mimetype="text/vtt")
+        response = send_file(
+            file_path, as_attachment=False, mimetype="text/vtt", download_name=filename
+        )
+        # Add headers to prevent caching
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
     return send_file(file_path, as_attachment=True)
 

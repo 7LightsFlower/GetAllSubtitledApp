@@ -220,49 +220,91 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     return null;
   }
 
+
   Future<void> _loadSubtitleTracks() async {
     final List<SubtitleTrack> newTracks = [];
     final Map<String, List<VTTCue>> newParsed = {};
     
-    // Find all VTT files (excluding generic subtitles.vtt)
-    final vttFiles = _files.where((f) => 
+    // Find all VTT files
+    final allVttFiles = _files.where((f) => 
       f.name.endsWith('.vtt') && 
-      f.name != 'subtitles.vtt' // Skip the generic one
+      f.name != 'subtitles.vtt'
     ).toList();
+    
+    if (allVttFiles.isEmpty) {
+      debugPrint('No VTT files found');
+      return;
+    }
+    
+    // Group VTT files by language
+    // First, try to find simple-named ones (subtitles_English.vtt, etc.)
+    // These are the preferred ones
+    final Map<String, List<SessionFile>> languageFiles = {};
+    
+    for (final file in allVttFiles) {
+      String language = _extractLanguageFromFilename(file.name);
+      if (!languageFiles.containsKey(language)) {
+        languageFiles[language] = [];
+      }
+      languageFiles[language]!.add(file);
+    }
+    
+    // Sort languages - put "Original ASR" first if it exists
+    final sortedLanguages = languageFiles.keys.toList()..sort((a, b) {
+      // Prioritize Original ASR
+      if (a.contains('Original') && !b.contains('Original')) return -1;
+      if (!a.contains('Original') && b.contains('Original')) return 1;
+      // Then sort alphabetically
+      return a.compareTo(b);
+    });
     
     final token = await InternalAuthService.getToken();
     
-    for (final file in vttFiles) {
-      String language = file.name
-          .replaceFirst('subtitles_', '')
-          .replaceFirst('.vtt', '');
+    for (final language in sortedLanguages) {
+      final files = languageFiles[language]!;
+      // Prefer files with simpler names (no special characters)
+      // Sort by filename length (shorter is better)
+      files.sort((a, b) => a.name.length.compareTo(b.name.length));
       
-      String label = _getLanguageLabel(language);
-      
-      try {
-        final response = await http.get(
-          Uri.parse('$flaskServerUrl/session_file/${widget.sessionId}/${file.name}'),
-          headers: {
-            'Authorization': 'Bearer ${token ?? ''}',
-          },
-        );
-        
-        if (response.statusCode == 200) {
-          final content = response.body;
-          final cues = _parseVTT(content);
+      // Try to load the best file for this language
+      SessionFile? loadedFile;
+      for (final file in files) {
+        try {
+          // Use the URL from the file object
+          final url = file.url.startsWith('http') 
+              ? file.url 
+              : '$flaskServerUrl${file.url}';
           
-          if (cues.isNotEmpty) {
-            newParsed[language] = cues;
-            newTracks.add(SubtitleTrack(
-              language: language,
-              label: label,
-              url: '$flaskServerUrl/session_file/${widget.sessionId}/${file.name}',
-              content: content,
-            ));
+          debugPrint('Loading subtitle for language "$language" from: $url');
+          
+          final response = await http.get(
+            Uri.parse(url),
+            headers: {
+              'Authorization': 'Bearer ${token ?? ''}',
+              'Cache-Control': 'no-cache',
+            },
+          );
+          
+          if (response.statusCode == 200) {
+            final content = response.body;
+            final cues = _parseVTT(content);
+            
+            if (cues.isNotEmpty) {
+              loadedFile = file;
+              newParsed[language] = cues;
+              newTracks.add(SubtitleTrack(
+                language: language,
+                label: _getLanguageLabel(language),
+                url: url,
+                content: content,
+              ));
+              debugPrint('Loaded subtitle: ${file.name} (${cues.length} cues)');
+              break; // Successfully loaded this language
+            }
           }
+        } catch (e) {
+          debugPrint('Failed to load subtitle ${file.name}: $e');
         }
-      } catch (e) {
-        debugPrint('Failed to load subtitle ${file.name}: $e');
       }
     }
     
@@ -276,6 +318,61 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     });
   }
 
+  /// Extract language name from filename
+  String _extractLanguageFromFilename(String filename) {
+    // Remove 'subtitles_' prefix and '.vtt' suffix
+    String name = filename
+        .replaceFirst('subtitles_', '')
+        .replaceFirst('.vtt', '');
+    
+    // Handle URL encoding
+    name = Uri.decodeComponent(name);
+    
+    // If the name is a simple language code, map it to full name
+    const langMap = {
+      'English': 'English',
+      'German': 'German',
+      'Japanese': 'Japanese',
+      'Persian': 'Persian',
+      'Russian': 'Russian',
+      'French': 'French',
+      'Spanish': 'Spanish',
+      'Italian': 'Italian',
+      'Portuguese': 'Portuguese',
+      'Dutch': 'Dutch',
+      'Chinese': 'Chinese',
+      'Arabic': 'Arabic',
+      'Hindi': 'Hindi',
+      'Korean': 'Korean',
+      'Turkish': 'Turkish',
+      'Vietnamese': 'Vietnamese',
+      'Thai': 'Thai',
+      'Indonesian': 'Indonesian',
+      'Polish': 'Polish',
+      'Ukrainian': 'Ukrainian',
+    };
+    
+    // Check if it's a simple language code
+    if (langMap.containsKey(name)) {
+      return name;
+    }
+    
+    // If it contains parentheses, it's already a full name
+    if (name.contains('(')) {
+      return name;
+    }
+    
+    // Try to find a language code in the name
+    for (final code in langMap.keys) {
+      if (name.contains(code) || name.toLowerCase().contains(code.toLowerCase())) {
+        return code;
+      }
+    }
+    
+    // Return as-is
+    return name;
+  }
+
   /// Get language label for display
   String _getLanguageLabel(String language) {
     // If the language contains parentheses, it's already a full name
@@ -285,27 +382,38 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     
     // Map language codes to full names
     const langMap = {
-      'en': 'English',
-      'de': 'German',
-      'fr': 'French',
-      'es': 'Spanish',
-      'it': 'Italian',
-      'pt': 'Portuguese',
-      'nl': 'Dutch',
-      'ru': 'Russian',
-      'ja': 'Japanese',
-      'ko': 'Korean',
-      'zh': 'Chinese',
-      'ar': 'Arabic',
-      'hi': 'Hindi',
-      'vi': 'Vietnamese',
-      'pl': 'Polish',
-      'tr': 'Turkish',
-      'uk': 'Ukrainian',
-      'th': 'Thai',
-      'id': 'Indonesian',
-      'ms': 'Malay',
+      'English': 'English',
+      'German': 'German',
+      'Japanese': 'Japanese',
+      'Persian': 'Persian',
+      'Russian': 'Russian',
+      'French': 'French',
+      'Spanish': 'Spanish',
+      'Italian': 'Italian',
+      'Portuguese': 'Portuguese',
+      'Dutch': 'Dutch',
+      'Chinese': 'Chinese',
+      'Arabic': 'Arabic',
+      'Hindi': 'Hindi',
+      'Korean': 'Korean',
+      'Turkish': 'Turkish',
+      'Vietnamese': 'Vietnamese',
+      'Thai': 'Thai',
+      'Indonesian': 'Indonesian',
+      'Polish': 'Polish',
+      'Ukrainian': 'Ukrainian',
     };
+    
+    // Handle special cases
+    if (language.contains('Original ASR')) {
+      return 'Original ASR';
+    }
+    if (language.contains('Translation')) {
+      return language;
+    }
+    if (language.contains('Structured')) {
+      return language;
+    }
     
     return langMap[language] ?? language;
   }
@@ -711,10 +819,15 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         _transcripts[index] = editedTranscript;
       }
       
-      // Determine the filename - use the existing filename if available
+      // Dynamically determine the filename
       String vttFilename = '';
+      
+      // Try to find an existing VTT file for this language
       final existingVtt = _files.firstWhere(
-        (f) => f.name.contains(editedTranscript.language) && f.name.endsWith('.vtt'),
+        (f) => f.name.endsWith('.vtt') && 
+              f.name != 'subtitles.vtt' &&
+              (_extractLanguageFromFilename(f.name) == _extractLanguageFromFilename(editedTranscript.language) ||
+                f.name.contains(_extractSimpleLanguage(editedTranscript.language))),
         orElse: () => const SessionFile(name: '', size: 0, url: ''),
       );
       
@@ -722,15 +835,10 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         vttFilename = existingVtt.name;
       } else {
         // Create a clean filename
-        String cleanLanguage = editedTranscript.language
-            .replaceAll(' ', '_')
-            .replaceAll('(', '')
-            .replaceAll(')', '')
-            .replaceAll('/', '_');
+        String cleanLanguage = _extractSimpleLanguage(editedTranscript.language);
         vttFilename = 'subtitles_$cleanLanguage.vtt';
       }
 
-      // Save to server using the existing filename
       final saveUrl = '$flaskServerUrl/session_transcript_save_vtt/${widget.sessionId}';
       
       final requestBody = jsonEncode({
@@ -749,36 +857,55 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       );
 
       if (response.statusCode == 200 || response.statusCode == 201) {
-        // Reload files to get updated VTT
-        final outputUrl = '$flaskServerUrl/session_output/${widget.sessionId}';
-        final outputResponse = await http.get(
-          Uri.parse(outputUrl),
-          headers: {
-            'Authorization': 'Bearer ${token ?? ''}',
-          },
-        );
-
-        if (outputResponse.statusCode == 200) {
-          final outputData = jsonDecode(outputResponse.body);
-          final filesData = outputData['files'] as List? ?? [];
+        final responseData = jsonDecode(response.body);
+        
+        // Update files list from response
+        if (responseData.containsKey('files')) {
+          final filesData = responseData['files'] as List? ?? [];
           _files = filesData.map((f) => SessionFile.fromJson(f)).toList();
+        } else {
+          // Reload files if not in response
+          final outputUrl = '$flaskServerUrl/session_output/${widget.sessionId}';
+          final outputResponse = await http.get(
+            Uri.parse(outputUrl),
+            headers: {
+              'Authorization': 'Bearer ${token ?? ''}',
+            },
+          );
+
+          if (outputResponse.statusCode == 200) {
+            final outputData = jsonDecode(outputResponse.body);
+            final filesData = outputData['files'] as List? ?? [];
+            _files = filesData.map((f) => SessionFile.fromJson(f)).toList();
+          }
         }
 
         // Reload subtitle tracks after saving
         await _loadSubtitleTracks();
+        
+        // Force the video player to reload subtitles
+        if (_selectedSubtitle != null) {
+          final currentSubtitle = _selectedSubtitle;
+          setState(() {
+            _selectedSubtitle = null;
+          });
+          await Future.delayed(const Duration(milliseconds: 100));
+          setState(() {
+            _selectedSubtitle = currentSubtitle;
+          });
+        }
 
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('✅ Transcript saved and VTT updated: $vttFilename'),
+              content: Text('✅ Transcript saved and VTT updated: ${responseData['vtt_filename']}'),
               backgroundColor: Colors.green,
               duration: const Duration(seconds: 3),
             ),
           );
         }
       } else {
-        // If server save fails, download VTT directly as fallback
-        await _downloadVTT(editedTranscript);
+        throw Exception('Failed to save transcript. Server returned: ${response.statusCode}');
       }
     } catch (e) {
       debugPrint('Error saving transcript: $e');
@@ -791,6 +918,50 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         });
       }
     }
+  }
+
+  /// Extract simple language name (without parentheses or special characters)
+  String _extractSimpleLanguage(String language) {
+    // If it contains parentheses, extract the code
+    final match = RegExp(r'\(([^)]+)\)').firstMatch(language);
+    if (match != null) {
+      final code = match.group(1)!;
+      // Map language codes to simple names
+      const codeMap = {
+        'en': 'English',
+        'de': 'German',
+        'ja': 'Japanese',
+        'fa': 'Persian',
+        'ru': 'Russian',
+        'fr': 'French',
+        'es': 'Spanish',
+        'it': 'Italian',
+        'pt': 'Portuguese',
+        'nl': 'Dutch',
+        'zh': 'Chinese',
+        'ar': 'Arabic',
+        'hi': 'Hindi',
+        'ko': 'Korean',
+        'tr': 'Turkish',
+        'vi': 'Vietnamese',
+        'th': 'Thai',
+        'id': 'Indonesian',
+        'pl': 'Polish',
+        'uk': 'Ukrainian',
+      };
+      return codeMap[code] ?? code;
+    }
+    
+    // Clean up the language name
+    String clean = language
+        .replaceAll('Translation (Language ', '')
+        .replaceAll('Transcript (', '')
+        .replaceAll(')', '')
+        .replaceAll('Original ASR - ', '')
+        .replaceAll('Structured - ', '')
+        .replaceAll(' ', '_');
+    
+    return clean;
   }
 
   // Download VTT directly - simplified version without unused variable
@@ -962,6 +1133,21 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
             icon: const Icon(Icons.refresh),
             onPressed: _loadSessionData,
             tooltip: 'Refresh',
+          ),
+          IconButton(
+            icon: const Icon(Icons.subtitles_off),
+            onPressed: () async {
+              // Force reload subtitle tracks
+              await _loadSubtitleTracks();
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('🔄 Subtitles reloaded'),
+                  duration: Duration(seconds: 1),
+                ),
+              );
+            },
+            tooltip: 'Reload Subtitles',
           ),
         ],
       ),
