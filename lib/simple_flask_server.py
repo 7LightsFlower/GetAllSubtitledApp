@@ -2641,6 +2641,433 @@ def _extract_simple_language_name(language):
     return clean
 
 
+@app.route("/update_video_subtitles/<session_id>", methods=["POST"])
+def update_video_subtitles(session_id):
+    """
+    Update the embedded subtitles in video.mp4 with the edited VTT files.
+    Also updates messages.json to reflect the changes.
+    """
+    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    video_path = os.path.join(session_dir, "video.mp4")
+
+    if not os.path.exists(video_path):
+        return jsonify({"error": "video.mp4 not found"}), 404
+
+    try:
+        # --- 1. Get list of VTT files in the session ---
+        vtt_files = []
+        for f in os.listdir(session_dir):
+            if f.endswith(".vtt") and f != "subtitles.vtt":
+                file_path = os.path.join(session_dir, f)
+                # Extract language from filename
+                lang = f.replace("subtitles_", "").replace(".vtt", "")
+                vtt_files.append(
+                    {
+                        "filename": f,
+                        "path": file_path,
+                        "language": lang,
+                        "size": os.path.getsize(file_path),
+                        "modified": os.path.getmtime(file_path),
+                    }
+                )
+
+        if not vtt_files:
+            return jsonify({"error": "No VTT files found to embed"}), 404
+
+        # --- 2. Update messages.json with the edited content ---
+        messages_path = os.path.join(session_dir, "messages.json")
+        updated_count = 0
+        if os.path.exists(messages_path):
+            try:
+                with open(messages_path, "r", encoding="utf-8") as f:
+                    messages_data = json.load(f)
+
+                json_path = os.path.join(session_dir, "transcripts.json")
+                if os.path.exists(json_path):
+                    with open(json_path, "r", encoding="utf-8") as f:
+                        transcripts = json.load(f)
+
+                    language_segments = {}
+                    for transcript in transcripts:
+                        lang = transcript.get("language", "")
+                        if lang:
+                            segments = transcript.get("segments", [])
+                            language_segments[lang] = segments
+
+                    if isinstance(messages_data, list):
+                        for i, item in enumerate(messages_data):
+                            if isinstance(item, list) and len(item) >= 2:
+                                msg_lang = item[0]
+                                matching_segments = None
+                                for lang_key, segments in language_segments.items():
+                                    if (
+                                        msg_lang.lower() in lang_key.lower()
+                                        or lang_key.lower() in msg_lang.lower()
+                                    ):
+                                        matching_segments = segments
+                                        break
+
+                                if matching_segments:
+                                    try:
+                                        msg_str = item[1]
+                                        if isinstance(msg_str, str):
+                                            msg_data = json.loads(msg_str)
+                                        elif isinstance(msg_str, dict):
+                                            msg_data = msg_str
+                                        else:
+                                            continue
+
+                                        if (
+                                            "seq" in msg_data
+                                            and "start" in msg_data
+                                            and "end" in msg_data
+                                        ):
+                                            start_time = msg_data.get("start", 0)
+                                            if isinstance(start_time, str):
+                                                try:
+                                                    start_time = float(start_time)
+                                                except ValueError:
+                                                    start_time = 0
+
+                                            matched_seg = None
+                                            for seg in matching_segments:
+                                                seg_start = seg.get("start", 0)
+                                                if isinstance(seg_start, str):
+                                                    try:
+                                                        seg_start = float(seg_start)
+                                                    except ValueError:
+                                                        seg_start = 0
+                                                if abs(seg_start - start_time) < 0.01:
+                                                    matched_seg = seg
+                                                    break
+
+                                            if matched_seg:
+                                                msg_data["seq"] = matched_seg.get(
+                                                    "text", ""
+                                                )
+                                                if "markup" in matched_seg:
+                                                    msg_data["markup"] = (
+                                                        matched_seg.get("markup")
+                                                    )
+                                                if "speakerName" in matched_seg:
+                                                    msg_data["speakerName"] = (
+                                                        matched_seg.get("speakerName")
+                                                    )
+                                                if "words" in matched_seg:
+                                                    msg_data["words"] = matched_seg.get(
+                                                        "words"
+                                                    )
+                                                if "word_id" in matched_seg:
+                                                    msg_data["word_id"] = (
+                                                        matched_seg.get("word_id")
+                                                    )
+
+                                                if isinstance(msg_str, str):
+                                                    messages_data[i][1] = json.dumps(
+                                                        msg_data
+                                                    )
+                                                else:
+                                                    messages_data[i][1] = msg_data
+                                                updated_count += 1
+                                    except (
+                                        json.JSONDecodeError,
+                                        TypeError,
+                                        ValueError,
+                                    ) as e:
+                                        logging.warning(
+                                            "Could not update message %d: %s", i, e
+                                        )
+                                        continue
+
+                        if updated_count > 0:
+                            with open(messages_path, "w", encoding="utf-8") as f:
+                                json.dump(
+                                    messages_data, f, ensure_ascii=False, indent=2
+                                )
+                            logging.info(
+                                "Updated %d messages in messages.json", updated_count
+                            )
+            except (json.JSONDecodeError, TypeError, OSError) as e:
+                logging.warning("Could not update messages.json: %s", e)
+
+        # --- 3. Create a temporary file for the new video ---
+        temp_output = os.path.join(
+            tempfile.gettempdir(), f"video_updated_{session_id}.mp4"
+        )
+
+        # --- 4. Build ffmpeg command to embed subtitles ---
+        # Start with basic command
+        cmd = ["ffmpeg", "-y"]
+
+        # Add input video
+        cmd.extend(["-i", video_path])
+
+        # Add validated subtitle files as inputs
+        valid_vtt_files = []
+        for vtt in vtt_files:
+            # Validate VTT file first
+            try:
+                with open(vtt["path"], "r", encoding="utf-8") as f:
+                    content = f.read()
+                if not content.strip():
+                    logging.warning("Skipping empty VTT: %s", vtt["filename"])
+                    continue
+                if "WEBVTT" not in content.upper():
+                    logging.warning(
+                        "Skipping invalid VTT (no WEBVTT header): %s", vtt["filename"]
+                    )
+                    continue
+            except (OSError, UnicodeError) as e:
+                logging.warning("Skipping VTT %s: %s", vtt["filename"], e)
+                continue
+
+            cmd.extend(["-i", vtt["path"]])
+            valid_vtt_files.append(vtt)
+
+        # Build subtitle stream mapping
+        # Video stream: 0:v:0, Audio stream: 0:a:0
+        cmd.extend(["-map", "0:v:0"])
+        cmd.extend(["-map", "0:a:0"])
+
+        # Map all subtitle streams from the additional inputs
+        # They start at index 1 (since we have 1 input file)
+        for i, vtt in enumerate(valid_vtt_files):
+            cmd.extend(["-map", f"{i + 1}:s"])
+
+            # Set language metadata
+            lang_code = _get_language_code(vtt["language"])
+            if lang_code:
+                # For ffmpeg, metadata is applied to the output stream
+                # The stream index for subtitle streams will be 2 + i (video=0, audio=1, subtitles=2+)
+                stream_idx = 2 + i
+                cmd.extend([f"-metadata:s:{stream_idx}", f"language={lang_code}"])
+                cmd.extend([f"-metadata:s:{stream_idx}", f"title={vtt['language']}"])
+            else:
+                # Use a default title without language code
+                stream_idx = 2 + i
+                cmd.extend([f"-metadata:s:{stream_idx}", f"title={vtt['language']}"])
+
+        # Remove any existing subtitle streams from the input
+        # This prevents duplication issues
+        cmd.extend(["-map", "-0:s?"])
+
+        # Output options
+        cmd.extend(["-c", "copy"])
+        cmd.extend(["-c:s", "mov_text"])
+        cmd.append(temp_output)
+
+        # Log the command for debugging (sanitize to avoid huge logs)
+        logging.info(
+            "FFmpeg command: %s", " ".join(cmd[:5]) + " ... " + " ".join(cmd[-5:])
+        )
+
+        # --- 5. Run ffmpeg with error handling ---
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=300, check=False
+            )
+
+            if result.returncode != 0:
+                error_msg = result.stderr if result.stderr else "Unknown ffmpeg error"
+                logging.error("FFmpeg error: %s", error_msg)
+                logging.error(
+                    "FFmpeg stdout: %s",
+                    result.stdout[:500] if result.stdout else "None",
+                )
+                return (
+                    jsonify(
+                        {
+                            "error": "ffmpeg failed",
+                            "stderr": error_msg[:500],
+                            "stdout": result.stdout[:500] if result.stdout else None,
+                        }
+                    ),
+                    500,
+                )
+
+        except subprocess.TimeoutExpired:
+            logging.error("ffmpeg timed out for session %s", session_id)
+            return jsonify({"error": "ffmpeg timed out"}), 500
+        except (OSError, ValueError, subprocess.SubprocessError) as e:
+            logging.error("ffmpeg exception: %s", e, exc_info=True)
+            return jsonify({"error": str(e)}), 500
+
+        # --- 6. Replace the original video ---
+        backup_path = os.path.join(session_dir, "video.mp4.backup")
+        if os.path.exists(backup_path):
+            os.remove(backup_path)
+        os.rename(video_path, backup_path)
+        os.rename(temp_output, video_path)
+
+        # --- 7. Sync VTT files ---
+        _sync_vtt_files(session_dir)
+
+        # --- 8. Save state ---
+        save_state()
+
+        logging.info("Successfully updated video subtitles for session %s", session_id)
+
+        return (
+            jsonify(
+                {
+                    "success": True,
+                    "message": "Video subtitles and messages.json updated successfully",
+                    "embedded_subtitles": [
+                        {
+                            "language": vtt["language"],
+                            "filename": vtt["filename"],
+                        }
+                        for vtt in valid_vtt_files
+                    ],
+                    "backup_path": backup_path,
+                    "messages_updated": updated_count,
+                }
+            ),
+            200,
+        )
+
+    # This is the endpoint boundary: unexpected failures must be converted to
+    # an HTTP response instead of escaping Flask.
+    # pylint: disable=broad-exception-caught
+    except Exception as e:
+        logging.error("Error updating video subtitles: %s", e, exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+def _get_language_code(language_name):
+    """Map language name to ISO 639-1 code."""
+    lang_map = {
+        "English": "eng",
+        "German": "deu",
+        "Japanese": "jpn",
+        "Persian": "fas",
+        "Russian": "rus",
+        "French": "fra",
+        "Spanish": "spa",
+        "Italian": "ita",
+        "Portuguese": "por",
+        "Dutch": "nld",
+        "Chinese": "zho",
+        "Arabic": "ara",
+        "Hindi": "hin",
+        "Korean": "kor",
+        "Turkish": "tur",
+        "Vietnamese": "vie",
+        "Thai": "tha",
+        "Indonesian": "ind",
+        "Polish": "pol",
+        "Ukrainian": "ukr",
+        "Original ASR - Language English": "eng",
+    }
+
+    # Try exact match first
+    if language_name in lang_map:
+        return lang_map[language_name]
+
+    # Try partial match
+    for key, code in lang_map.items():
+        if key in language_name or language_name in key:
+            return code
+
+    return None
+
+
+def _sync_vtt_files(session_dir):
+    """Sync subtitles.vtt with the English VTT file."""
+    english_vtt = None
+    for f in os.listdir(session_dir):
+        if f.endswith(".vtt") and ("English" in f or "Original ASR" in f):
+            english_vtt = f
+            break
+
+    if english_vtt:
+        english_path = os.path.join(session_dir, english_vtt)
+        generic_path = os.path.join(session_dir, "subtitles.vtt")
+
+        with open(english_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        with open(generic_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        logging.info("Synced %s -> subtitles.vtt", english_vtt)
+
+
+@app.route("/extract_video_subtitles/<session_id>", methods=["GET"])
+def extract_video_subtitles(session_id):
+    """Extract embedded subtitles from video.mp4 to VTT files."""
+    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    video_path = os.path.join(session_dir, "video.mp4")
+
+    if not os.path.exists(video_path):
+        return jsonify({"error": "video.mp4 not found"}), 404
+
+    try:
+        # First, get info about subtitle streams
+        probe_cmd = [
+            "ffprobe",
+            "-i",
+            video_path,
+            "-show_entries",
+            "stream=index,codec_type,codec_name,language,tags",
+            "-select_streams",
+            "s",
+            "-of",
+            "json",
+        ]
+
+        result = subprocess.run(
+            probe_cmd, capture_output=True, text=True, timeout=30, check=False
+        )
+        if result.returncode != 0:
+            return jsonify({"error": "ffprobe failed", "stderr": result.stderr}), 500
+
+        probe_data = json.loads(result.stdout)
+        streams = probe_data.get("streams", [])
+
+        extracted = []
+        for i, stream in enumerate(streams):
+            stream_index = stream.get("index")
+            language = stream.get("language", f"stream_{i}")
+
+            # Extract subtitle to VTT
+            output_file = os.path.join(
+                session_dir, f"extracted_subtitle_{i}_{language}.vtt"
+            )
+
+            extract_cmd = [
+                "ffmpeg",
+                "-i",
+                video_path,
+                "-map",
+                f"0:{stream_index}",
+                "-c",
+                "copy",
+                "-y",
+                output_file,
+            ]
+
+            subprocess.run(extract_cmd, capture_output=True, timeout=60, check=False)
+
+            if os.path.exists(output_file):
+                extracted.append(
+                    {
+                        "stream_index": stream_index,
+                        "language": language,
+                        "filename": os.path.basename(output_file),
+                        "size": os.path.getsize(output_file),
+                    }
+                )
+
+        return (
+            jsonify({"success": True, "extracted": extracted, "total": len(extracted)}),
+            200,
+        )
+
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, OSError) as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ─── AUTH ENDPOINTS ─────────────────────────────────────────────────────
 
 
