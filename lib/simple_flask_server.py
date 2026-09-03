@@ -10,6 +10,7 @@ import mimetypes
 import os
 import pickle
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -140,25 +141,151 @@ def load_state():
         return False
 
 
-def cleanup_orphaned_files():
-    """Remove video files that are no longer in the videos list."""
-    try:
-        # Get all video files from the videos list
-        active_files = set()
-        for video in videos:
-            file_name = video.get("file_name")
-            if file_name:
-                active_files.add(file_name)
+def clean_missing_videos():
+    """Remove video entries whose files no longer exist on disk."""
+    if not videos:
+        return
 
-        # Scan uploads folder and remove orphaned files
-        for file_name in os.listdir(UPLOAD_FOLDER):
-            if file_name not in active_files and not file_name.startswith("."):
-                file_path = os.path.join(UPLOAD_FOLDER, file_name)
-                if os.path.isfile(file_path):
-                    os.remove(file_path)
-                    logging.info("Removed orphaned file: %s", file_name)
-    except (FileNotFoundError, OSError, TypeError, ValueError) as e:
-        logging.error("Failed to cleanup orphaned files: %s", e)
+    valid_videos = []
+    removed_count = 0
+
+    for video in videos:
+        file_name = video.get("file_name")
+        if not file_name:
+            # Skip entries without a filename
+            removed_count += 1
+            logging.warning(
+                "Removing video entry with no filename: %s",
+                video.get("name", "Unknown"),
+            )
+            continue
+
+        file_path = os.path.join(UPLOAD_FOLDER, file_name)
+        if os.path.exists(file_path):
+            valid_videos.append(video)
+        else:
+            removed_count += 1
+            logging.warning(
+                "Removing missing video: %s (key: %s)",
+                file_name,
+                video.get("key", "N/A"),
+            )
+
+            # Also remove any associated thumbnail
+            thumb_filename = f"{os.path.splitext(file_name)[0]}_thumb.jpg"
+            thumb_path = os.path.join(UPLOAD_FOLDER, thumb_filename)
+            if os.path.exists(thumb_path):
+                try:
+                    os.remove(thumb_path)
+                    logging.info("Removed orphaned thumbnail: %s", thumb_filename)
+                except OSError as e:
+                    logging.warning(
+                        "Could not remove thumbnail %s: %s", thumb_filename, e
+                    )
+
+    if removed_count > 0:
+        videos[:] = valid_videos
+        save_state()
+        logging.info(
+            "🧹 Cleaned up %d missing video(s). %d video(s) remain.",
+            removed_count,
+            len(videos),
+        )
+    else:
+        logging.info("✅ All %d video(s) are valid.", len(videos))
+
+
+def cleanup_orphaned_data():
+    """Remove orphaned sessions and jobs that reference non-existent videos."""
+    # These dictionaries are mutated in place; rebinding their module-level
+    # names is not necessary.
+    session_store = sessions
+    job_store = jobs
+
+    # Get valid video keys
+    valid_video_keys = {video.get("key") for video in videos if video.get("key")}
+
+    # Clean up sessions
+    orphaned_sessions = []
+    for session_id, session in session_store.items():
+        video_key = session.get("video_key")
+        if video_key and video_key not in valid_video_keys:
+            orphaned_sessions.append(session_id)
+            logging.warning(
+                "Removing orphaned session %s (video_key: %s)",
+                session_id,
+                video_key,
+            )
+
+            # Also remove session files if they exist
+            session_dir = os.path.join(SESSION_FOLDER, session_id)
+            if os.path.exists(session_dir):
+                try:
+                    shutil.rmtree(session_dir)
+                    logging.info("Removed session directory: %s", session_dir)
+                except OSError as e:
+                    logging.warning(
+                        "Could not remove session directory %s: %s", session_dir, e
+                    )
+
+    for session_id in orphaned_sessions:
+        del session_store[session_id]
+
+    # Clean up jobs
+    orphaned_jobs = []
+    for job_id, job in job_store.items():
+        video_key = job.get("video_key")
+        if video_key and video_key not in valid_video_keys:
+            orphaned_jobs.append(job_id)
+            logging.warning(
+                "Removing orphaned job %s (video_key: %s)", job_id, video_key
+            )
+
+    for job_id in orphaned_jobs:
+        del job_store[job_id]
+
+    if orphaned_sessions or orphaned_jobs:
+        save_state()
+        logging.info(
+            "🧹 Cleaned up %d orphaned session(s) and %d orphaned job(s)",
+            len(orphaned_sessions),
+            len(orphaned_jobs),
+        )
+
+
+def regenerate_missing_thumbnails():
+    """Regenerate thumbnails for videos that don't have one."""
+    if not videos:
+        return
+
+    regenerated = 0
+    for video in videos:
+        # Skip if already has a thumbnail
+        if video.get("thumbnail_url") and video["thumbnail_url"] != "None":
+            continue
+
+        file_name = video.get("file_name")
+        if not file_name:
+            continue
+
+        file_path = os.path.join(UPLOAD_FOLDER, file_name)
+        if not os.path.exists(file_path):
+            continue
+
+        # Generate thumbnail
+        thumbnail_filename = f"{os.path.splitext(file_name)[0]}_thumb.jpg"
+        thumbnail_path = os.path.join(UPLOAD_FOLDER, thumbnail_filename)
+
+        if generate_video_thumbnail(file_path, thumbnail_path):
+            video["thumbnail_url"] = f"/thumbnails/{thumbnail_filename}"
+            regenerated += 1
+            logging.info("Generated thumbnail for %s", file_name)
+        else:
+            video["thumbnail_url"] = None
+
+    if regenerated > 0:
+        save_state()
+        logging.info("🖼️ Regenerated %d thumbnail(s)", regenerated)
 
 
 def parse_html_with_bs4(html_content):
@@ -264,6 +391,16 @@ def process_job(job_id):
     job = jobs.get(job_id)
     if not job:
         return
+
+    # Get the video key and find the original video
+    video_key = job.get("video_key")
+    original_video = None
+    if video_key:
+        for video in videos:
+            if video.get("key") == video_key:
+                original_video = video
+                break
+
     progress = 0.0
     while progress < 1.0:
         time.sleep(1)
@@ -275,6 +412,18 @@ def process_job(job_id):
             job["status"] = "completed"
             job["transcript"] = generate_mock_transcript()
             job["segments"] = generate_mock_segments()
+
+            # Update the original video with processing results - DON'T create a new one
+            if original_video:
+                original_video["segmentation_done"] = True
+                original_video["segmentation_progress"] = 100
+                original_video["segment_count"] = len(job["segments"])
+                original_video["languages"] = ["en"]
+                logging.info(
+                    "✅ Updated video %s with job results", original_video.get("name")
+                )
+            else:
+                logging.warning("⚠️ No original video found for job %s", job_id)
         save_state()
 
 
@@ -2382,9 +2531,6 @@ def download_session_zip(session_id):
     )
 
 
-# Add this endpoint after /session_download_all or before the auth endpoints
-
-
 # In simple_flask_server.py - Update session_transcript_save_vtt
 
 
@@ -3111,11 +3257,10 @@ def login():
 def get_videos():
     """Return the list of uploaded videos with storage usage info."""
     for video in videos:
-        if video.get("thumbnail_url"):
-            if video["thumbnail_url"].startswith("/thumbnails/"):
-                video["thumbnail_url"] = (
-                    f"http://localhost:5000{video['thumbnail_url']}"
-                )
+        if video.get("thumbnail_url") and video["thumbnail_url"].startswith(
+            "/thumbnails/"
+        ):
+            video["thumbnail_url"] = f"http://localhost:5000{video['thumbnail_url']}"
 
     storage_used_gb = sum(v.get("file_size", 0) for v in videos) / (1024.0**3)
     return (
@@ -3206,6 +3351,7 @@ def finish_upload():
     thumbnail_path = os.path.join(UPLOAD_FOLDER, thumbnail_filename)
     thumbnail_url = None
 
+    # Generate thumbnail with proper path
     if generate_video_thumbnail(file_path, thumbnail_path):
         thumbnail_url = f"/thumbnails/{thumbnail_filename}"
         logging.info("Generated thumbnail: %s", thumbnail_filename)
@@ -3747,8 +3893,12 @@ if __name__ == "__main__":
     # Load saved state
     load_state()
 
-    # Clean up orphaned files
-    cleanup_orphaned_files()
+    # Clean up missing videos and orphaned data
+    clean_missing_videos()
+    cleanup_orphaned_data()
+
+    # Regenerate missing thumbnails
+    regenerate_missing_thumbnails()
 
     logging.info("Starting merged server on http://localhost:5000")
     logging.info("State file: %s", STATE_FILE)

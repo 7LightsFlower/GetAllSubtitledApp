@@ -267,7 +267,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       files.sort((a, b) => a.name.length.compareTo(b.name.length));
       
       // Try to load the best file for this language
-      SessionFile? loadedFile;
       for (final file in files) {
         try {
           // Use the URL from the file object
@@ -290,7 +289,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
             final cues = _parseVTT(content);
             
             if (cues.isNotEmpty) {
-              loadedFile = file;
               newParsed[language] = cues;
               newTracks.add(SubtitleTrack(
                 language: language,
@@ -423,6 +421,106 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     setState(() {
       _selectedSubtitle = language;
     });
+  }
+
+  Future<void> _updateVideoSubtitles() async {
+    // Show confirmation dialog
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Update Video Subtitles'),
+        content: const Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'This will:',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            SizedBox(height: 8),
+            Text('• Embed edited VTT subtitles into the video file'),
+            Text('• Update messages.json with the edited content'),
+            Text('• Keep all your changes in sync'),
+            SizedBox(height: 12),
+            Text(
+              'This may take a few moments. Continue?',
+              style: TextStyle(fontWeight: FontWeight.w500),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.orange,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Update Now'),
+          ),
+        ],
+      ),
+    );
+    
+    if (confirm != true) return;
+    
+    setState(() {
+      _isLoading = true;
+    });
+    
+    try {
+      final token = await InternalAuthService.getToken();
+      final url = '$flaskServerUrl/update_video_subtitles/${widget.sessionId}';
+      
+      final response = await http.post(
+        Uri.parse(url),
+        headers: {
+          'Authorization': 'Bearer ${token ?? ''}',
+        },
+      );
+      
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        
+        // Show detailed success message
+        final subtitleCount = data['embedded_subtitles']?.length ?? 0;
+        final messagesUpdated = data['messages_updated'] ?? 0;
+        
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('✅ ${data['message']}\nEmbedded: $subtitleCount tracks, Updated: $messagesUpdated messages'),
+              backgroundColor: Colors.green,
+              duration: const Duration(seconds: 5),
+            ),
+          );
+          
+          // Reload data to show updates
+          await _loadSessionData();
+        }
+      } else {
+        throw Exception('Failed to update video: ${response.statusCode}');
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ Failed to update video: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
   }
 
   // ─── END OF VTT PARSING ──────────────────────────────────────────────
@@ -1148,6 +1246,11 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
               );
             },
             tooltip: 'Reload Subtitles',
+          ),
+          IconButton(
+            icon: const Icon(Icons.video_settings),
+            onPressed: _updateVideoSubtitles,
+            tooltip: 'Update Video Subtitles',
           ),
         ],
       ),
