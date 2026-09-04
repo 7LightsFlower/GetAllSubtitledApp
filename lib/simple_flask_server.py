@@ -3256,17 +3256,111 @@ def login():
 @app.route("/videos", methods=["GET"])
 def get_videos():
     """Return the list of uploaded videos with storage usage info."""
-    for video in videos:
-        if video.get("thumbnail_url") and video["thumbnail_url"].startswith(
-            "/thumbnails/"
-        ):
-            video["thumbnail_url"] = f"http://localhost:5000{video['thumbnail_url']}"
+    # ============ DEDUPLICATION LOGIC ============
+    # Group videos by filename (without UUID prefix)
+    video_groups = {}
 
-    storage_used_gb = sum(v.get("file_size", 0) for v in videos) / (1024.0**3)
+    for video in videos:
+        file_name = video.get("file_name")
+        if not file_name:
+            continue
+
+        # Check if this is a UUID-prefixed file
+        uuid_match = re.match(
+            r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}_", file_name
+        )
+
+        # Determine the "clean" filename (without UUID prefix)
+        if uuid_match:
+            clean_name = file_name[
+                36:
+            ]  # Remove UUID prefix (8+1+4+1+4+1+4+1+12 = 36 chars)
+            # If clean_name is empty or just extension, keep the original
+            if not clean_name or clean_name.startswith("."):
+                clean_name = file_name
+        else:
+            clean_name = file_name
+
+        # Store in groups by clean_name
+        if clean_name not in video_groups:
+            video_groups[clean_name] = []
+        video_groups[clean_name].append(video)
+
+    # For each group, keep only the best video
+    unique_videos = []
+    for clean_name, group in video_groups.items():
+        if len(group) == 1:
+            # Only one video, keep it
+            unique_videos.append(group[0])
+        else:
+            # Multiple videos with same name - keep the best one
+            best_video = group[0]
+            for video in group[1:]:
+                # Prefer video with:
+                # - segmentation_done == True
+                # - thumbnail_url exists
+                # - larger file_size
+                # - no UUID prefix (prefer clean filename)
+                current_score = 0
+                best_score = 0
+
+                # Check current video (best_video)
+                if best_video.get("segmentation_done"):
+                    best_score += 10
+                if best_video.get("thumbnail_url"):
+                    best_score += 5
+                if best_video.get("file_size", 0) > 0:
+                    best_score += min(
+                        best_video.get("file_size", 0) / 1000000, 10
+                    )  # Up to 10 points for size
+                # Prefer clean filename (no UUID)
+                if not re.match(
+                    r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}_",
+                    best_video.get("file_name", ""),
+                ):
+                    best_score += 3
+
+                # Check candidate video (video)
+                if video.get("segmentation_done"):
+                    current_score += 10
+                if video.get("thumbnail_url"):
+                    current_score += 5
+                if video.get("file_size", 0) > 0:
+                    current_score += min(video.get("file_size", 0) / 1000000, 10)
+                if not re.match(
+                    r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}_",
+                    video.get("file_name", ""),
+                ):
+                    current_score += 3
+
+                if current_score > best_score:
+                    best_video = video
+
+            # Also log which ones were removed
+            for video in group:
+                if video != best_video:
+                    logging.info(
+                        "🗑️ Removing duplicate video: %s (keeping: %s)",
+                        video.get("file_name"),
+                        best_video.get("file_name"),
+                    )
+
+            unique_videos.append(best_video)
+    # ========================================
+
+    # Fix thumbnail URLs
+    for video in unique_videos:
+        if video.get("thumbnail_url"):
+            if video["thumbnail_url"].startswith("/thumbnails/"):
+                video["thumbnail_url"] = (
+                    f"http://localhost:5000{video['thumbnail_url']}"
+                )
+
+    storage_used_gb = sum(v.get("file_size", 0) for v in unique_videos) / (1024.0**3)
     return (
         jsonify(
             {
-                "projects": videos,
+                "projects": unique_videos,
                 "storage_used_gb": round(storage_used_gb, 2),
                 "storage_limit_gb": 50.0,
             }
@@ -3342,6 +3436,13 @@ def finish_upload():
     if not chunks or any(chunk is None for chunk in chunks):
         return jsonify({"message": "Incomplete upload"}), 400
     combined = b"".join(chunks)
+
+    # ============ FIX: Ensure .mp4 extension ============
+    if not filename.lower().endswith(".mp4"):
+        base_name = os.path.splitext(filename)[0]
+        filename = f"{base_name}.mp4"
+    # ====================================================
+
     file_path = os.path.join(UPLOAD_FOLDER, filename)
     with open(file_path, "wb") as f:
         f.write(combined)
@@ -3542,31 +3643,92 @@ def upload_lecture():
 
     session_name = request.form.get("name", file_storage.filename)
 
-    local_filename = f"{uuid.uuid4()}_{file_storage.filename}"
+    # ============ FIX: Use original filename with .mp4 extension ============
+    original_filename = file_storage.filename
+
+    # If filename doesn't have .mp4 extension, add it
+    if not original_filename.lower().endswith(".mp4"):
+        name_without_ext = os.path.splitext(original_filename)[0]
+        original_filename = f"{name_without_ext}.mp4"
+        logging.info("📹 Added .mp4 extension: %s", original_filename)
+    # ====================================================
+
+    # Check if this video already exists
+    existing_video = None
+    for video in videos:
+        if video.get("file_name") == original_filename:
+            existing_video = video
+            break
+
+    # ============ FIX: Initialize variables ============
+    file_size = 0
+    local_filename = original_filename
     local_path = os.path.join(UPLOAD_FOLDER, local_filename)
+    project = None
+    video_key = None
+    # ====================================================
 
-    file_storage.save(local_path)
-    file_size = os.path.getsize(local_path)
-    logging.info("Saved local copy: %s (%d bytes)", local_filename, file_size)
+    if existing_video:
+        # Use existing video
+        video_key = existing_video["key"]
+        project = existing_video  # Use the existing project
+        logging.info(
+            "📹 Using existing video: %s (key: %s)", original_filename, video_key
+        )
 
-    video_key = str(uuid.uuid4())
-    project = {
-        "key": video_key,
-        "name": session_name,
-        "file_name": local_filename,
-        "uploaded": utc_now_iso(),
-        "last_opened": None,
-        "duration": 120.0,
-        "fps": 30.0,
-        "file_size": file_size,
-        "segment_count": 0,
-        "languages": request.form.getlist("language") or ["en"],
-        "thumbnail_url": None,
-        "segmentation_done": False,
-        "segmentation_progress": 0,
-    }
-    videos.append(project)
+        # Check if file exists on disk
+        if not os.path.exists(local_path):
+            # File was deleted, save it again
+            file_storage.save(local_path)
+            file_size = os.path.getsize(local_path)
+            project["file_size"] = file_size
+            logging.info("✅ Restored video file: %s", local_filename)
+        else:
+            # File exists, get its size
+            file_size = os.path.getsize(local_path)
+            project["file_size"] = file_size
+            logging.info(
+                "✅ Using existing file: %s (%d bytes)", local_filename, file_size
+            )
+    else:
+        # New video - use original filename without UUID
+        local_filename = original_filename
+        # Ensure we don't overwrite
+        base_name, ext = os.path.splitext(original_filename)
+        if not ext:
+            ext = ".mp4"
+        counter = 1
+        while os.path.exists(os.path.join(UPLOAD_FOLDER, local_filename)):
+            local_filename = f"{base_name}_{counter}{ext}"
+            counter += 1
 
+        local_path = os.path.join(UPLOAD_FOLDER, local_filename)
+        file_storage.save(local_path)
+        file_size = os.path.getsize(local_path)
+        logging.info("✅ New video saved: %s (%d bytes)", local_filename, file_size)
+
+        video_key = str(uuid.uuid4())
+        project = {
+            "key": video_key,
+            "name": session_name,
+            "file_name": local_filename,
+            "uploaded": utc_now_iso(),
+            "last_opened": None,
+            "duration": 120.0,
+            "fps": 30.0,
+            "file_size": file_size,
+            "segment_count": 0,
+            "languages": request.form.getlist("language") or ["en"],
+            "thumbnail_url": None,
+            "segmentation_done": False,
+            "segmentation_progress": 0,
+        }
+        videos.append(project)
+
+    # ============ FIX: Use the existing code below but with project defined ============
+    # Now project is always defined, so the rest of the code works
+
+    # Build data for the internal server
     data = {}
     for key in request.form.keys():
         if key == "token":
@@ -3825,7 +3987,14 @@ def dex_userinfo():
 
 @app.route("/debug-videos", methods=["GET"])
 def debug_videos():
-    """Debug endpoint: return all video metadata."""
+    """Debug endpoint: return all video metadata (including duplicates)."""
+    # Fix thumbnail URLs
+    for video in videos:
+        if video.get("thumbnail_url"):
+            if video["thumbnail_url"].startswith("/thumbnails/"):
+                video["thumbnail_url"] = (
+                    f"http://localhost:5000{video['thumbnail_url']}"
+                )
     return jsonify({"count": len(videos), "projects": videos}), 200
 
 

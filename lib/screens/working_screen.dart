@@ -80,6 +80,23 @@ class VideoProject {
   }
 }
 
+// ─── Import status enums and classes ────────────────────────────
+enum ImportState { pending, downloading, completed, error }
+
+class ImportVideoStatus {
+  final String url;
+  ImportState state;
+  String message;
+  double progress;
+
+  ImportVideoStatus({
+    required this.url,
+    this.state = ImportState.pending,
+    this.message = 'Pending',
+    this.progress = 0.0,
+  });
+}
+
 // ─── Main screen ────────────────────────────────────────────────
 class WorkingScreen extends StatefulWidget {
   const WorkingScreen({super.key});
@@ -262,6 +279,264 @@ class _WorkingScreenState extends State<WorkingScreen> {
       SnackBar(
         content: Text(msg),
         backgroundColor: isError ? Colors.red : Colors.green,
+      ),
+    );
+  }
+
+  // ─── YouTube URL detection and extraction ─────────────────────────────
+
+  bool _isYouTubeUrl(String url) {
+    final youtubePatterns = [
+      r'youtube\.com/watch\?v=',
+      r'youtu\.be/',
+      r'youtube\.com/shorts/',
+      r'youtube\.com/embed/',
+      r'youtube\.com/v/',
+      r'youtube\.com/e/',
+    ];
+    final lowerUrl = url.toLowerCase();
+    return youtubePatterns.any((pattern) => lowerUrl.contains(pattern));
+  }
+
+  String _extractYouTubeVideoId(String url) {
+    // Try to extract video ID from various YouTube URL formats
+    final patterns = [
+      RegExp(r'youtube\.com/watch\?v=([^&]+)'),
+      RegExp(r'youtu\.be/([^?]+)'),
+      RegExp(r'youtube\.com/shorts/([^?]+)'),
+      RegExp(r'youtube\.com/embed/([^?]+)'),
+      RegExp(r'youtube\.com/v/([^?]+)'),
+    ];
+
+    for (final pattern in patterns) {
+      final match = pattern.firstMatch(url);
+      if (match != null) {
+        return match.group(1)!;
+      }
+    }
+
+    return '';
+  }
+
+  Future<String?> _getYouTubeVideoUrl(String youtubeUrl) async {
+    try {
+      final videoId = _extractYouTubeVideoId(youtubeUrl);
+      if (videoId.isEmpty) {
+        throw Exception('Could not extract video ID from YouTube URL');
+      }
+
+      // First, get the video page to extract the video URL
+      final response = await http.get(
+        Uri.parse('https://www.youtube.com/watch?v=$videoId'),
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+      );
+
+      if (response.statusCode != 200) {
+        throw Exception('Failed to fetch YouTube page: HTTP ${response.statusCode}');
+      }
+
+      // Parse the page to find video URL
+      final body = response.body;
+      
+      // Try to find video URL in various formats
+      // Look for adaptive_formats or url_encoded_fmt_stream_map
+      final videoUrlPatterns = [
+        RegExp(r'"url":"([^"]+\.mp4[^"]*)"'),
+        RegExp(r'"url":"([^"]+\.m3u8[^"]*)"'),
+        RegExp(r'"url":"([^"]+\.webm[^"]*)"'),
+        RegExp(r'url\\u003d([^\\&]+)'),
+      ];
+
+      for (final pattern in videoUrlPatterns) {
+        final match = pattern.firstMatch(body);
+        if (match != null) {
+          String url = match.group(1)!;
+          // Decode URL if it's escaped
+          url = url.replaceAll('\\u0026', '&');
+          url = url.replaceAll('\\/', '/');
+          url = url.replaceAll('\\\\', '');
+          
+          // Prefer mp4 format
+          if (url.contains('.mp4')) {
+            return url;
+          }
+        }
+      }
+
+      // If no direct mp4 found, try to get from yt-dlp or alternative method
+      // For now, return null as we need a video URL
+      return null;
+    } catch (e) {
+      if (kDebugMode) {
+        print('Error getting YouTube video: $e');
+      }
+      return null;
+    }
+  }
+
+  // ─── Import from text ─────────────────────────────────────────────────
+
+  Future<void> _importVideosFromText() async {
+    if (!mounted) return;
+    
+    final controller = TextEditingController();
+    bool autoSegmentation = true;
+    
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) => AlertDialog(
+          title: const Text('Import Videos from Text'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Paste video URLs (one per line):',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              Container(
+                width: 400,
+                height: 200,
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey[300]!),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: TextField(
+                  controller: controller,
+                  maxLines: null,
+                  expands: true,
+                  decoration: const InputDecoration(
+                    hintText: 'https://example.com/video1.mp4\nhttps://youtube.com/watch?v=abc123\nhttps://example.com/video2.mp4\n...',
+                    border: InputBorder.none,
+                    contentPadding: EdgeInsets.all(12),
+                  ),
+                  style: const TextStyle(fontSize: 13),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Checkbox(
+                    value: autoSegmentation,
+                    onChanged: (v) => setState(() => autoSegmentation = v!),
+                  ),
+                  const Text('Auto Segmentation for all videos'),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Supports: direct video URLs (MP4, WebM, MOV) and YouTube links',
+                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                if (controller.text.trim().isNotEmpty) {
+                  Navigator.pop(ctx, true);
+                }
+              },
+              child: const Text('Import Videos'),
+            ),
+          ],
+        ),
+      ),
+    );
+    
+    if (result != true || !mounted) return;
+    
+    final text = controller.text.trim();
+    final urls = text.split('\n')
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .toList();
+    
+    if (urls.isEmpty) {
+      _showSnackBar('No URLs found in text.', isError: true);
+      return;
+    }
+    
+    // Show import progress dialog
+    await _importVideosFromUrls(urls, autoSegmentation);
+  }
+
+  bool _isValidUrl(String url) {
+    try {
+      final uri = Uri.parse(url);
+      return uri.scheme == 'http' || uri.scheme == 'https';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _importVideosFromUrls(List<String> urls, bool autoSegmentation) async {
+    if (!mounted) return;
+    
+    // First, resolve YouTube URLs
+    List<String> resolvedUrls = [];
+    List<String> errors = [];
+    
+    for (final url in urls) {
+      if (_isYouTubeUrl(url)) {
+        // Try to get the actual video URL
+        final videoUrl = await _getYouTubeVideoUrl(url);
+        if (videoUrl != null) {
+          resolvedUrls.add(videoUrl);
+          if (kDebugMode) print('✅ Resolved YouTube URL: $url -> $videoUrl');
+        } else {
+          errors.add('Failed to resolve YouTube URL: $url');
+          if (kDebugMode) print('❌ Failed to resolve YouTube URL: $url');
+        }
+      } else if (_isValidUrl(url)) {
+        resolvedUrls.add(url);
+      } else {
+        errors.add('Invalid URL: $url');
+      }
+    }
+
+    if (!mounted) return;
+    
+    if (errors.isNotEmpty) {
+      final errorMessage = errors.join('\n');
+      _showSnackBar('⚠️ Errors:\n$errorMessage', isError: true);
+    }
+    
+    if (resolvedUrls.isEmpty) {
+      _showSnackBar('No valid video URLs found to import.', isError: true);
+      return;
+    }
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => _ImportVideosDialog(
+        urls: resolvedUrls,
+        autoSegmentation: autoSegmentation,
+        onComplete: () {
+          if (mounted) {
+            Navigator.pop(ctx);
+            _fetchProjects();
+            final errorCount = errors.length;
+            final message = errorCount > 0 
+                ? '✅ Import completed! ($errorCount failed)'
+                : '✅ Import completed!';
+            _showSnackBar(message);
+          }
+        },
+        onError: (error) {
+          if (mounted) {
+            _showSnackBar('❌ Import error: $error', isError: true);
+          }
+        },
       ),
     );
   }
@@ -607,6 +882,12 @@ class _WorkingScreenState extends State<WorkingScreen> {
       appBar: AppBar(
         title: const Text(appTitle),
         actions: [
+          // ─── Import from Text Button ────────────────────────────────────
+          IconButton(
+            icon: const Icon(Icons.text_snippet),
+            onPressed: _importVideosFromText,
+            tooltip: 'Import from text links',
+          ),
           // ─── Manual Token Button ────────────────────────────────────
           IconButton(
             icon: const Icon(Icons.vpn_key),
@@ -1060,6 +1341,293 @@ class _WorkingScreenState extends State<WorkingScreen> {
     } else {
       return '$bytes B';
     }
+  }
+}
+
+// ─── Import Videos Dialog ──────────────────────────────────────
+
+class _ImportVideosDialog extends StatefulWidget {
+  final List<String> urls;
+  final bool autoSegmentation;
+  final VoidCallback onComplete;
+  final Function(String) onError;
+
+  const _ImportVideosDialog({
+    required this.urls,
+    required this.autoSegmentation,
+    required this.onComplete,
+    required this.onError,
+  });
+
+  @override
+  State<_ImportVideosDialog> createState() => _ImportVideosDialogState();
+}
+
+class _ImportVideosDialogState extends State<_ImportVideosDialog> {
+  List<ImportVideoStatus> _statuses = [];
+  bool _isComplete = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _statuses = widget.urls.map((url) => ImportVideoStatus(url: url)).toList();
+    _startImport();
+  }
+
+  Future<void> _startImport() async {
+    for (int i = 0; i < _statuses.length; i++) {
+      if (!mounted) break;
+      
+      final status = _statuses[i];
+      setState(() {
+        status.state = ImportState.downloading;
+        status.message = 'Downloading...';
+      });
+      
+      try {
+        final token = await InternalAuthService.getToken();
+        if (token == null || token.isEmpty) {
+          throw Exception('No authentication token available');
+        }
+        
+        // Download video from URL
+        final response = await http.get(
+          Uri.parse(status.url),
+          headers: {
+            'Accept': 'video/*',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          },
+        );
+        
+        if (response.statusCode != 200) {
+          throw Exception('Failed to download: HTTP ${response.statusCode}');
+        }
+        
+        if (response.bodyBytes.isEmpty) {
+          throw Exception('Downloaded file is empty');
+        }
+        
+        // Extract filename from URL
+        final fileName = _extractFileNameFromUrl(status.url, response);
+        
+        setState(() {
+          status.message = 'Uploading...';
+        });
+        
+        // Upload to server
+        await _uploadVideoToServer(
+          bytes: response.bodyBytes,
+          fileName: fileName,
+          autoSegmentation: widget.autoSegmentation,
+          onProgress: (progress) {
+            if (mounted) {
+              setState(() {
+                status.progress = progress;
+                status.message = 'Uploading ${progress.toStringAsFixed(0)}%';
+              });
+            }
+          },
+        );
+        
+        setState(() {
+          status.state = ImportState.completed;
+          status.message = '✓ Complete';
+          status.progress = 100;
+        });
+        
+      } catch (e) {
+        setState(() {
+          status.state = ImportState.error;
+          status.message = '✗ Error: $e';
+        });
+        if (mounted) {
+          widget.onError('Failed to import ${status.url}: $e');
+        }
+      }
+    }
+    
+    setState(() {
+      _isComplete = true;
+    });
+    
+    // Notify completion
+    widget.onComplete();
+  }
+
+  Future<void> _uploadVideoToServer({
+    required Uint8List bytes,
+    required String fileName,
+    required bool autoSegmentation,
+    required Function(double) onProgress,
+  }) async {
+    const chunkSize = 5 * 1024 * 1024;
+    final totalBytes = bytes.length;
+    final totalChunks = (totalBytes / chunkSize).ceil();
+
+    for (int i = 0; i < totalChunks; i++) {
+      final start = i * chunkSize;
+      final end = (i + 1) * chunkSize > totalBytes ? totalBytes : (i + 1) * chunkSize;
+      final chunk = bytes.sublist(start, end);
+
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('$authBaseUrl/upload-chunk'),
+      );
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          'file',
+          chunk,
+          filename: fileName,
+          contentType: MediaType('video', 'mp4'),
+        ),
+      );
+      request.fields['filename'] = fileName;
+      request.fields['chunk_index'] = i.toString();
+      request.fields['total_chunks'] = totalChunks.toString();
+
+      final response = await request.send();
+      if (response.statusCode != 200) {
+        throw Exception('Chunk upload failed: ${response.statusCode}');
+      }
+
+      onProgress(((i + 1) / totalChunks) * 100);
+    }
+
+    // Finish upload
+    final finishResponse = await http.post(
+      Uri.parse('$authBaseUrl/finish-upload'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'filename': fileName,
+        'auto_segmentation': autoSegmentation,
+      }),
+    );
+    if (finishResponse.statusCode != 200) {
+      throw Exception('Finish upload failed');
+    }
+  }
+
+  String _extractFileNameFromUrl(String url, http.Response response) {
+    // Try to get filename from Content-Disposition header
+    final disposition = response.headers['content-disposition'];
+    if (disposition != null) {
+      final regex = RegExp(r'filename="([^"]+)"');
+      final match = regex.firstMatch(disposition);
+      if (match != null) {
+        return match.group(1)!;
+      }
+    }
+    
+    // Extract from URL path
+    try {
+      final uri = Uri.parse(url);
+      final path = uri.path;
+      final segments = path.split('/');
+      final lastSegment = segments.last;
+      if (lastSegment.contains('.')) {
+        return lastSegment;
+      }
+    } catch (_) {}
+    
+    // Generate filename
+    final extension = _getFileExtensionFromUrl(url);
+    return 'video_${DateTime.now().millisecondsSinceEpoch}.$extension';
+  }
+
+  String _getFileExtensionFromUrl(String url) {
+    final lower = url.toLowerCase();
+    if (lower.contains('.mp4')) return 'mp4';
+    if (lower.contains('.webm')) return 'webm';
+    if (lower.contains('.mov')) return 'mov';
+    if (lower.contains('.avi')) return 'avi';
+    if (lower.contains('.mkv')) return 'mkv';
+    if (lower.contains('.flv')) return 'flv';
+    if (lower.contains('.wmv')) return 'wmv';
+    if (lower.contains('.m4v')) return 'm4v';
+    return 'mp4';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(_isComplete ? 'Import Complete' : 'Importing Videos'),
+      content: Container(
+        width: 500,
+        constraints: const BoxConstraints(maxHeight: 400),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!_isComplete)
+              LinearProgressIndicator(
+                value: _statuses.isEmpty ? 0 : 
+                    _statuses.where((s) => s.state == ImportState.completed).length / _statuses.length,
+              ),
+            const SizedBox(height: 16),
+            Flexible(
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: _statuses.length,
+                itemBuilder: (ctx, index) {
+                  final status = _statuses[index];
+                  return ListTile(
+                    dense: true,
+                    leading: _buildStatusIcon(status.state),
+                    title: Text(
+                      _truncateUrl(status.url, 60),
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                    trailing: Text(
+                      status.message,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: status.state == ImportState.error ? Colors.red : 
+                               status.state == ImportState.completed ? Colors.green : 
+                               Colors.grey,
+                      ),
+                    ),
+                    subtitle: status.state == ImportState.downloading && status.progress > 0
+                        ? LinearProgressIndicator(
+                            value: status.progress / 100,
+                            minHeight: 4,
+                          )
+                        : null,
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        if (_isComplete)
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildStatusIcon(ImportState state) {
+    switch (state) {
+      case ImportState.pending:
+        return const Icon(Icons.pending, color: Colors.grey, size: 20);
+      case ImportState.downloading:
+        return const SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        );
+      case ImportState.completed:
+        return const Icon(Icons.check_circle, color: Colors.green, size: 20);
+      case ImportState.error:
+        return const Icon(Icons.error, color: Colors.red, size: 20);
+    }
+  }
+
+  String _truncateUrl(String url, int maxLength) {
+    if (url.length <= maxLength) return url;
+    return '${url.substring(0, maxLength - 3)}...';
   }
 }
 

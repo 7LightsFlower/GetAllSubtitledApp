@@ -740,7 +740,12 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     }
 
     final blob = html.Blob([videoBytes]);
-    formData.appendBlob('videofile', blob, fileName);
+    // Make sure fileName has .mp4 extension
+    String uploadFileName = fileName;
+    if (!uploadFileName.toLowerCase().endsWith('.mp4')) {
+      uploadFileName = '$uploadFileName.mp4';
+    }
+    formData.appendBlob('videofile', blob, uploadFileName);
 
     final request = html.HttpRequest();
     request.open('POST', uploadUrl);
