@@ -19,6 +19,7 @@ import uuid
 import zipfile
 
 import requests
+import yt_dlp
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from docx import Document
@@ -3075,7 +3076,15 @@ def update_video_subtitles(session_id):
     # This is the endpoint boundary: unexpected failures must be converted to
     # an HTTP response instead of escaping Flask.
     # pylint: disable=broad-exception-caught
-    except Exception as e:
+    except (
+        AttributeError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+        RuntimeError,
+        yt_dlp.utils.DownloadError,
+    ) as e:
         logging.error("Error updating video subtitles: %s", e, exc_info=True)
         return jsonify({"error": str(e)}), 500
 
@@ -3614,6 +3623,517 @@ def get_session_file(session_id, filename):
         return response
 
     return send_file(file_path, as_attachment=True)
+
+
+# ─── YOUTUBE DOWNLOADER FUNCTIONS ──────────────────────────────────────
+
+
+def extract_youtube_video_id(url):
+    """Extract YouTube video ID from various URL formats."""
+    patterns = [
+        r"youtube\.com/watch\?v=([^&]+)",
+        r"youtu\.be/([^?]+)",
+        r"youtube\.com/shorts/([^?]+)",
+        r"youtube\.com/embed/([^?]+)",
+        r"youtube\.com/v/([^?]+)",
+        r"youtube\.com/e/([^?]+)",
+        r"m\.youtube\.com/watch\?v=([^&]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+
+def is_youtube_url(url):
+    """Check if a URL is a YouTube URL."""
+    youtube_patterns = [
+        "youtube.com/watch?v=",
+        "youtu.be/",
+        "youtube.com/shorts/",
+        "youtube.com/embed/",
+        "youtube.com/v/",
+        "youtube.com/e/",
+        "m.youtube.com/watch?v=",
+    ]
+    return any(pattern in url.lower() for pattern in youtube_patterns)
+
+
+def get_youtube_video_info(youtube_url):
+    """
+    Get video info from YouTube using yt-dlp.
+    Returns video info including URL, title, duration, etc.
+    """
+    try:
+        # First check if it's a YouTube URL
+        if not is_youtube_url(youtube_url):
+            return {"success": False, "error": "Not a valid YouTube URL"}
+
+        video_id = extract_youtube_video_id(youtube_url)
+        if not video_id:
+            return {"success": False, "error": "Could not extract video ID"}
+
+        # Configure yt-dlp options
+        ydl_opts = {
+            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": False,
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-us,en;q=0.5",
+                "Sec-Fetch-Mode": "navigate",
+            },
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Extract info without downloading
+            info = ydl.extract_info(youtube_url, download=False)
+
+            if not info:
+                return {
+                    "success": False,
+                    "error": "Could not extract video information",
+                }
+
+            # Get the video URL
+            video_url = info.get("url")
+            if not video_url:
+                # Try to get URL from formats
+                formats = info.get("formats", [])
+                for fmt in formats:
+                    # Prefer MP4 with video and audio
+                    if fmt.get("ext") == "mp4" and fmt.get("vcodec") != "none":
+                        video_url = fmt.get("url")
+                        break
+                    elif fmt.get("ext") == "mp4" and fmt.get("acodec") != "none":
+                        video_url = fmt.get("url")
+                        break
+
+                # If still no URL, try the first format
+                if not video_url and formats:
+                    video_url = formats[0].get("url")
+
+            if not video_url:
+                return {"success": False, "error": "Could not find video URL"}
+
+            # Get title and other metadata
+            title = info.get("title", "video")
+            # Clean title for filename
+            title = re.sub(r'[\\/*?:"<>|]', "_", title)
+
+            # Get duration
+            duration = info.get("duration", 0)
+
+            # Get thumbnail
+            thumbnail = info.get("thumbnail", "")
+
+            return {
+                "success": True,
+                "url": video_url,
+                "title": title,
+                "duration": duration,
+                "thumbnail": thumbnail,
+                "video_id": video_id,
+                "format": info.get("format", "mp4"),
+                "ext": info.get("ext", "mp4"),
+                "filesize": info.get("filesize", 0),
+            }
+
+    except yt_dlp.utils.DownloadError as e:
+        logging.error("yt-dlp download error: %s", str(e))
+        return {"success": False, "error": f"Download error: {str(e)}"}
+    except yt_dlp.utils.ExtractorError as e:
+        logging.error("yt-dlp extractor error: %s", str(e))
+        return {"success": False, "error": f"Extractor error: {str(e)}"}
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as e:
+        logging.error("YouTube error: %s", str(e), exc_info=True)
+        return {"success": False, "error": f"Error: {str(e)}"}
+
+
+def download_youtube_video_adaptive(youtube_url, output_dir, filename=None):
+    """
+    Adaptive YouTube downloader that first checks available formats.
+    Works with all videos including Shorts and age-restricted content.
+    """
+    try:
+        if not is_youtube_url(youtube_url):
+            return {"success": False, "error": "Not a valid YouTube URL"}
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        logging.info("🔍 Checking available formats for: %s", youtube_url)
+
+        # Step 1: Get available formats
+        with yt_dlp.YoutubeDL(
+            {
+                "quiet": True,
+                "no_warnings": True,
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                },
+            }
+        ) as ydl:
+            info = ydl.extract_info(youtube_url, download=False)
+
+            if not info:
+                return {"success": False, "error": "Could not get video info"}
+
+            # Find the best format
+            best_format = None
+            best_score = -1
+            available_formats = []
+
+            for fmt in info.get("formats", []):
+                # Skip formats without video
+                if fmt.get("vcodec") == "none":
+                    continue
+
+                # Calculate score
+                score = 0
+                # Prefer MP4
+                if fmt.get("ext") == "mp4":
+                    score += 100
+                # Prefer higher resolution
+                height = fmt.get("height", 0)
+                if height:
+                    score += height
+                # Prefer formats with audio
+                if fmt.get("acodec") != "none":
+                    score += 50
+
+                available_formats.append(
+                    {
+                        "format_id": fmt.get("format_id"),
+                        "ext": fmt.get("ext"),
+                        "height": height,
+                        "has_audio": fmt.get("acodec") != "none",
+                        "score": score,
+                    }
+                )
+
+                if score > best_score:
+                    best_score = score
+                    best_format = fmt
+
+            if not best_format:
+                return {"success": False, "error": "No suitable format found"}
+
+            format_id = best_format.get("format_id")
+            logging.info(
+                "📹 Selected format: %s (score: %s)", format_id, best_score
+            )
+            logging.info(
+                "📹 Available formats: %s...", available_formats[:5]
+            )  # Log first 5
+
+        # Step 2: Download with the selected format
+        ydl_opts = {
+            "format": format_id,
+            "outtmpl": os.path.join(output_dir, "%(title)s.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "ignoreerrors": True,
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            },
+            "merge_output_format": "mp4",
+            "prefer_insecure": True,
+            "no_check_certificate": True,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            logging.info("📥 Downloading video...")
+            info = ydl.extract_info(youtube_url, download=True)
+
+            if not info:
+                return {"success": False, "error": "Could not download video"}
+
+            title = info.get("title", "video")
+            # Clean title for filename
+            title = re.sub(r'[\\/*?:"<>|]', "_", title)
+
+            downloaded_file = None
+            # Check for common extensions
+            for ext in [".mp4", ".webm", ".mkv"]:
+                possible = os.path.join(output_dir, f"{title}{ext}")
+                if os.path.exists(possible):
+                    downloaded_file = possible
+                    break
+
+            # If not found, look for any recent video file in the directory
+            if not downloaded_file:
+                for f in os.listdir(output_dir):
+                    if f.endswith((".mp4", ".webm", ".mkv")):
+                        file_path = os.path.join(output_dir, f)
+                        # Check if file was created recently (last 2 minutes)
+                        if os.path.getmtime(file_path) > time.time() - 120:
+                            downloaded_file = file_path
+                            break
+
+            if not downloaded_file:
+                return {"success": False, "error": "Downloaded file not found"}
+
+            # Rename if needed
+            if filename and os.path.exists(downloaded_file):
+                _, ext = os.path.splitext(downloaded_file)
+                new_filename = filename
+                if not new_filename.endswith(ext):
+                    new_filename = f"{new_filename}{ext}"
+                new_path = os.path.join(output_dir, new_filename)
+                os.rename(downloaded_file, new_path)
+                downloaded_file = new_path
+
+            file_size = (
+                os.path.getsize(downloaded_file)
+                if os.path.exists(downloaded_file)
+                else 0
+            )
+            logging.info(
+                "✅ Download complete: %s (%s bytes)",
+                os.path.basename(downloaded_file),
+                file_size,
+            )
+
+            return {
+                "success": True,
+                "file_path": downloaded_file,
+                "title": title,
+                "filename": os.path.basename(downloaded_file),
+                "duration": info.get("duration", 0),
+                "filesize": file_size,
+            }
+
+    except yt_dlp.utils.DownloadError as e:
+        logging.error("yt-dlp download error: %s", str(e))
+        return {"success": False, "error": f"Download error: {str(e)}"}
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError) as e:
+        logging.error("YouTube download error: %s", str(e), exc_info=True)
+        return {"success": False, "error": f"Error: {str(e)}"}
+
+
+# ─── YOUTUBE API ROUTES ────────────────────────────────────────────────
+
+
+@app.route("/api/youtube-info", methods=["POST", "OPTIONS"])
+def youtube_info():
+    """
+    Get YouTube video information without downloading.
+    """
+    if request.method == "OPTIONS":
+        response = jsonify({"message": "OK"})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add(
+            "Access-Control-Allow-Headers", "Content-Type,Authorization"
+        )
+        response.headers.add("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        return response, 200
+
+    try:
+        data = request.get_json()
+        if not data or "url" not in data:
+            return jsonify({"error": "URL is required"}), 400
+
+        youtube_url = data["url"]
+        result = get_youtube_video_info(youtube_url)
+
+        if result.get("success"):
+            return (
+                jsonify(
+                    {
+                        "success": True,
+                        "video_id": result.get("video_id"),
+                        "title": result.get("title"),
+                        "duration": result.get("duration"),
+                        "thumbnail": result.get("thumbnail"),
+                        "format": result.get("format"),
+                        "url": result.get("url"),
+                    }
+                ),
+                200,
+            )
+        else:
+            return (
+                jsonify(
+                    {"success": False, "error": result.get("error", "Unknown error")}
+                ),
+                400,
+            )
+
+    except (ValueError, TypeError, KeyError) as e:
+        logging.error("YouTube info error: %s", str(e), exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/youtube-download-and-upload", methods=["POST", "OPTIONS"])
+def youtube_download_and_upload():
+    """
+    Download a YouTube video and upload it to the internal server.
+    """
+    if request.method == "OPTIONS":
+        response = jsonify({"message": "OK"})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add(
+            "Access-Control-Allow-Headers", "Content-Type,Authorization"
+        )
+        response.headers.add("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        return response, 200
+
+    try:
+        data = request.get_json()
+        if not data or "url" not in data:
+            return jsonify({"error": "URL is required"}), 400
+
+        youtube_url = data["url"]
+        auto_segmentation = data.get("auto_segmentation", True)
+
+        logging.info("📥 Downloading YouTube video: %s", youtube_url)
+
+        # Get video info first
+        try:
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                },
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(youtube_url, download=False)
+                title = info.get("title", "youtube_video")
+                duration = info.get("duration", 0)
+
+            clean_title = re.sub(r'[\\/*?:"<>|]', "_", title)
+            filename = f"{clean_title}.mp4"
+
+            if len(filename) > 200:
+                name, ext = os.path.splitext(filename)
+                filename = name[:195] + ext
+
+            logging.info("📹 Video: %s", title)
+
+        except (
+            OSError,
+            TypeError,
+            ValueError,
+            RuntimeError,
+            yt_dlp.utils.DownloadError,
+        ) as e:
+            logging.error("❌ Error getting video info: %s", e)
+            return jsonify({"success": False, "error": f"Info error: {str(e)}"}), 400
+
+        # Download the video using adaptive method
+        try:
+            download_result = download_youtube_video_adaptive(
+                youtube_url, UPLOAD_FOLDER, filename
+            )
+        except (
+            OSError,
+            TypeError,
+            ValueError,
+            RuntimeError,
+            yt_dlp.utils.DownloadError,
+        ) as e:
+            logging.error("❌ Error downloading video: %s", e)
+            return (
+                jsonify({"success": False, "error": f"Download error: {str(e)}"}),
+                400,
+            )
+
+        if not download_result.get("success"):
+            error_msg = download_result.get("error", "Download failed")
+            logging.error("❌ Download error: %s", error_msg)
+            return jsonify({"success": False, "error": error_msg}), 400
+
+        file_path = download_result.get("file_path")
+        if not file_path or not os.path.exists(file_path):
+            return jsonify({"error": "Downloaded file not found"}), 500
+
+        file_size = download_result.get("filesize", 0)
+        duration = download_result.get("duration", 0)
+        actual_filename = download_result.get("filename", filename)
+
+        logging.info("✅ Video downloaded: %s (%s bytes)", file_path, file_size)
+
+        # Generate thumbnail
+        thumbnail_filename = f"{os.path.splitext(actual_filename)[0]}_thumb.jpg"
+        thumbnail_path = os.path.join(UPLOAD_FOLDER, thumbnail_filename)
+        thumbnail_url = None
+
+        if generate_video_thumbnail(file_path, thumbnail_path):
+            thumbnail_url = f"/thumbnails/{thumbnail_filename}"
+            logging.info("🖼️ Generated thumbnail")
+
+        # Get video metadata
+        if duration == 0:
+            duration, fps = get_video_metadata(file_path)
+        else:
+            fps = 30.0
+
+        # Create project entry
+        video_key = str(uuid.uuid4())
+        project = {
+            "key": video_key,
+            "name": clean_title,
+            "file_name": actual_filename,
+            "uploaded": utc_now_iso(),
+            "last_opened": None,
+            "duration": duration,
+            "fps": fps,
+            "file_size": file_size,
+            "segment_count": 0,
+            "languages": ["en"],
+            "thumbnail_url": thumbnail_url,
+            "segmentation_done": auto_segmentation,
+            "segmentation_progress": 100 if auto_segmentation else 0,
+        }
+
+        # Add to videos list
+        videos.append(project)
+        save_state()
+
+        logging.info("✅ YouTube video uploaded successfully: %s", clean_title)
+
+        # Start segmentation job if enabled
+        if auto_segmentation:
+            job_id = str(uuid.uuid4())
+            job = {
+                "id": job_id,
+                "video_key": video_key,
+                "status": "processing",
+                "progress": 0.0,
+                "transcript": None,
+                "segments": None,
+                "created_at": utc_now_iso(),
+                "config": {"auto_segmentation": True},
+            }
+            jobs[job_id] = job
+            threading.Thread(target=process_job, args=(job_id,), daemon=True).start()
+            save_state()
+
+        return (
+            jsonify(
+                {
+                    "success": True,
+                    "video_info": {
+                        "title": clean_title,
+                        "duration": duration,
+                        "file_size": file_size,
+                    },
+                    "project": project,
+                    "message": f'Video "{clean_title}" imported successfully',
+                    "filename": actual_filename,
+                    "video_key": video_key,
+                }
+            ),
+            200,
+        )
+
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as e:
+        logging.error("YouTube download error: %s", str(e), exc_info=True)
+        return jsonify({"success": False, "error": f"Server error: {str(e)}"}), 500
 
 
 # ─── UPLOAD ENDPOINT ────────────────────────────────────────────────────

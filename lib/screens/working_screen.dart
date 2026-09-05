@@ -293,19 +293,21 @@ class _WorkingScreenState extends State<WorkingScreen> {
       r'youtube\.com/embed/',
       r'youtube\.com/v/',
       r'youtube\.com/e/',
+      r'm\.youtube\.com/',
     ];
     final lowerUrl = url.toLowerCase();
     return youtubePatterns.any((pattern) => lowerUrl.contains(pattern));
   }
 
   String _extractYouTubeVideoId(String url) {
-    // Try to extract video ID from various YouTube URL formats
     final patterns = [
       RegExp(r'youtube\.com/watch\?v=([^&]+)'),
       RegExp(r'youtu\.be/([^?]+)'),
       RegExp(r'youtube\.com/shorts/([^?]+)'),
       RegExp(r'youtube\.com/embed/([^?]+)'),
       RegExp(r'youtube\.com/v/([^?]+)'),
+      RegExp(r'youtube\.com/e/([^?]+)'),
+      RegExp(r'm\.youtube\.com/watch\?v=([^&]+)'),
     ];
 
     for (final pattern in patterns) {
@@ -325,56 +327,139 @@ class _WorkingScreenState extends State<WorkingScreen> {
         throw Exception('Could not extract video ID from YouTube URL');
       }
 
-      // First, get the video page to extract the video URL
-      final response = await http.get(
-        Uri.parse('https://www.youtube.com/watch?v=$videoId'),
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        },
+      // Use your server's YouTube API endpoint
+      const serverUrl = 'http://localhost:5000/api/youtube-info';
+      
+      final response = await http.post(
+        Uri.parse(serverUrl),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'url': youtubeUrl}),
       );
 
-      if (response.statusCode != 200) {
-        throw Exception('Failed to fetch YouTube page: HTTP ${response.statusCode}');
-      }
-
-      // Parse the page to find video URL
-      final body = response.body;
-      
-      // Try to find video URL in various formats
-      // Look for adaptive_formats or url_encoded_fmt_stream_map
-      final videoUrlPatterns = [
-        RegExp(r'"url":"([^"]+\.mp4[^"]*)"'),
-        RegExp(r'"url":"([^"]+\.m3u8[^"]*)"'),
-        RegExp(r'"url":"([^"]+\.webm[^"]*)"'),
-        RegExp(r'url\\u003d([^\\&]+)'),
-      ];
-
-      for (final pattern in videoUrlPatterns) {
-        final match = pattern.firstMatch(body);
-        if (match != null) {
-          String url = match.group(1)!;
-          // Decode URL if it's escaped
-          url = url.replaceAll('\\u0026', '&');
-          url = url.replaceAll('\\/', '/');
-          url = url.replaceAll('\\\\', '');
-          
-          // Prefer mp4 format
-          if (url.contains('.mp4')) {
-            return url;
-          }
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data['success'] == true && data['url'] != null) {
+          return data['url'];
+        } else {
+          throw Exception(data['error'] ?? 'Failed to get video URL');
         }
+      } else {
+        throw Exception('Server error: ${response.statusCode}');
       }
-
-      // If no direct mp4 found, try to get from yt-dlp or alternative method
-      // For now, return null as we need a video URL
-      return null;
+      
     } catch (e) {
-      if (kDebugMode) {
-        print('Error getting YouTube video: $e');
-      }
+      debugPrint('Error getting YouTube video: $e');
       return null;
     }
   }
+
+  // Add this method to handle YouTube imports directly
+
+  Future<void> _importYouTubeDirectly(String youtubeUrl) async {
+    if (!mounted) return;
+    
+    try {
+      final token = await InternalAuthService.getToken();
+      if (token == null || token.isEmpty) {
+        _showSnackBar('Please authenticate first.', isError: true);
+        return;
+      }
+
+      if (!mounted) return;
+
+      // Show downloading dialog
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => const AlertDialog(
+          title: Text('Downloading YouTube Video'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('Downloading and processing video...'),
+            ],
+          ),
+        ),
+      );
+
+      // Call the server to download and upload
+      const serverUrl = 'http://localhost:5000/api/youtube-download-and-upload';
+      final response = await http.post(
+        Uri.parse(serverUrl),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: jsonEncode({
+          'url': youtubeUrl,
+          'auto_segmentation': true,
+        }),
+      );
+
+      // Close the loading dialog
+      if (mounted) Navigator.pop(context);
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data['success'] == true) {
+          _showSnackBar('✅ YouTube video downloaded and imported!');
+          _fetchProjects();
+        } else {
+          _showSnackBar('❌ Error: ${data['error']}', isError: true);
+        }
+      } else {
+        _showSnackBar('❌ Server error: ${response.statusCode}', isError: true);
+      }
+
+    } catch (e) {
+      if (mounted) Navigator.pop(context);
+      _showSnackBar('❌ Error: $e', isError: true);
+    }
+  }
+
+  void _showYouTubeImportDialog() {
+    final controller = TextEditingController();
+    
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Download YouTube Video'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Enter the YouTube video URL:'),
+            const SizedBox(height: 8),
+            TextField(
+              controller: controller,
+              decoration: const InputDecoration(
+                hintText: 'https://youtube.com/watch?v=...',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final url = controller.text.trim();
+              if (url.isNotEmpty) {
+                Navigator.pop(ctx);
+                _importYouTubeDirectly(url);
+              }
+            },
+            child: const Text('Download & Import'),
+          ),
+        ],
+      ),
+    );
+  }
+
 
   // ─── Import from text ─────────────────────────────────────────────────
 
@@ -432,6 +517,11 @@ class _WorkingScreenState extends State<WorkingScreen> {
                 'Supports: direct video URLs (MP4, WebM, MOV) and YouTube links',
                 style: TextStyle(fontSize: 12, color: Colors.grey[600]),
               ),
+              const SizedBox(height: 4),
+              Text(
+                'Note: YouTube links may not work reliably. Consider using a dedicated YouTube downloader service.',
+                style: TextStyle(fontSize: 11, color: Colors.orange[700]),
+              ),
             ],
           ),
           actions: [
@@ -482,7 +572,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
     if (!mounted) return;
     
     // First, resolve YouTube URLs
-    List<String> resolvedUrls = [];
+    List<Map<String, String>> resolvedUrls = [];
     List<String> errors = [];
     
     for (final url in urls) {
@@ -490,20 +580,24 @@ class _WorkingScreenState extends State<WorkingScreen> {
         // Try to get the actual video URL
         final videoUrl = await _getYouTubeVideoUrl(url);
         if (videoUrl != null) {
-          resolvedUrls.add(videoUrl);
+          resolvedUrls.add({
+            'original': url,
+            'resolved': videoUrl,
+          });
           if (kDebugMode) print('✅ Resolved YouTube URL: $url -> $videoUrl');
         } else {
-          errors.add('Failed to resolve YouTube URL: $url');
+          errors.add('Could not resolve YouTube URL: $url');
           if (kDebugMode) print('❌ Failed to resolve YouTube URL: $url');
         }
       } else if (_isValidUrl(url)) {
-        resolvedUrls.add(url);
+        resolvedUrls.add({
+          'original': url,
+          'resolved': url,
+        });
       } else {
         errors.add('Invalid URL: $url');
       }
     }
-
-    if (!mounted) return;
     
     if (errors.isNotEmpty) {
       final errorMessage = errors.join('\n');
@@ -515,11 +609,15 @@ class _WorkingScreenState extends State<WorkingScreen> {
       return;
     }
     
+    // Extract resolved URLs
+    final finalUrls = resolvedUrls.map((entry) => entry['resolved']!).toList();
+    
     showDialog(
+      // ignore: use_build_context_synchronously
       context: context,
       barrierDismissible: false,
       builder: (ctx) => _ImportVideosDialog(
-        urls: resolvedUrls,
+        urls: finalUrls,
         autoSegmentation: autoSegmentation,
         onComplete: () {
           if (mounted) {
@@ -882,6 +980,12 @@ class _WorkingScreenState extends State<WorkingScreen> {
       appBar: AppBar(
         title: const Text(appTitle),
         actions: [
+          // ─── YouTube Import Button ────────────────────────────────────
+          IconButton(
+            icon: const Icon(Icons.play_circle_outline),
+            onPressed: () => _showYouTubeImportDialog(),
+            tooltip: 'Download YouTube Video',
+          ),
           // ─── Import from Text Button ────────────────────────────────────
           IconButton(
             icon: const Icon(Icons.text_snippet),
@@ -1394,8 +1498,9 @@ class _ImportVideosDialogState extends State<_ImportVideosDialog> {
         final response = await http.get(
           Uri.parse(status.url),
           headers: {
-            'Accept': 'video/*',
+            'Accept': 'video/*, application/octet-stream',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Encoding': 'identity', // Don't compress
           },
         );
         
