@@ -1,0 +1,26 @@
+services:
+  web:
+    # Build context is this directory (the Dockerfile copies . directly)
+    # Final stage "web": Nginx serving the built Flutter app + proxying the API
+    build: .
+    ports:
+      - "8273:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  backend:
+    # Stage "backend": Flask API behind the Nginx proxy (not exposed to the host)
+    build:
+      context: .
+      target: backend
+    volumes:
+      - data:/app/lib/sessions
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:5000/videos"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  data: {}
