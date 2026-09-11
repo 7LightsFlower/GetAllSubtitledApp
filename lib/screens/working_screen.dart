@@ -328,8 +328,10 @@ class _WorkingScreenState extends State<WorkingScreen> {
       }
 
       // Use your server's YouTube API endpoint
-      const serverUrl = 'http://localhost:5000/api/youtube-info';
-      
+      // Same-origin in production (empty base → "/api/youtube-info"),
+      // localhost:5000 during `flutter run`.
+      const serverUrl = '$flaskServerUrl/api/youtube-info';
+
       final response = await http.post(
         Uri.parse(serverUrl),
         headers: {'Content-Type': 'application/json'},
@@ -385,7 +387,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
       );
 
       // Call the server to download and upload
-      const serverUrl = 'http://localhost:5000/api/youtube-download-and-upload';
+      const serverUrl = '$flaskServerUrl/api/youtube-download-and-upload';
       final response = await http.post(
         Uri.parse(serverUrl),
         headers: {

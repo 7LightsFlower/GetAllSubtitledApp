@@ -46,7 +46,7 @@ CORS(
         "http://127.0.0.1:8080",
         "http://localhost:5000",
         "http://127.0.0.1:5000",
-        "*",
+        "https://getallsubtitledapp.isl.iar.kit.edu",
     ],
     supports_credentials=True,
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -3357,13 +3357,18 @@ def get_videos():
             unique_videos.append(best_video)
     # ========================================
 
-    # Fix thumbnail URLs
+    # Build absolute thumbnail URLs from the incoming request so they work
+    # behind any host/proxy (localhost, Nginx, public domain, ...).
+    # Do NOT mutate the stored dicts: their thumbnail_url stays relative.
+    base = request.host_url.rstrip("/")
+    unique_videos_serialized = []
     for video in unique_videos:
-        if video.get("thumbnail_url"):
-            if video["thumbnail_url"].startswith("/thumbnails/"):
-                video["thumbnail_url"] = (
-                    f"http://localhost:5000{video['thumbnail_url']}"
-                )
+        v = dict(video)  # shallow copy
+        thumb = v.get("thumbnail_url")
+        if thumb and thumb.startswith("/thumbnails/"):
+            v["thumbnail_url"] = f"{base}{thumb}"
+        unique_videos_serialized.append(v)
+    unique_videos = unique_videos_serialized
 
     storage_used_gb = sum(v.get("file_size", 0) for v in unique_videos) / (1024.0**3)
     return (
@@ -4504,18 +4509,18 @@ def dex_userinfo():
 
 # ─── DEBUG ENDPOINTS ────────────────────────────────────────────────────
 
-
 @app.route("/debug-videos", methods=["GET"])
 def debug_videos():
     """Debug endpoint: return all video metadata (including duplicates)."""
-    # Fix thumbnail URLs
+    base = request.host_url.rstrip("/")
+    serialized = []
     for video in videos:
-        if video.get("thumbnail_url"):
-            if video["thumbnail_url"].startswith("/thumbnails/"):
-                video["thumbnail_url"] = (
-                    f"http://localhost:5000{video['thumbnail_url']}"
-                )
-    return jsonify({"count": len(videos), "projects": videos}), 200
+        v = dict(video)
+        thumb = v.get("thumbnail_url")
+        if thumb and thumb.startswith("/thumbnails/"):
+            v["thumbnail_url"] = f"{base}{thumb}"
+        serialized.append(v)
+    return jsonify({"count": len(videos), "projects": serialized}), 200
 
 
 @app.route("/debug-jobs", methods=["GET"])
@@ -4589,6 +4594,6 @@ if __name__ == "__main__":
     # Regenerate missing thumbnails
     regenerate_missing_thumbnails()
 
-    logging.info("Starting merged server on http://localhost:5000")
+    logging.info("Starting merged server on 0.0.0.0:5000")
     logging.info("State file: %s", STATE_FILE)
     app.run(host="0.0.0.0", port=5000, debug=True)
