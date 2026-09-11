@@ -56,7 +56,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg curl \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir Flask gunicorn requests flask-cors python-docx
+RUN pip install --no-cache-dir Flask gunicorn requests flask-cors python-docx yt-dlp beautifulsoup4
 
 WORKDIR /app
 

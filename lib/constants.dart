@@ -59,3 +59,4 @@ const String dexIssuer = '$internalServerUrl/dex';
 const String dexRedirectUri = isDevelopment
     ? 'http://localhost:8080/'
     : '$publicServerUrl/';
+    : '$publicServerUrl/';
