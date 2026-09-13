@@ -48,7 +48,7 @@ const String dummyPassword = 'YourSecurePassword123';
 
 // ─── Dex OAuth 2.0 Configuration ──────────────────────────────
 const String dexClientId = 'traefik-forward-auth';
-const String dexClientSecret = 'YourSecretKeyHere'; // Must match the Dex client secret in the Dex config.
+const String dexClientSecret = 'bar';//'YourSecretKeyHere'; // Must match the Dex client secret in the Dex config.
 const List<String> dexScopes = ['openid', 'profile', 'email'];
 
 /// Dex is mounted on the internal server host.
@@ -58,5 +58,4 @@ const String dexIssuer = '$internalServerUrl/dex';
 /// localhost during development, the public origin in production.
 const String dexRedirectUri = isDevelopment
     ? 'http://localhost:8080/'
-    : '$publicServerUrl/';
     : '$publicServerUrl/';
