@@ -3,6 +3,7 @@
 
 import base64
 import datetime
+import importlib
 import io
 import json
 import logging
@@ -3222,6 +3223,23 @@ def extract_video_subtitles(session_id):
     except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, OSError) as e:
         return jsonify({"error": str(e)}), 500
 
+def _file_has_audio_stream(path):
+    """Return True if the file has at least one audio stream."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "a",
+                "-show_entries", "stream=index",
+                "-of", "csv=p=0",
+                path,
+            ],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        return bool(result.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        return False
+
 
 # ─── AUTH ENDPOINTS ─────────────────────────────────────────────────────
 
@@ -3760,8 +3778,8 @@ def get_youtube_video_info(youtube_url):
 
 def download_youtube_video_adaptive(youtube_url, output_dir, filename=None):
     """
-    Adaptive YouTube downloader that first checks available formats.
-    Works with all videos including Shorts and age-restricted content.
+    Download a YouTube video with audio, using yt-dlp's format merging.
+    Prefers mp4/m4a for direct container compatibility.
     """
     try:
         if not is_youtube_url(youtube_url):
@@ -3769,138 +3787,104 @@ def download_youtube_video_adaptive(youtube_url, output_dir, filename=None):
 
         os.makedirs(output_dir, exist_ok=True)
 
-        logging.info("🔍 Checking available formats for: %s", youtube_url)
+        logging.info("🔍 Preparing download for: %s", youtube_url)
 
-        # Step 1: Get available formats
-        with yt_dlp.YoutubeDL(
-            {
-                "quiet": True,
-                "no_warnings": True,
-                "http_headers": {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                },
-            }
-        ) as ydl:
-            info = ydl.extract_info(youtube_url, download=False)
+        # Prefer mp4 video + m4a audio; fall back to any best video+audio.
+        # 'bv*' = best video-only, 'ba' = best audio-only.
+        # The '/' chain tries each option left to right.
+        format_selector = (
+            "bv*[ext=mp4]+ba[ext=m4a]/"      # mp4 video + m4a audio (fastest)
+            "bv*[ext=mp4]+ba/"                # mp4 video + any audio
+            "bv*+ba/"                         # any video + any audio
+            "b[ext=mp4]/b"                    # single progressive file (<=720p)
+        )
 
-            if not info:
-                return {"success": False, "error": "Could not get video info"}
-
-            # Find the best format
-            best_format = None
-            best_score = -1
-            available_formats = []
-
-            for fmt in info.get("formats", []):
-                # Skip formats without video
-                if fmt.get("vcodec") == "none":
-                    continue
-
-                # Calculate score
-                score = 0
-                # Prefer MP4
-                if fmt.get("ext") == "mp4":
-                    score += 100
-                # Prefer higher resolution
-                height = fmt.get("height", 0)
-                if height:
-                    score += height
-                # Prefer formats with audio
-                if fmt.get("acodec") != "none":
-                    score += 50
-
-                available_formats.append(
-                    {
-                        "format_id": fmt.get("format_id"),
-                        "ext": fmt.get("ext"),
-                        "height": height,
-                        "has_audio": fmt.get("acodec") != "none",
-                        "score": score,
-                    }
-                )
-
-                if score > best_score:
-                    best_score = score
-                    best_format = fmt
-
-            if not best_format:
-                return {"success": False, "error": "No suitable format found"}
-
-            format_id = best_format.get("format_id")
-            logging.info(
-                "📹 Selected format: %s (score: %s)", format_id, best_score
-            )
-            logging.info(
-                "📹 Available formats: %s...", available_formats[:5]
-            )  # Log first 5
-
-        # Step 2: Download with the selected format
         ydl_opts = {
-            "format": format_id,
+            "format": format_selector,
             "outtmpl": os.path.join(output_dir, "%(title)s.%(ext)s"),
             "quiet": True,
             "no_warnings": True,
             "ignoreerrors": True,
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            },
             "merge_output_format": "mp4",
-            "prefer_insecure": True,
-            "no_check_certificate": True,
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            },
+            # Requires ffmpeg on PATH to mux video+audio into mp4
+            "postprocessors": [
+                {
+                    "key": "FFmpegVideoConvertor",
+                    "preferedformat": "mp4",
+                }
+            ],
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            logging.info("📥 Downloading video...")
+            logging.info("📥 Downloading video + audio...")
             info = ydl.extract_info(youtube_url, download=True)
 
             if not info:
                 return {"success": False, "error": "Could not download video"}
 
             title = info.get("title", "video")
-            # Clean title for filename
             title = re.sub(r'[\\/*?:"<>|]', "_", title)
 
+            # yt-dlp will produce <title>.mp4 after merging
             downloaded_file = None
-            # Check for common extensions
-            for ext in [".mp4", ".webm", ".mkv"]:
-                possible = os.path.join(output_dir, f"{title}{ext}")
-                if os.path.exists(possible):
-                    downloaded_file = possible
+            for ext in (".mp4", ".mkv", ".webm"):
+                candidate = os.path.join(output_dir, f"{title}{ext}")
+                if os.path.exists(candidate):
+                    downloaded_file = candidate
                     break
 
-            # If not found, look for any recent video file in the directory
+            # Fallback: any recently created video file in the folder
             if not downloaded_file:
+                newest = None
+                newest_mtime = 0
                 for f in os.listdir(output_dir):
-                    if f.endswith((".mp4", ".webm", ".mkv")):
-                        file_path = os.path.join(output_dir, f)
-                        # Check if file was created recently (last 2 minutes)
-                        if os.path.getmtime(file_path) > time.time() - 120:
-                            downloaded_file = file_path
-                            break
+                    if f.endswith((".mp4", ".mkv", ".webm")):
+                        fp = os.path.join(output_dir, f)
+                        m = os.path.getmtime(fp)
+                        if m > time.time() - 600 and m > newest_mtime:
+                            newest = fp
+                            newest_mtime = m
+                downloaded_file = newest
 
             if not downloaded_file:
                 return {"success": False, "error": "Downloaded file not found"}
 
-            # Rename if needed
+            # Rename if a specific filename was requested
             if filename and os.path.exists(downloaded_file):
                 _, ext = os.path.splitext(downloaded_file)
                 new_filename = filename
                 if not new_filename.endswith(ext):
                     new_filename = f"{new_filename}{ext}"
                 new_path = os.path.join(output_dir, new_filename)
-                os.rename(downloaded_file, new_path)
+                if os.path.abspath(new_path) != os.path.abspath(downloaded_file):
+                    # Avoid overwriting an existing file of the same name
+                    if os.path.exists(new_path):
+                        os.remove(new_path)
+                    os.rename(downloaded_file, new_path)
                 downloaded_file = new_path
 
-            file_size = (
-                os.path.getsize(downloaded_file)
-                if os.path.exists(downloaded_file)
-                else 0
-            )
+            file_size = os.path.getsize(downloaded_file)
             logging.info(
                 "✅ Download complete: %s (%s bytes)",
                 os.path.basename(downloaded_file),
                 file_size,
             )
+
+            # Verify audio actually exists
+            has_audio = _file_has_audio_stream(downloaded_file)
+            logging.info("🎵 Audio present: %s", has_audio)
+            if not has_audio:
+                logging.warning(
+                    "⚠️ Downloaded file has NO audio stream: %s",
+                    downloaded_file,
+                )
 
             return {
                 "success": True,
@@ -3909,6 +3893,7 @@ def download_youtube_video_adaptive(youtube_url, output_dir, filename=None):
                 "filename": os.path.basename(downloaded_file),
                 "duration": info.get("duration", 0),
                 "filesize": file_size,
+                "has_audio": has_audio,
             }
 
     except yt_dlp.utils.DownloadError as e:
@@ -3917,7 +3902,6 @@ def download_youtube_video_adaptive(youtube_url, output_dir, filename=None):
     except (OSError, RuntimeError, ValueError, TypeError, KeyError) as e:
         logging.error("YouTube download error: %s", str(e), exc_info=True)
         return {"success": False, "error": f"Error: {str(e)}"}
-
 
 # ─── YOUTUBE API ROUTES ────────────────────────────────────────────────
 
@@ -3972,6 +3956,64 @@ def youtube_info():
         return jsonify({"error": str(e)}), 500
 
 
+def convert_video_to_browser_compatible(input_path, output_path):
+    """
+    Convert video to browser-compatible format (H.264/AAC in MP4 container).
+    Returns True if successful, False otherwise.
+    """
+    try:
+        # Check if ffmpeg is available
+        subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+
+        # Convert to H.264/AAC in MP4 container
+        cmd = [
+            "ffmpeg",
+            "-i",
+            input_path,
+            "-c:v",
+            "libx264",  # H.264 video codec
+            "-c:a",
+            "aac",  # AAC audio codec
+            "-movflags",
+            "+faststart",  # Optimize for web streaming
+            "-profile:v",
+            "main",  # Main profile for better compatibility
+            "-level",
+            "3.1",  # Level 3.1 for broad compatibility
+            "-pix_fmt",
+            "yuv420p",  # YUV 4:2:0 for compatibility
+            "-crf",
+            "23",  # Quality level (18-28, 23 is good)
+            "-preset",
+            "medium",  # Encoding speed vs quality
+            "-y",  # Overwrite output file
+            output_path,
+        ]
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=False, timeout=300
+        )
+
+        if (
+            result.returncode == 0
+            and os.path.exists(output_path)
+            and os.path.getsize(output_path) > 0
+        ):
+            logging.info(
+                "✅ Video converted to browser-compatible format: %s", output_path
+            )
+            return True
+        else:
+            logging.error("❌ Video conversion failed: %s", result.stderr)
+            return False
+
+    except subprocess.TimeoutExpired:
+        logging.error("❌ Video conversion timeout")
+        return False
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        logging.error("❌ Video conversion error: %s", e)
+        return False
+
 @app.route("/api/youtube-download-and-upload", methods=["POST", "OPTIONS"])
 def youtube_download_and_upload():
     """
@@ -3994,10 +4036,13 @@ def youtube_download_and_upload():
         youtube_url = data["url"]
         auto_segmentation = data.get("auto_segmentation", True)
 
-        logging.info("📥 Downloading YouTube video: %s", youtube_url)
+        logging.info("=" * 60)
+        logging.info("📥 Starting YouTube download: %s", youtube_url)
+        logging.info("=" * 60)
 
         # Get video info first
         try:
+            logging.info("📋 Getting video info...")
             ydl_opts = {
                 "quiet": True,
                 "no_warnings": True,
@@ -4015,35 +4060,41 @@ def youtube_download_and_upload():
 
             if len(filename) > 200:
                 name, ext = os.path.splitext(filename)
-                filename = name[:195] + ext
+                filename = f"{name[:195]}{ext}"
 
             logging.info("📹 Video: %s", title)
+            logging.info("📹 Duration: %s seconds", duration)
+            logging.info("📹 Filename: %s", filename)
 
         except (
-            OSError,
-            TypeError,
-            ValueError,
-            RuntimeError,
             yt_dlp.utils.DownloadError,
+            OSError,
+            ValueError,
+            TypeError,
+            KeyError,
         ) as e:
-            logging.error("❌ Error getting video info: %s", e)
-            return jsonify({"success": False, "error": f"Info error: {str(e)}"}), 400
+            logging.error("❌ Error getting video info: %s", str(e), exc_info=True)
+            return jsonify({"success": False, "error": f"Info error: {e}"}), 400
 
-        # Download the video using adaptive method
+        # Download the video
         try:
+            logging.info("📥 Starting download...")
             download_result = download_youtube_video_adaptive(
                 youtube_url, UPLOAD_FOLDER, filename
             )
+
+            logging.info("📊 Download result: %s", download_result)
+
         except (
-            OSError,
-            TypeError,
-            ValueError,
-            RuntimeError,
             yt_dlp.utils.DownloadError,
+            OSError,
+            ValueError,
+            TypeError,
+            KeyError,
         ) as e:
-            logging.error("❌ Error downloading video: %s", e)
+            logging.error("❌ Error downloading video: %s", str(e), exc_info=True)
             return (
-                jsonify({"success": False, "error": f"Download error: {str(e)}"}),
+                jsonify({"success": False, "error": f"Download error: {e}"}),
                 400,
             )
 
@@ -4054,69 +4105,199 @@ def youtube_download_and_upload():
 
         file_path = download_result.get("file_path")
         if not file_path or not os.path.exists(file_path):
+            logging.error("❌ File not found: %s", file_path)
             return jsonify({"error": "Downloaded file not found"}), 500
 
         file_size = download_result.get("filesize", 0)
         duration = download_result.get("duration", 0)
         actual_filename = download_result.get("filename", filename)
+        has_audio = download_result.get("has_audio", False)
 
         logging.info("✅ Video downloaded: %s (%s bytes)", file_path, file_size)
+        logging.info("🎵 Has audio: %s", has_audio)
+
+        # Check if file is valid
+        if file_size < 1000:
+            logging.error("❌ Downloaded file is too small (%s bytes)", file_size)
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except (OSError, PermissionError):
+                    pass
+            return jsonify({"error": "Downloaded file is too small (corrupted)"}), 500
+
+        # ----- NEW: Convert video to browser-compatible format -----
+        converted_path = None
+        try:
+            # Check if the video is already in a compatible format
+            # Use ffprobe to check the codec
+            probe_cmd = [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                file_path,
+            ]
+            result = subprocess.run(
+                probe_cmd, capture_output=True, text=True, timeout=10, check=False
+            )
+
+            codec = result.stdout.strip() if result.returncode == 0 else ""
+            logging.info("📹 Video codec: %s", codec)
+
+            # If not H.264, convert
+            if codec != "h264":
+                logging.info("🔄 Converting video to browser-compatible format...")
+                base_name = os.path.splitext(actual_filename)[0]
+                converted_filename = f"{base_name}_converted.mp4"
+                converted_path = os.path.join(UPLOAD_FOLDER, converted_filename)
+
+                if convert_video_to_browser_compatible(file_path, converted_path):
+                    # Replace the original with the converted version
+                    # Keep the original as backup
+                    backup_path = file_path + ".backup"
+                    os.rename(file_path, backup_path)
+                    os.rename(converted_path, file_path)
+
+                    # Update file info
+                    file_size = os.path.getsize(file_path)
+                    actual_filename = os.path.basename(file_path)
+                    logging.info("✅ Video converted successfully: %s", actual_filename)
+
+                    # Clean up backup after successful conversion
+                    if os.path.exists(backup_path):
+                        try:
+                            os.remove(backup_path)
+                        except (OSError, PermissionError):
+                            pass
+                else:
+                    logging.warning("⚠️ Video conversion failed, using original file")
+                    if os.path.exists(converted_path):
+                        try:
+                            os.remove(converted_path)
+                        except (OSError, PermissionError):
+                            pass
+            else:
+                logging.info("✅ Video already in compatible format (H.264)")
+
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError) as e:
+            logging.warning("⚠️ Could not check/convert video: %s", str(e))
 
         # Generate thumbnail
-        thumbnail_filename = f"{os.path.splitext(actual_filename)[0]}_thumb.jpg"
-        thumbnail_path = os.path.join(UPLOAD_FOLDER, thumbnail_filename)
-        thumbnail_url = None
+        try:
+            logging.info("🖼️ Generating thumbnail...")
+            thumb_filename = f"{os.path.splitext(actual_filename)[0]}_thumb.jpg"
+            thumb_path = os.path.join(UPLOAD_FOLDER, thumb_filename)
+            thumbnail_url = None
 
-        if generate_video_thumbnail(file_path, thumbnail_path):
-            thumbnail_url = f"/thumbnails/{thumbnail_filename}"
-            logging.info("🖼️ Generated thumbnail")
+            # Try multiple thumbnail methods
+            thumbnail_generated = False
+
+            # Method 1: Use ffmpeg
+            try:
+                if generate_video_thumbnail_simple(file_path, thumb_path):
+                    thumbnail_url = f"/thumbnails/{thumb_filename}"
+                    thumbnail_generated = True
+                    logging.info("✅ Thumbnail generated with ffmpeg")
+            except (OSError, RuntimeError, ValueError, TypeError) as e:
+                logging.warning("⚠️ FFmpeg thumbnail failed: %s", str(e))
+
+            # Method 2: Use OpenCV
+            if not thumbnail_generated:
+                try:
+                    cv2 = importlib.import_module("cv2")
+                    cap = cv2.VideoCapture(file_path)
+                    ret, frame = cap.read()
+                    if ret:
+                        cv2.imwrite(thumb_path, frame)
+                        thumbnail_url = f"/thumbnails/{thumb_filename}"
+                        thumbnail_generated = True
+                        logging.info("✅ Thumbnail generated with OpenCV")
+                    cap.release()
+                except (ImportError, OSError, RuntimeError, ValueError, TypeError) as e:
+                    logging.warning("⚠️ OpenCV thumbnail failed: %s", str(e))
+
+            if not thumbnail_generated:
+                logging.warning("⚠️ No thumbnail generated")
+
+        except (OSError, RuntimeError, ValueError, TypeError) as e:
+            logging.warning("⚠️ Thumbnail generation error: %s", str(e))
+            thumbnail_url = None
 
         # Get video metadata
-        if duration == 0:
-            duration, fps = get_video_metadata(file_path)
-        else:
+        try:
+            logging.info("📊 Getting video metadata...")
+            if duration == 0:
+                duration, fps = get_video_metadata(file_path)
+            else:
+                fps = 30.0
+            logging.info("📊 Duration: %s, FPS: %s", duration, fps)
+        except (OSError, RuntimeError, ValueError, TypeError) as e:
+            logging.warning("⚠️ Metadata error: %s", str(e))
+            duration = 120.0
             fps = 30.0
 
         # Create project entry
-        video_key = str(uuid.uuid4())
-        project = {
-            "key": video_key,
-            "name": clean_title,
-            "file_name": actual_filename,
-            "uploaded": utc_now_iso(),
-            "last_opened": None,
-            "duration": duration,
-            "fps": fps,
-            "file_size": file_size,
-            "segment_count": 0,
-            "languages": ["en"],
-            "thumbnail_url": thumbnail_url,
-            "segmentation_done": auto_segmentation,
-            "segmentation_progress": 100 if auto_segmentation else 0,
-        }
+        try:
+            logging.info("💾 Creating project entry...")
+            video_key = str(uuid.uuid4())
+            project = {
+                "key": video_key,
+                "name": clean_title,
+                "file_name": actual_filename,
+                "uploaded": utc_now_iso(),
+                "last_opened": None,
+                "duration": duration,
+                "fps": fps,
+                "file_size": file_size,
+                "segment_count": 0,
+                "languages": ["en"],
+                "thumbnail_url": thumbnail_url,
+                "segmentation_done": auto_segmentation,
+                "segmentation_progress": 100 if auto_segmentation else 0,
+            }
 
-        # Add to videos list
-        videos.append(project)
-        save_state()
+            # Add to videos list
+            videos.append(project)
+            save_state()
+            logging.info("✅ Project saved with key: %s", video_key)
 
-        logging.info("✅ YouTube video uploaded successfully: %s", clean_title)
+        except (OSError, RuntimeError, ValueError, TypeError) as e:
+            logging.error("❌ Error saving project: %s", str(e), exc_info=True)
+            return jsonify({"success": False, "error": f"Save error: {e}"}), 500
 
         # Start segmentation job if enabled
         if auto_segmentation:
-            job_id = str(uuid.uuid4())
-            job = {
-                "id": job_id,
-                "video_key": video_key,
-                "status": "processing",
-                "progress": 0.0,
-                "transcript": None,
-                "segments": None,
-                "created_at": utc_now_iso(),
-                "config": {"auto_segmentation": True},
-            }
-            jobs[job_id] = job
-            threading.Thread(target=process_job, args=(job_id,), daemon=True).start()
-            save_state()
+            try:
+                logging.info("🔄 Starting segmentation job...")
+                job_id = str(uuid.uuid4())
+                job = {
+                    "id": job_id,
+                    "video_key": video_key,
+                    "status": "processing",
+                    "progress": 0.0,
+                    "transcript": None,
+                    "segments": None,
+                    "created_at": utc_now_iso(),
+                    "config": {"auto_segmentation": True},
+                }
+                jobs[job_id] = job
+                threading.Thread(
+                    target=process_job, args=(job_id,), daemon=True
+                ).start()
+                save_state()
+                logging.info("✅ Segmentation job started: %s", job_id)
+            except (OSError, RuntimeError, ValueError, TypeError) as e:
+                logging.warning("⚠️ Could not start segmentation job: %s", str(e))
+
+        logging.info("=" * 60)
+        logging.info("✅ YouTube video uploaded successfully: %s", clean_title)
+        logging.info("=" * 60)
 
         return (
             jsonify(
@@ -4126,6 +4307,8 @@ def youtube_download_and_upload():
                         "title": clean_title,
                         "duration": duration,
                         "file_size": file_size,
+                        "thumbnail": thumbnail_url,
+                        "has_audio": has_audio,
                     },
                     "project": project,
                     "message": f'Video "{clean_title}" imported successfully',
@@ -4136,13 +4319,122 @@ def youtube_download_and_upload():
             200,
         )
 
-    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as e:
-        logging.error("YouTube download error: %s", str(e), exc_info=True)
-        return jsonify({"success": False, "error": f"Server error: {str(e)}"}), 500
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+        KeyError,
+        yt_dlp.utils.DownloadError,
+    ) as e:
+        logging.error("❌ YouTube download error: %s", str(e), exc_info=True)
+        return jsonify({"success": False, "error": f"Server error: {e}"}), 500
+        
+
+def generate_video_thumbnail_simple(video_path, thumbnail_path):
+    """
+    Generate a thumbnail using ffmpeg with multiple attempts.
+    """
+    try:
+        # Check if ffmpeg is available
+        subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+
+        # Get video duration
+        duration = 0
+        try:
+            probe_cmd = [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                video_path,
+            ]
+            result = subprocess.run(
+                probe_cmd, capture_output=True, text=True, timeout=10, check=False
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                duration = float(result.stdout.strip())
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+
+        # Try different positions
+        positions = [1.0, 5.0, 10.0]
+        if duration > 30:
+            positions.append(duration * 0.5)
+        if duration > 60:
+            positions.append(duration * 0.25)
+            positions.append(duration * 0.75)
+
+        for pos in positions:
+            if pos >= duration:
+                continue
+
+            cmd = [
+                "ffmpeg",
+                "-ss",
+                str(pos),
+                "-i",
+                video_path,
+                "-vframes",
+                "1",
+                "-vf",
+                "scale=320:-1:flags=lanczos",
+                "-q:v",
+                "2",
+                "-y",
+                thumbnail_path,
+            ]
+
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, check=False, timeout=30
+            )
+
+            if (
+                result.returncode == 0
+                and os.path.exists(thumbnail_path)
+                and os.path.getsize(thumbnail_path) > 1000
+            ):
+                logging.info("✅ Thumbnail generated at %ss", pos)
+                return True
+
+        # Fallback: first frame
+        cmd = [
+            "ffmpeg",
+            "-i",
+            video_path,
+            "-vframes",
+            "1",
+            "-vf",
+            "scale=320:-1:flags=lanczos",
+            "-q:v",
+            "2",
+            "-y",
+            thumbnail_path,
+        ]
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=False, timeout=30
+        )
+
+        if (
+            result.returncode == 0
+            and os.path.exists(thumbnail_path)
+            and os.path.getsize(thumbnail_path) > 1000
+        ):
+            logging.info("✅ Thumbnail generated from first frame")
+            return True
+
+        return False
+
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        logging.warning("⚠️ Thumbnail generation error: %s", str(e))
+        return False
 
 
 # ─── UPLOAD ENDPOINT ────────────────────────────────────────────────────
-
 
 @app.route("/upload", methods=["POST", "OPTIONS"])
 def upload_lecture():
@@ -4270,66 +4562,91 @@ def upload_lecture():
     }
     cookies = {"_forward_auth": token}
 
+    temp_multipart_path = None
     try:
         logging.info("Uploading to internal server: %s", TARGET_URL)
         logging.info("Data keys: %s", list(data.keys()))
         logging.info("File size: %d bytes", file_size)
 
-        with open(local_path, "rb") as f:
-            boundary = f"----WebKitFormBoundary{uuid.uuid4().hex[:16]}"
-            content_type = f"multipart/form-data; boundary={boundary}"
+                                         
+        boundary = f"----WebKitFormBoundary{uuid.uuid4().hex[:16]}"
+        content_type = f"multipart/form-data; boundary={boundary}"
 
-            def generate_multipart():
-                for key, value in data.items():
-                    if isinstance(value, list):
-                        for v in value:
-                            yield f"--{boundary}\r\n"
-                            yield f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
-                            yield f"{v}\r\n"
-                    else:
-                        yield f"--{boundary}\r\n"
-                        yield f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
-                        yield f"{value}\r\n"
+        # ---------- Build the multipart body into a temp file ----------
+        # This lets us set an explicit Content-Length so that
+        # proxies and the internal server do not reset large uploads.
+        temp_multipart = tempfile.NamedTemporaryFile(delete=False)
+        temp_multipart_path = temp_multipart.name
+        total_size = 0
+                                            
+                         
+                                                 
+                                                                                     
+                                            
 
-                filename = file_storage.filename
-                mimetype = mimetypes.guess_type(filename)[0] or "video/mp4"
-                yield f"--{boundary}\r\n"
-                yield f'Content-Disposition: form-data; name="videofile"; filename="{filename}"\r\n'
-                yield f"Content-Type: {mimetype}\r\n\r\n"
+        try:
+            # Write form fields
+            for key, value in data.items():
+                if isinstance(value, list):
+                    for v in value:
+                        part = (
+                            f"--{boundary}\r\n"
+                            f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                            f"{v}\r\n"
+                        ).encode("utf-8")
+                        temp_multipart.write(part)
+                        total_size += len(part)
+                else:
+                    part = (
+                        f"--{boundary}\r\n"
+                        f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                        f"{value}\r\n"
+                    ).encode("utf-8")
+                    temp_multipart.write(part)
+                    total_size += len(part)
 
-                chunk_size = 16384
+            # Write file header
+            upload_filename = file_storage.filename
+            mimetype = mimetypes.guess_type(upload_filename)[0] or "video/mp4"
+            file_header = (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="videofile"; '
+                f'filename="{upload_filename}"\r\n'
+                f"Content-Type: {mimetype}\r\n\r\n"
+            ).encode("utf-8")
+            temp_multipart.write(file_header)
+            total_size += len(file_header)
+
+            # Write file content (streaming in 1 MB chunks)
+            with open(local_path, "rb") as f:
                 while True:
-                    chunk = f.read(chunk_size)
+                    chunk = f.read(1024 * 1024)
                     if not chunk:
                         break
-                    yield chunk
+                    temp_multipart.write(chunk)
+                    total_size += len(chunk)
 
-                yield b"\r\n"
-                yield f"--{boundary}--\r\n"
+            # Write trailer
+            trailer = f"\r\n--{boundary}--\r\n".encode("utf-8")
+            temp_multipart.write(trailer)
+            total_size += len(trailer)
+        finally:
+            temp_multipart.close()
 
-            class MultipartGenerator:
-                """Generate multipart form data chunks for streaming upload."""
+        logging.info("Multipart body prepared: %d bytes total", total_size)
 
-                def __init__(self, generator_func):
-                    self.generator = generator_func()
-                    self._iter = iter(self.generator)
+        # ---------- Send with explicit Content-Length ----------
+        headers_with_length = {
+            **headers,
+            "Content-Type": content_type,
+            "Content-Length": str(total_size),
+        }
 
-                def __iter__(self):
-                    return self
-
-                def __next__(self):
-                    value = next(self._iter)
-                    if isinstance(value, str):
-                        return value.encode("utf-8")
-                    return value
-
-            body_gen = MultipartGenerator(generate_multipart)
-
+        with open(temp_multipart_path, "rb") as body_file:
             resp = requests.post(
                 TARGET_URL,
-                data=body_gen,
-                headers={**headers, "Content-Type": content_type},
-                cookies=cookies,
+                data=body_file,
+                headers=headers_with_length,                cookies=cookies,
                 timeout=(60, 3600),
                 verify=False,
                 allow_redirects=True,
@@ -4437,7 +4754,13 @@ def upload_lecture():
     except OSError as e:
         logging.error("Upload error: %s", str(e), exc_info=True)
         return jsonify({"error": f"Upload failed: {str(e)}"}), 500
-
+    finally:
+        # Always clean up the temp multipart file
+        if temp_multipart_path and os.path.exists(temp_multipart_path):
+            try:
+                os.unlink(temp_multipart_path)
+            except OSError:
+                pass
 
 # ─── PROXY ENDPOINTS ────────────────────────────────────────────────────
 
@@ -4508,6 +4831,7 @@ def dex_userinfo():
 
 
 # ─── DEBUG ENDPOINTS ────────────────────────────────────────────────────
+
 
 @app.route("/debug-videos", methods=["GET"])
 def debug_videos():
