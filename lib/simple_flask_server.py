@@ -2798,7 +2798,11 @@ def update_video_subtitles(session_id):
     session_dir = os.path.join(SESSION_FOLDER, session_id)
     video_path = os.path.join(session_dir, "video.mp4")
 
+    logging.info("update_video_subtitles: session=%r dir_exists=%s video_exists=%s",
+                 session_id, os.path.isdir(session_dir), os.path.exists(video_path))
+
     if not os.path.exists(video_path):
+        logging.warning("update_video_subtitles: video.mp4 missing for session %s", session_id)
         return jsonify({"error": "video.mp4 not found"}), 404
 
     try:
@@ -2939,11 +2943,16 @@ def update_video_subtitles(session_id):
                 logging.warning("Could not update messages.json: %s", e)
 
         # --- 3. Create a temporary file for the new video ---
-        temp_output = os.path.join(
-            tempfile.gettempdir(), f"video_updated_{session_id}.mp4"
-        )
+        # Put the temp file next to the target so os.rename stays on one filesystem.
+        temp_output = os.path.join(session_dir, "video_new.mp4")
 
-        # --- 4. Build ffmpeg command to embed subtitles ---
+        # Clean leftovers from a previous failed run
+        for leftover in ("video_new.mp4", "video.mp4.backup"):
+            p = os.path.join(session_dir, leftover)
+            if os.path.exists(p):
+                os.remove(p)
+ 
+# --- 4. Build ffmpeg command to embed subtitles ---
         # Start with basic command
         cmd = ["ffmpeg", "-y"]
 
@@ -3645,7 +3654,17 @@ def get_session_file(session_id, filename):
         response.headers["Expires"] = "0"
         return response
 
-    return send_file(file_path, as_attachment=True)
+    if filename.lower().endswith(".mp4"):
+        # as_attachment=False is required for <video> playback in Firefox.
+        # conditional=True keeps Range support (already active anyway).
+        return send_file(
+            file_path,
+            as_attachment=False,
+            mimetype="video/mp4",
+            conditional=True,
+        )
+
+    return send_file(file_path, as_attachment=True, conditional=True)
 
 
 # ─── YOUTUBE DOWNLOADER FUNCTIONS ──────────────────────────────────────

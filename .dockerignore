@@ -1,0 +1,26 @@
+# VCS
+**/.git
+
+# Build artifacts & caches (regenerated inside the image)
+build/
+.dart_tool/
+.flutter-plugins-dependencies
+.pub/
+.pub-cache/
+**/__pycache__/
+**/*.pyc
+
+# Runtime data (created by the server; mounted as a volume in compose)
+lib/uploads/
+lib/sessions/
+
+# JS deps for the firebase functions (not needed by the app)
+node_modules/
+
+# Native platform folders (not needed for a web build)
+android/
+ios/
+macos/
+linux/
+windows/
+windows_backup/
