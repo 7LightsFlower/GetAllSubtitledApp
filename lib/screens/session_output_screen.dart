@@ -802,7 +802,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
     try {
       final token = await InternalAuthService.getToken();
-      final downloadUrl = '$flaskServerUrl/session_download_all/${widget.sessionId}';
+      final downloadUrl = '$flaskServerUrl/session_zip/${widget.sessionId}';
       
       final response = await http.get(
         Uri.parse(downloadUrl),
