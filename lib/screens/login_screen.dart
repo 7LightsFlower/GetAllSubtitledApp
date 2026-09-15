@@ -3,6 +3,7 @@ import 'package:asr_live_translator/constants.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -13,12 +14,11 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  final TextEditingController _emailController = TextEditingController(
-    text: isDevelopment ? dummyEmail : '',
-  );
-  final TextEditingController _passwordController = TextEditingController(
-    text: isDevelopment ? dummyPassword : '',
-  );
+  
+  final TextEditingController _emailController =
+      TextEditingController(text: dummyEmail);
+  final TextEditingController _passwordController =
+      TextEditingController(text: dummyPassword);
 
   bool _isLoading = false;
 
@@ -122,8 +122,8 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                       const SizedBox(height: 24),
 
-                      // Development credentials info card
-                      if (isDevelopment) _buildDevInfoCard(),
+                      // Demo credentials info card
+                      _buildDevInfoCard(),
                       if (isDevelopment) const SizedBox(height: 20),
 
                       // Form fields in a Card for better web appearance
@@ -257,7 +257,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     size: 18, color: Colors.amber.shade800),
                 const SizedBox(width: 6),
                 Text(
-                  'Development Mode',
+                  'Demo Credentials',
                   style: TextStyle(
                     fontWeight: FontWeight.bold,
                     color: Colors.amber.shade900,
@@ -332,6 +332,7 @@ class _LoginScreenState extends State<LoginScreen> {
     // ignore: deprecated_member_use
     // Note: replace with Clipboard.setData(ClipboardData(text: text)) if
     // you prefer and add `import 'package:flutter/services.dart';`
+    Clipboard.setData(ClipboardData(text: text));
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text('$label copied: $text'),
