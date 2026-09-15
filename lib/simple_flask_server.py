@@ -2942,17 +2942,22 @@ def update_video_subtitles(session_id):
             except (json.JSONDecodeError, TypeError, OSError) as e:
                 logging.warning("Could not update messages.json: %s", e)
 
-        # --- 3. Create a temporary file for the new video ---
-        # Put the temp file next to the target so os.rename stays on one filesystem.
-        temp_output = os.path.join(session_dir, "video_new.mp4")
+        # --- 3. Write the new video to a fixed temp name ---
+        temp_output = os.path.join(session_dir, "video_subtitled_tmp.mp4")
+        # Clean up any leftover from a previous interrupted run
+        if os.path.exists(temp_output):
+            try:
+                os.remove(temp_output)
+            except OSError:
+                pass
 
-        # Clean leftovers from a previous failed run
-        for leftover in ("video_new.mp4", "video.mp4.backup"):
-            p = os.path.join(session_dir, leftover)
-            if os.path.exists(p):
-                os.remove(p)
+        # ffmpeg input: the current best version
+        original_video = os.path.join(session_dir, "video.mp4")
+        modified_video = os.path.join(session_dir, "video_subtitled.mp4")
+        video_path = modified_video if os.path.exists(modified_video) else original_video
+        logging.info("update_video_subtitles: ffmpeg input = %s", video_path)
  
-# --- 4. Build ffmpeg command to embed subtitles ---
+        # --- 4. Build ffmpeg command to embed subtitles ---
         # Start with basic command
         cmd = ["ffmpeg", "-y"]
 
@@ -3049,12 +3054,55 @@ def update_video_subtitles(session_id):
             logging.error("ffmpeg exception: %s", e, exc_info=True)
             return jsonify({"error": str(e)}), 500
 
-        # --- 6. Replace the original video ---
-        backup_path = os.path.join(session_dir, "video.mp4.backup")
-        if os.path.exists(backup_path):
-            os.remove(backup_path)
-        os.rename(video_path, backup_path)
-        os.rename(temp_output, video_path)
+        # --- 6. Atomically replace video_subtitled.mp4 with the new file ---
+        target = os.path.join(session_dir, "video_subtitled.mp4")
+        max_attempts = 5
+        attempt_delay = 3  # seconds
+
+        replaced = False
+        for attempt in range(1, max_attempts + 1):
+            try:
+                os.replace(temp_output, target)
+                replaced = True
+                logging.info(
+                    "update_video_subtitles: replaced %s (attempt %d/%d)",
+                    target, attempt, max_attempts,
+                )
+                break
+            except PermissionError:
+                logging.warning(
+                    "update_video_subtitles: %s is locked (attempt %d/%d)",
+                    target, attempt, max_attempts,
+                )
+                if attempt < max_attempts:
+                    time.sleep(attempt_delay)
+            except OSError as e:
+                logging.error(
+                    "update_video_subtitles: os.replace failed: %s", e
+                )
+                return jsonify({"error": f"Could not replace video: {e}"}), 500
+
+        if not replaced:
+            logging.error(
+                "update_video_subtitles: giving up after %d attempts; "
+                "new video kept at %s",
+                max_attempts, temp_output,
+            )
+            return (
+                jsonify(
+                    {
+                        "error": "video_locked",
+                        "message": (
+                            "The current video is being played in another tab. "
+                            "Close it and try saving again. Your new version is "
+                            "saved as video_subtitled_tmp.mp4 and will be "
+                            "applied automatically on the next successful save."
+                        ),
+                        "pending_file": "video_subtitled_tmp.mp4",
+                    }
+                ),
+                423,  # HTTP 423 Locked
+            )
 
         # --- 7. Sync VTT files ---
         _sync_vtt_files(session_dir)
@@ -3076,7 +3124,7 @@ def update_video_subtitles(session_id):
                         }
                         for vtt in valid_vtt_files
                     ],
-                    "backup_path": backup_path,
+                    "video": "video_subtitled.mp4",
                     "messages_updated": updated_count,
                 }
             ),
@@ -3156,6 +3204,120 @@ def _sync_vtt_files(session_dir):
             f.write(content)
 
         logging.info("Synced %s -> subtitles.vtt", english_vtt)
+
+def _remote_size(url, headers, cookies, timeout=20):
+    """Get the total size of a remote file via a 1-byte Range GET.
+    Falls back to reading Content-Length if the server ignores Range."""
+    range_headers = dict(headers)
+    range_headers["Range"] = "bytes=0-0"
+    try:
+        with requests.get(
+            url,
+            headers=range_headers,
+            cookies=cookies,
+            verify=False,
+            timeout=timeout,
+            stream=True,
+            allow_redirects=True,
+        ) as r:
+            cr = r.headers.get("Content-Range", "")     # e.g. "bytes 0-0/152217"
+            if "/" in cr:
+                try:
+                    return int(cr.rsplit("/", 1)[-1])
+                except ValueError:
+                    pass
+            cl = r.headers.get("Content-Length")
+            if cl:
+                try:
+                    n = int(cl)
+                    # A range request may return Content-Length: 1, which is
+                    # not the real size — only trust it if it's large.
+                    if n > 1:
+                        return n
+                except ValueError:
+                    pass
+    except requests.exceptions.RequestException as e:
+        logging.warning("Range GET failed for %s: %s", url, e)
+    return 0
+
+
+def wait_for_session_ready(
+    session_id,
+    token,
+    max_wait_seconds=1800,
+    poll_interval=15,
+    stable_needed=3,
+):
+    """
+    Poll the internal server until messages.json stops growing.
+    Uses a Range GET because HEAD is unreliable on this server.
+    """
+    url = f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/messages.json"
+    headers = {
+        "X-Forward-Auth": token,
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "Mozilla/5.0 (compatible; LT-Uploader/1.0)",
+    }
+    cookies = {"_forward_auth": token}
+
+    last_size = -1
+    stable = 0
+    start = time.time()
+
+    while time.time() - start < max_wait_seconds:
+        size = _remote_size(url, headers, cookies)
+
+        logging.info(
+            "Session %s: messages.json size=%d (stable=%d/%d)",
+            session_id, size, stable, stable_needed,
+        )
+
+        if size > 0 and size == last_size:
+            stable += 1
+            if stable >= stable_needed:
+                logging.info(
+                    "✅ Session %s appears complete (%d bytes)",
+                    session_id, size,
+                )
+                return True
+        else:
+            stable = 0
+            last_size = size
+
+        time.sleep(poll_interval)
+
+    logging.warning(
+        "⚠️ Session %s did not stabilize within %ds; downloading anyway",
+        session_id, max_wait_seconds,
+    )
+    return False
+
+def process_session_in_background(session_id, token, video_key):
+    """
+    Wait for the internal server to finish processing, then download.
+    Runs in a daemon thread — started right after upload.
+    """
+    try:
+        ready = wait_for_session_ready(session_id, token)
+        if not ready:
+            logging.warning(
+                "Session %s never stabilized; downloading what we have",
+                session_id,
+            )
+        download_session_files(session_id, token)
+
+        # Mark the job complete in our local state
+        job = jobs.get(session_id)
+        if job:
+            job["status"] = "completed"
+            job["progress"] = 1.0
+        save_state()
+        logging.info("✅ Background download finished for %s", session_id)
+    except Exception as e:                                    # noqa: BLE001
+        logging.error(
+            "Background session processing failed for %s: %s",
+            session_id, e, exc_info=True,
+        )
 
 
 @app.route("/extract_video_subtitles/<session_id>", methods=["GET"])
@@ -3580,20 +3742,12 @@ def get_session_output(session_id):
         token = request.cookies.get("_forward_auth", "")
 
     # Only download if files don't exist or are very small
-    if token:
-        json_path = os.path.join(session_dir, "transcripts.json")
-        messages_path = os.path.join(session_dir, "messages.json")
-
-        # Check if we need to download
-        need_download = False
-        if not os.path.exists(json_path) or os.path.getsize(json_path) < 100:
-            need_download = True
-        if not os.path.exists(messages_path) or os.path.getsize(messages_path) < 100:
-            need_download = True
-
-        if need_download:
-            logging.info("Downloading session %s from internal server", session_id)
-            download_session_files(session_id, token)
+    if token and _session_files_look_incomplete(session_dir):
+        logging.info(
+            "Session %s looks incomplete — re-downloading from internal server",
+            session_id,
+        )
+        download_session_files(session_id, token)
 
     files = []
     if os.path.exists(session_dir):
@@ -3655,15 +3809,20 @@ def get_session_file(session_id, filename):
         return response
 
     if filename.lower().endswith(".mp4"):
-        # as_attachment=False is required for <video> playback in Firefox.
-        # conditional=True keeps Range support (already active anyway).
+        # A request for "video.mp4" is served from the subtitled version
+        # if it exists, otherwise the original.
+        actual_path = file_path
+        if filename == "video.mp4":
+            modified = os.path.join(session_dir, "video_subtitled.mp4")
+            if os.path.exists(modified):
+                actual_path = modified
         return send_file(
-            file_path,
+            actual_path,
             as_attachment=False,
             mimetype="video/mp4",
             conditional=True,
         )
-
+    
     return send_file(file_path, as_attachment=True, conditional=True)
 
 
@@ -4032,6 +4191,44 @@ def convert_video_to_browser_compatible(input_path, output_path):
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         logging.error("❌ Video conversion error: %s", e)
         return False
+
+@app.route("/session_refresh/<session_id>", methods=["POST"])
+def session_refresh(session_id):
+    """Force a re-download of a session from the internal server."""
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        token = request.cookies.get("_forward_auth", "")
+    if not token:
+        return jsonify({"error": "No token provided"}), 401
+
+    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    if os.path.exists(session_dir):
+        shutil.rmtree(session_dir)
+    os.makedirs(session_dir, exist_ok=True)
+
+    download_session_files(session_id, token)
+    return jsonify({"success": True, "session_id": session_id}), 200
+
+def _session_files_look_incomplete(session_dir):
+    """
+    Heuristic: a completed session should have:
+      - messages.json > 5 KB
+      - transcripts.json present
+      - at least one subtitles_*.vtt
+    """
+    messages = os.path.join(session_dir, "messages.json")
+    transcripts = os.path.join(session_dir, "transcripts.json")
+    if not os.path.exists(transcripts):
+        return True
+    if not os.path.exists(messages) or os.path.getsize(messages) < 5000:
+        return True
+    vtt_files = [
+        f for f in os.listdir(session_dir)
+        if f.startswith("subtitles_") and f.endswith(".vtt")
+    ]
+    if not vtt_files:
+        return True
+    return False
 
 @app.route("/api/youtube-download-and-upload", methods=["POST", "OPTIONS"])
 def youtube_download_and_upload():
@@ -4717,7 +4914,9 @@ def upload_lecture():
             }
             jobs[session_id] = job
             threading.Thread(
-                target=process_job, args=(session_id,), daemon=True
+                target=process_session_in_background,
+                args=(session_id, token, video_key),
+                daemon=True,
             ).start()
             save_state()
 
@@ -4933,6 +5132,24 @@ if __name__ == "__main__":
     # Clean up missing videos and orphaned data
     clean_missing_videos()
     cleanup_orphaned_data()
+
+    # Remove any stray files from the old versioned-name scheme, keep
+    # only "video.mp4" and "video_subtitled.mp4".
+    keep = {"video.mp4", "video_subtitled.mp4"}
+    for session_id in list(sessions.keys()):
+        session_dir = os.path.join(SESSION_FOLDER, session_id)
+        if not os.path.isdir(session_dir):
+            continue
+        for f in os.listdir(session_dir):
+            if not f.startswith("video") or not f.endswith(".mp4"):
+                continue
+            if f in keep:
+                continue
+            try:
+                os.remove(os.path.join(session_dir, f))
+                logging.info("🧹 Removed stale video %s in session %s", f, session_id)
+            except OSError:
+                pass
 
     # Regenerate missing thumbnails
     regenerate_missing_thumbnails()
