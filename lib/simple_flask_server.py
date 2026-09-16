@@ -2500,9 +2500,8 @@ def session_messages_json(session_id):
     return jsonify({"error": "messages.json not found"}), 404
 
 
-@app.route("/session_zip/<session_id>", methods=["GET"])
+@app.route("/session_zip/<path:session_id>", methods=["GET"])
 def download_session_zip(session_id):
-    """Download all session files as a ZIP archive."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
     if not os.path.exists(session_dir):
         return jsonify({"error": "Session not found"}), 404
@@ -2517,21 +2516,37 @@ def download_session_zip(session_id):
             url = f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/messages.json"
             curl_download(url, json_path, token)
 
-    zip_path = os.path.join(tempfile.gettempdir(), f"session_{session_id}.zip")
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-        for root, _, files in os.walk(session_dir):
-            for file in files:
-                file_path = os.path.join(root, file)
-                if os.path.getsize(file_path) > 1000:
-                    zipf.write(file_path, os.path.relpath(file_path, session_dir))
+    # Sanitize session_id before using it in a filename
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id)[:80]
+    zip_path = os.path.join(tempfile.gettempdir(), f"session_{safe_id}.zip")
 
-    return send_file(
-        zip_path,
-        as_attachment=True,
-        download_name=f"session_{session_id}.zip",
-        mimetype="application/zip",
-    )
+    try:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+            for root, _, files in os.walk(session_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    try:
+                        if os.path.getsize(file_path) > 1000:
+                            zipf.write(
+                                file_path,
+                                os.path.relpath(file_path, session_dir),
+                            )
+                    except OSError:
+                        continue
 
+        return send_file(
+            zip_path,
+            as_attachment=True,
+            download_name=f"session_{safe_id}.zip",
+            mimetype="application/zip",
+        )
+    finally:
+        # Clean up after Flask has actually sent the file
+        try:
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+        except OSError:
+            pass
 
 # In simple_flask_server.py - Update session_transcript_save_vtt
 

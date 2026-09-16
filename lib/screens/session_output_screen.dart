@@ -781,8 +781,9 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       );
     }
   }
+  bool _isDownloadingAll = false;
 
-  void _downloadAllFiles() async {
+  Future<void> _downloadAllFiles() async {
     if (_files.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -792,61 +793,80 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       );
       return;
     }
+    if (_isDownloadingAll) return;          // guard against double-tap
+
+    setState(() => _isDownloadingAll = true);
 
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Preparing download... This may take a moment.'),
+        content: Text('Preparing download… This may take a moment.'),
         duration: Duration(seconds: 2),
       ),
-      
     );
 
     try {
       final token = await InternalAuthService.getToken();
-      final downloadUrl = '$flaskServerUrl/session_zip/${widget.sessionId}';
-      
+
+      // IMPORTANT: encode the session id so '/', '+', '=' don't break the URL
+      final encodedId = Uri.encodeComponent(widget.sessionId);
+      final downloadUrl = '$flaskServerUrl/session_zip/$encodedId';
+
       final response = await http.get(
         Uri.parse(downloadUrl),
-        headers: {
-          'Authorization': 'Bearer ${token ?? ''}',
-        },
+        headers: {'Authorization': 'Bearer ${token ?? ''}'},
       );
 
-      if (response.statusCode == 200) {
-        String filename = 'session_${widget.sessionId}.zip';
-        final contentDisposition = response.headers['content-disposition'] ?? '';
-        final filenameMatch = RegExp(r'filename="([^"]+)"').firstMatch(contentDisposition);
-        if (filenameMatch != null) {
-          filename = filenameMatch.group(1)!;
-        }
+      if (response.statusCode != 200) {
+        throw Exception('Server returned ${response.statusCode}');
+      }
+      if (response.bodyBytes.isEmpty) {
+        throw Exception('Server returned an empty ZIP');
+      }
 
-        final blob = html.Blob([response.bodyBytes], 'application/zip');
-        final url = html.Url.createObjectUrlFromBlob(blob);
-        html.AnchorElement(href: url)
-          ..setAttribute('download', filename)
-          ..click();
+      // Parse filename from Content-Disposition if present
+      String filename = 'session_${widget.sessionId}.zip';
+      final cd = response.headers['content-disposition'] ?? '';
+      final m = RegExp(r'filename\*?=(?:UTF-8'')?"?([^";]+)"?').firstMatch(cd);
+      if (m != null && m.group(1)!.trim().isNotEmpty) {
+        filename = Uri.decodeComponent(m.group(1)!.trim());
+      }
+      // Sanitize — a filename can never contain '/' or '\'
+      filename = filename.replaceAll(RegExp(r'[\\/]'), '_');
+
+      final blob = html.Blob([response.bodyBytes], 'application/zip');
+      final url = html.Url.createObjectUrlFromBlob(blob);
+
+      // Attach, click, then revoke AFTER the browser has begun the download
+      final anchor = html.AnchorElement(href: url)
+        ..download = filename
+        ..style.display = 'none';
+      html.document.body?.append(anchor);
+      anchor.click();
+      anchor.remove();
+
+      Future.delayed(const Duration(seconds: 1), () {
         html.Url.revokeObjectUrl(url);
+      });
 
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('✅ Downloaded: $filename'),
-              backgroundColor: Colors.green,
-            ),
-          );
-        }
-      } else {
-        throw Exception('Failed to download ZIP: ${response.statusCode}');
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('❌ Download failed: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('✅ Downloaded: $filename'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } catch (e, st) {
+      debugPrint('Download-all failed: $e\n$st');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ Download failed: $e'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isDownloadingAll = false);
     }
   }
 
@@ -1224,8 +1244,19 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
             tooltip: 'Export Transcript',
           ),
           IconButton(
-            icon: const Icon(Icons.folder_zip),
-            onPressed: _files.isNotEmpty ? _downloadAllFiles : null,
+            icon: _isDownloadingAll
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : const Icon(Icons.folder_zip),
+            onPressed: (_files.isNotEmpty && !_isDownloadingAll)
+                ? _downloadAllFiles
+                : null,
             tooltip: 'Download All Files',
           ),
           IconButton(
