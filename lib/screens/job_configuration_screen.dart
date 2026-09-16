@@ -7,6 +7,7 @@ import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/screens/session_output_screen.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:asr_live_translator/models/language_config.dart';
+import 'package:asr_live_translator/widgets/job_progress_panel.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -2202,6 +2203,38 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     );
   }
 
+  Widget _buildLiveProgressPanel() {
+    if (!_hasSessionId || _savedSessionId.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(top: 16),
+      child: JobProgressPanel(
+        // Key on the session id so a new submission gets a fresh panel
+        // (with a fresh poll timer) instead of reusing the old state.
+        key: ValueKey('job-progress-$_savedSessionId'),
+        sessionId: _savedSessionId,
+        onComplete: () {
+          if (!mounted) return;
+          setState(() {
+            _outputStatus =
+                '✅ Processing complete! Click "View Output" to browse files.';
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('✅ Processing complete'),
+              backgroundColor: Colors.green,
+              duration: Duration(seconds: 3),
+            ),
+          );
+          // Refresh the manual check section so it shows "Output ready"
+          _checkOutput();
+        },
+      ),
+    );
+  }
+
   // --- Build ---
   
   @override
@@ -2554,6 +2587,9 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                     ? const CircularProgressIndicator(color: Colors.white)
                     : const Text('Start Processing'),
               ),
+              
+              // ─── Live progress panel ───          👈 NEW
+              _buildLiveProgressPanel(),
               
               // ─── Output check section ───
               _buildOutputCheckSection(),

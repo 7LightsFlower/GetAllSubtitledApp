@@ -1,7 +1,10 @@
 // working_screen.dart
+import 'dart:async';
+
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:asr_live_translator/screens/session_detail_screen.dart';
+import 'package:asr_live_translator/widgets/job_progress_panel.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'dart:convert';
@@ -59,7 +62,8 @@ class VideoProject {
 
   factory VideoProject.fromJson(Map<String, dynamic> json) {
     return VideoProject(
-      key: json['key'] as String? ?? 'fallback-${DateTime.now().millisecondsSinceEpoch}',
+      key: json['key'] as String? ??
+          'fallback-${DateTime.now().millisecondsSinceEpoch}',
       name: json['name'] as String? ?? 'Untitled',
       fileName: json['file_name'] as String? ?? 'video.mp4',
       uploaded: json['uploaded'] != null
@@ -108,117 +112,17 @@ class WorkingScreen extends StatefulWidget {
 class _WorkingScreenState extends State<WorkingScreen> {
   List<VideoProject> _projects = [];
   bool _isLoading = true;
-  bool _isConnected = false;
-  bool _isConnecting = false;
   String _searchQuery = '';
   String _sortMode = 'newest';
   double _storageUsed = 0.0;
   double _storageLimit = 50.0;
   String? _listError;
 
-  // ─── Connection management ──────────────────────────────────────────────
-
-  Future<void> _checkConnection() async {
-    if (!mounted) return;
-    final token = await InternalAuthService.getToken();
-    if (mounted) {
-      setState(() => _isConnected = token != null && token.isNotEmpty);
-    }
-  }
-
-  Future<void> _connectToInternal() async {
-    if (!mounted || _isConnecting) return;
-    setState(() => _isConnecting = true);
-    try {
-      final success = await InternalAuthService.loginWithOAuth();
-      if (!mounted) return;
-      if (success) {
-        setState(() => _isConnected = true);
-        _showSnackBar('✅ Connected to internal server.');
-        _fetchProjects();
-      } else {
-        _showSnackBar('❌ Connection failed. Please try again.', isError: true);
-      }
-    } catch (e) {
-      if (mounted) _showSnackBar('Error: $e', isError: true);
-    } finally {
-      if (mounted) setState(() => _isConnecting = false);
-    }
-  }
-
-  Future<String> _getToken() async {
-    final token = await InternalAuthService.getToken();
-    if (token == null || token.isEmpty) {
-      throw Exception('No token. Use "Manual Token" or click "Connect".');
-    }
-    return token;
-  }
-
-  // ─── Manual token dialog ───────────────────────────────────────────────
-
-  void _showManualTokenDialog() {
-    final controller = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Enter Cookie Token'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text('Paste the token from /gettoken (e.g., "abc...|123|user@kit.edu")'),
-            const SizedBox(height: 8),
-            TextField(
-              controller: controller,
-              maxLines: 3,
-              decoration: const InputDecoration(
-                hintText: 'Paste token here',
-                border: OutlineInputBorder(),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              final token = controller.text.trim();
-              if (token.isNotEmpty) {
-                await InternalAuthService.setManualToken(token);
-                if (mounted) {
-                  setState(() => _isConnected = true);
-                  _showSnackBar('✅ Token set manually.');
-                  if (ctx.mounted) Navigator.pop(ctx);
-                }
-                _fetchProjects();
-              }
-            },
-            child: const Text('Set Token'),
-          ),
-          TextButton(
-            onPressed: () async {
-              await InternalAuthService.clearManualToken();
-              if (mounted) {
-                setState(() => _isConnected = false);
-                _showSnackBar('Manual token cleared.');
-                if (ctx.mounted) Navigator.pop(ctx);
-              }
-            },
-            child: const Text('Clear Token', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
-    );
-  }
-
   // ─── Lifecycle ──────────────────────────────────────────────────────────
 
   @override
   void initState() {
     super.initState();
-    _checkConnection();
     _fetchProjects();
   }
 
@@ -232,7 +136,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
     try {
       final url = Uri.parse('$authBaseUrl/videos');
       if (kDebugMode) print('📡 Fetching videos from: $url');
-      final response = await http.get(url, headers: {'Content-Type': 'application/json'});
+      final response =
+          await http.get(url, headers: {'Content-Type': 'application/json'});
 
       if (!mounted) return;
 
@@ -249,7 +154,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
             if (kDebugMode) print('❌ Error parsing project: $e');
             return null;
           }
-        }).whereType<VideoProject>().toList() ?? [];
+        }).whereType<VideoProject>().toList() ??
+            [];
 
         if (mounted) {
           setState(() {
@@ -327,9 +233,6 @@ class _WorkingScreenState extends State<WorkingScreen> {
         throw Exception('Could not extract video ID from YouTube URL');
       }
 
-      // Use your server's YouTube API endpoint
-      // Same-origin in production (empty base → "/api/youtube-info"),
-      // localhost:5000 during `flutter run`.
       const serverUrl = '$flaskServerUrl/api/youtube-info';
 
       final response = await http.post(
@@ -348,82 +251,36 @@ class _WorkingScreenState extends State<WorkingScreen> {
       } else {
         throw Exception('Server error: ${response.statusCode}');
       }
-      
     } catch (e) {
       debugPrint('Error getting YouTube video: $e');
       return null;
     }
   }
 
-  // Add this method to handle YouTube imports directly
-
   Future<void> _importYouTubeDirectly(String youtubeUrl) async {
     if (!mounted) return;
-    
-    try {
-      final token = await InternalAuthService.getToken();
-      if (token == null || token.isEmpty) {
-        _showSnackBar('Please authenticate first.', isError: true);
-        return;
-      }
 
-      if (!mounted) return;
-
-      // Show downloading dialog
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (ctx) => const AlertDialog(
-          title: Text('Downloading YouTube Video'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              CircularProgressIndicator(),
-              SizedBox(height: 16),
-              Text('Downloading and processing video...'),
-            ],
-          ),
-        ),
-      );
-
-      // Call the server to download and upload
-      const serverUrl = '$flaskServerUrl/api/youtube-download-and-upload';
-      final response = await http.post(
-        Uri.parse(serverUrl),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => _YouTubeDownloadDialog(
+        youtubeUrl: youtubeUrl,
+        onComplete: () {
+          if (mounted) {
+            _fetchProjects();
+            _showSnackBar('✅ YouTube video downloaded and imported!');
+          }
         },
-        body: jsonEncode({
-          'url': youtubeUrl,
-          'auto_segmentation': true,
-        }),
-      );
-
-      // Close the loading dialog
-      if (mounted) Navigator.pop(context);
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        if (data['success'] == true) {
-          _showSnackBar('✅ YouTube video downloaded and imported!');
-          _fetchProjects();
-        } else {
-          _showSnackBar('❌ Error: ${data['error']}', isError: true);
-        }
-      } else {
-        _showSnackBar('❌ Server error: ${response.statusCode}', isError: true);
-      }
-
-    } catch (e) {
-      if (mounted) Navigator.pop(context);
-      _showSnackBar('❌ Error: $e', isError: true);
-    }
+        onError: (msg) {
+          if (mounted) _showSnackBar('❌ $msg', isError: true);
+        },
+      ),
+    );
   }
 
   void _showYouTubeImportDialog() {
     final controller = TextEditingController();
-    
+
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -462,15 +319,14 @@ class _WorkingScreenState extends State<WorkingScreen> {
     );
   }
 
-
   // ─── Import from text ─────────────────────────────────────────────────
 
   Future<void> _importVideosFromText() async {
     if (!mounted) return;
-    
+
     final controller = TextEditingController();
     bool autoSegmentation = true;
-    
+
     final result = await showDialog<bool>(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -497,7 +353,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
                   maxLines: null,
                   expands: true,
                   decoration: const InputDecoration(
-                    hintText: 'https://example.com/video1.mp4\nhttps://youtube.com/watch?v=abc123\nhttps://example.com/video2.mp4\n...',
+                    hintText:
+                        'https://example.com/video1.mp4\nhttps://youtube.com/watch?v=abc123\nhttps://example.com/video2.mp4\n...',
                     border: InputBorder.none,
                     contentPadding: EdgeInsets.all(12),
                   ),
@@ -543,21 +400,21 @@ class _WorkingScreenState extends State<WorkingScreen> {
         ),
       ),
     );
-    
+
     if (result != true || !mounted) return;
-    
+
     final text = controller.text.trim();
-    final urls = text.split('\n')
+    final urls = text
+        .split('\n')
         .map((line) => line.trim())
         .where((line) => line.isNotEmpty)
         .toList();
-    
+
     if (urls.isEmpty) {
       _showSnackBar('No URLs found in text.', isError: true);
       return;
     }
-    
-    // Show import progress dialog
+
     await _importVideosFromUrls(urls, autoSegmentation);
   }
 
@@ -570,16 +427,15 @@ class _WorkingScreenState extends State<WorkingScreen> {
     }
   }
 
-  Future<void> _importVideosFromUrls(List<String> urls, bool autoSegmentation) async {
+  Future<void> _importVideosFromUrls(
+      List<String> urls, bool autoSegmentation) async {
     if (!mounted) return;
-    
-    // First, resolve YouTube URLs
+
     List<Map<String, String>> resolvedUrls = [];
     List<String> errors = [];
-    
+
     for (final url in urls) {
       if (_isYouTubeUrl(url)) {
-        // Try to get the actual video URL
         final videoUrl = await _getYouTubeVideoUrl(url);
         if (videoUrl != null) {
           resolvedUrls.add({
@@ -600,20 +456,19 @@ class _WorkingScreenState extends State<WorkingScreen> {
         errors.add('Invalid URL: $url');
       }
     }
-    
+
     if (errors.isNotEmpty) {
       final errorMessage = errors.join('\n');
       _showSnackBar('⚠️ Errors:\n$errorMessage', isError: true);
     }
-    
+
     if (resolvedUrls.isEmpty) {
       _showSnackBar('No valid video URLs found to import.', isError: true);
       return;
     }
-    
-    // Extract resolved URLs
+
     final finalUrls = resolvedUrls.map((entry) => entry['resolved']!).toList();
-    
+
     showDialog(
       // ignore: use_build_context_synchronously
       context: context,
@@ -626,7 +481,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
             Navigator.pop(ctx);
             _fetchProjects();
             final errorCount = errors.length;
-            final message = errorCount > 0 
+            final message = errorCount > 0
                 ? '✅ Import completed! ($errorCount failed)'
                 : '✅ Import completed!';
             _showSnackBar(message);
@@ -704,14 +559,6 @@ class _WorkingScreenState extends State<WorkingScreen> {
               },
             ),
             ListTile(
-              leading: const Icon(Icons.stop_circle, color: Colors.orange),
-              title: const Text('Stop Segmentation'),
-              onTap: () {
-                Navigator.pop(ctx);
-                _stopSegmentation(project.key);
-              },
-            ),
-            ListTile(
               leading: const Icon(Icons.content_cut),
               title: const Text('Video Segmentation'),
               onTap: () {
@@ -727,10 +574,22 @@ class _WorkingScreenState extends State<WorkingScreen> {
                 _showSegmentsList(project.key);
               },
             ),
+            ListTile(
+              leading: const Icon(Icons.drive_file_rename_outline),
+              title: const Text('Rename Project'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _editProjectName(project);
+              },
+            ),
             const Divider(),
             ListTile(
-              leading: const Icon(Icons.delete, color: Colors.red),
-              title: const Text('Delete Project', style: TextStyle(color: Colors.red)),
+              leading:
+                  const Icon(Icons.delete, color: Colors.red),
+              title: const Text(
+                'Delete Project',
+                style: TextStyle(color: Colors.red),
+              ),
               onTap: () {
                 Navigator.pop(ctx);
                 _deleteProject(project.key);
@@ -780,38 +639,6 @@ class _WorkingScreenState extends State<WorkingScreen> {
     Navigator.pushNamed(context, '/progress', arguments: videoKey);
   }
 
-  // ─── Internal actions (require cookie token) ──────────────────────────
-
-  Future<void> _stopSegmentation(String videoKey) async {
-    if (!mounted) return;
-    String token;
-    try {
-      token = await _getToken();
-    } catch (e) {
-      _showSnackBar('Cannot get token: $e', isError: true);
-      return;
-    }
-
-    final confirm = await _confirmAction('Stop segmentation?');
-    if (!confirm) return;
-    try {
-      final response = await http.post(
-        Uri.parse('$internalServerUrl/stop_segmentation/$videoKey'),
-        headers: {'Cookie': '_forward_auth=$token'},
-      );
-      if (mounted) {
-        if (response.statusCode == 200) {
-          _showSnackBar('Segmentation stopped.');
-          _fetchProjects();
-        } else {
-          _showSnackBar('Failed to stop segmentation.', isError: true);
-        }
-      }
-    } catch (e) {
-      if (mounted) _showSnackBar('Error: $e', isError: true);
-    }
-  }
-
   void _showSegmentationSettings(String videoKey) {
     Navigator.pushNamed(context, '/segmentation', arguments: videoKey);
   }
@@ -820,33 +647,29 @@ class _WorkingScreenState extends State<WorkingScreen> {
     Navigator.pushNamed(context, '/segments_list', arguments: videoKey);
   }
 
+  // ─── Delete – no token needed, hits the Flask server ─────────────────
+
   Future<void> _deleteProject(String videoKey) async {
     if (!mounted) return;
-    String token;
-    try {
-      token = await _getToken();
-    } catch (e) {
-      _showSnackBar('Cannot get token: $e', isError: true);
-      return;
-    }
 
-    final confirm = await _confirmAction('Delete this project permanently? This cannot be undone.');
+    final confirm = await _confirmAction(
+        'Delete this project permanently? This cannot be undone.');
     if (!confirm) return;
+
     try {
       final response = await http.post(
-        Uri.parse('$internalServerUrl/delete_video/$videoKey'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Cookie': '_forward_auth=$token',
-        },
+        Uri.parse('$authBaseUrl/delete_video/$videoKey'),
+        headers: {'Content-Type': 'application/json'},
       );
-      if (mounted) {
-        if (response.statusCode == 200) {
-          _showSnackBar('Project deleted.');
-          _fetchProjects();
-        } else {
-          _showSnackBar('Failed to delete.', isError: true);
-        }
+      if (!mounted) return;
+      if (response.statusCode == 200) {
+        _showSnackBar('Project deleted.');
+        _fetchProjects();
+      } else {
+        _showSnackBar(
+          'Failed to delete (HTTP ${response.statusCode}).',
+          isError: true,
+        );
       }
     } catch (e) {
       if (mounted) _showSnackBar('Error: $e', isError: true);
@@ -855,39 +678,32 @@ class _WorkingScreenState extends State<WorkingScreen> {
 
   Future<bool> _confirmAction(String message) async {
     return await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Confirm'),
-        content: Text(message),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Confirm'),
+            content: Text(message),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('OK', style: TextStyle(color: Colors.red)),
+              ),
+            ],
           ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('OK', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
-    ) ?? false;
+        ) ??
+        false;
   }
 
-  // ─── Edit name – uses internal API ──────────────────────────────────
+  // ─── Edit name – no token needed ────────────────────────────────────
 
   Future<void> _editProjectName(VideoProject project) async {
     if (!mounted) return;
-    String token;
-    try {
-      token = await _getToken();
-    } catch (e) {
-      _showSnackBar('Cannot get token: $e', isError: true);
-      return;
-    }
 
     final controller = TextEditingController(text: project.name);
     final newName = await showDialog<String>(
-      // ignore: use_build_context_synchronously
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Edit Project Name'),
@@ -911,20 +727,16 @@ class _WorkingScreenState extends State<WorkingScreen> {
     if (newName != null && newName.isNotEmpty) {
       try {
         final response = await http.post(
-          Uri.parse('$internalServerUrl/update_project_name/${project.key}'),
-          headers: {
-            'Content-Type': 'application/json',
-            'Cookie': '_forward_auth=$token',
-          },
+          Uri.parse('$authBaseUrl/update_project_name/${project.key}'),
+          headers: {'Content-Type': 'application/json'},
           body: jsonEncode({'project_name': newName}),
         );
-        if (mounted) {
-          if (response.statusCode == 200) {
-            _showSnackBar('Project name updated.');
-            _fetchProjects();
-          } else {
-            _showSnackBar('Failed to update name.', isError: true);
-          }
+        if (!mounted) return;
+        if (response.statusCode == 200) {
+          _showSnackBar('Project name updated.');
+          _fetchProjects();
+        } else {
+          _showSnackBar('Failed to update name.', isError: true);
         }
       } catch (e) {
         if (mounted) _showSnackBar('Error: $e', isError: true);
@@ -957,6 +769,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
       builder: (ctx) => _UploadDialog(
         bytes: bytes,
         fileName: fileName,
+        mode: UploadMode.forward, 
         onUploadComplete: _fetchProjects,
       ),
     );
@@ -982,28 +795,15 @@ class _WorkingScreenState extends State<WorkingScreen> {
       appBar: AppBar(
         title: const Text(appTitle),
         actions: [
-          // ─── YouTube Import Button ────────────────────────────────────
           IconButton(
             icon: const Icon(Icons.play_circle_outline),
             onPressed: () => _showYouTubeImportDialog(),
             tooltip: 'Download YouTube Video',
           ),
-          // ─── Import from Text Button ────────────────────────────────────
           IconButton(
             icon: const Icon(Icons.text_snippet),
             onPressed: _importVideosFromText,
             tooltip: 'Import from text links',
-          ),
-          // ─── Manual Token Button ────────────────────────────────────
-          IconButton(
-            icon: const Icon(Icons.vpn_key),
-            onPressed: _showManualTokenDialog,
-            tooltip: 'Manual Token',
-          ),
-          IconButton(
-            icon: Icon(_isConnected ? Icons.link : Icons.link_off),
-            onPressed: _isConnecting ? null : _connectToInternal,
-            tooltip: _isConnected ? 'Reconnect' : 'Connect',
           ),
           IconButton(
             icon: const Icon(Icons.refresh),
@@ -1041,11 +841,17 @@ class _WorkingScreenState extends State<WorkingScreen> {
                       DropdownButton<String>(
                         value: _sortMode,
                         items: const [
-                          DropdownMenuItem(value: 'newest', child: Text('Newest First')),
-                          DropdownMenuItem(value: 'oldest', child: Text('Oldest First')),
-                          DropdownMenuItem(value: 'last-opened', child: Text('Last Opened')),
-                          DropdownMenuItem(value: 'az', child: Text('Name A → Z')),
-                          DropdownMenuItem(value: 'za', child: Text('Name Z → A')),
+                          DropdownMenuItem(
+                              value: 'newest', child: Text('Newest First')),
+                          DropdownMenuItem(
+                              value: 'oldest', child: Text('Oldest First')),
+                          DropdownMenuItem(
+                              value: 'last-opened',
+                              child: Text('Last Opened')),
+                          DropdownMenuItem(
+                              value: 'az', child: Text('Name A → Z')),
+                          DropdownMenuItem(
+                              value: 'za', child: Text('Name Z → A')),
                         ],
                         onChanged: (value) {
                           if (value != null) setState(() => _sortMode = value);
@@ -1070,11 +876,13 @@ class _WorkingScreenState extends State<WorkingScreen> {
                         children: [
                           Text(
                             'Storage used (input videos)',
-                            style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+                            style: TextStyle(
+                                fontSize: 13, color: Colors.grey[600]),
                           ),
                           Text(
                             '${_storageUsed.toStringAsFixed(2)} GB / $_storageLimit GB',
-                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                            style: const TextStyle(
+                                fontSize: 13, fontWeight: FontWeight.w600),
                           ),
                         ],
                       ),
@@ -1082,7 +890,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
                       LinearProgressIndicator(
                         value: _storageUsed / _storageLimit,
                         backgroundColor: Colors.grey[300],
-                        valueColor: const AlwaysStoppedAnimation(Colors.blue),
+                        valueColor:
+                            const AlwaysStoppedAnimation(Colors.blue),
                       ),
                     ],
                   ),
@@ -1106,7 +915,10 @@ class _WorkingScreenState extends State<WorkingScreen> {
             const SizedBox(height: 16),
             const Text(
               'Unable to load projects',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.red),
+              style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.red),
             ),
             const SizedBox(height: 8),
             Text(
@@ -1158,7 +970,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
             Icon(Icons.folder_open, size: 80, color: Colors.grey),
             SizedBox(height: 16),
             Text('No projects found', style: TextStyle(fontSize: 18)),
-            Text('Upload a video to get started.', style: TextStyle(color: Colors.grey)),
+            Text('Upload a video to get started.',
+                style: TextStyle(color: Colors.grey)),
           ],
         ),
       );
@@ -1190,12 +1003,13 @@ class _WorkingScreenState extends State<WorkingScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ─── Thumbnail / Preview Image ──────────────────────────────
             Expanded(
               flex: 2,
               child: ClipRRect(
-                borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
-                child: project.thumbnailUrl != null && project.thumbnailUrl!.isNotEmpty
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(8)),
+                child: project.thumbnailUrl != null &&
+                        project.thumbnailUrl!.isNotEmpty
                     ? Image.network(
                         project.thumbnailUrl!,
                         fit: BoxFit.cover,
@@ -1209,9 +1023,11 @@ class _WorkingScreenState extends State<WorkingScreen> {
                             color: Colors.grey[300],
                             child: Center(
                               child: CircularProgressIndicator(
-                                value: loadingProgress.expectedTotalBytes != null
-                                    ? loadingProgress.cumulativeBytesLoaded / 
-                                      loadingProgress.expectedTotalBytes!
+                                value: loadingProgress.expectedTotalBytes !=
+                                        null
+                                    ? loadingProgress
+                                            .cumulativeBytesLoaded /
+                                        loadingProgress.expectedTotalBytes!
                                     : null,
                               ),
                             ),
@@ -1221,7 +1037,6 @@ class _WorkingScreenState extends State<WorkingScreen> {
                     : _buildThumbnailPlaceholder(project),
               ),
             ),
-            // ─── Card Content ───────────────────────────────────────────
             Expanded(
               flex: 2,
               child: Padding(
@@ -1229,36 +1044,33 @@ class _WorkingScreenState extends State<WorkingScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Project Name
                     GestureDetector(
                       onTap: () => _editProjectName(project),
                       child: Text(
                         project.name,
                         style: const TextStyle(
-                          fontWeight: FontWeight.bold, 
+                          fontWeight: FontWeight.bold,
                           fontSize: 11,
                         ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    // File Name
                     Text(
                       project.fileName,
                       style: TextStyle(
-                        fontSize: 9, 
+                        fontSize: 9,
                         color: Colors.grey[600],
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
-                    // Duration and Segments
                     Row(
                       children: [
                         Text(
                           _formatDuration(project.duration),
                           style: TextStyle(
-                            fontSize: 9, 
+                            fontSize: 9,
                             color: Colors.grey[500],
                           ),
                         ),
@@ -1266,38 +1078,49 @@ class _WorkingScreenState extends State<WorkingScreen> {
                         Text(
                           '• ${project.segmentCount} segs',
                           style: TextStyle(
-                            fontSize: 9, 
+                            fontSize: 9,
                             color: Colors.grey[500],
                           ),
                         ),
                       ],
                     ),
-                    // Upload Date
                     Text(
                       _formatDate(project.uploaded),
                       style: TextStyle(
-                        fontSize: 8, 
+                        fontSize: 8,
                         color: Colors.grey[400],
                       ),
                     ),
-                    // Pipeline Status
                     _buildPipelineStatus(project),
                     const Spacer(),
-                    // Work Button
-                    Align(
-                      alignment: Alignment.bottomRight,
-                      child: ElevatedButton(
-                        onPressed: () => _openSessionDetail(project.key),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.blue,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-                          textStyle: const TextStyle(fontSize: 9),
-                          minimumSize: const Size(0, 26),
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        IconButton(
+                          onPressed: () => _deleteProject(project.key),
+                          icon: const Icon(Icons.delete_outline,
+                              color: Colors.red, size: 18),
+                          tooltip: 'Delete',
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(
+                            minWidth: 26,
+                            minHeight: 26,
+                          ),
                         ),
-                        child: const Text('Open'),
-                      ),
+                        ElevatedButton(
+                          onPressed: () => _openSessionDetail(project.key),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blue,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 3),
+                            textStyle: const TextStyle(fontSize: 9),
+                            minimumSize: const Size(0, 26),
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          child: const Text('Open'),
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -1309,15 +1132,12 @@ class _WorkingScreenState extends State<WorkingScreen> {
     );
   }
 
-  // ─── Thumbnail Placeholder with Video Info ──────────────────────────
-  
   Widget _buildThumbnailPlaceholder(VideoProject project) {
     return Container(
       color: Colors.grey[800],
       child: Stack(
         fit: StackFit.expand,
         children: [
-          // Background gradient
           Container(
             decoration: BoxDecoration(
               gradient: LinearGradient(
@@ -1330,7 +1150,6 @@ class _WorkingScreenState extends State<WorkingScreen> {
               ),
             ),
           ),
-          // Video icon and duration in center
           Center(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -1342,7 +1161,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
                 ),
                 const SizedBox(height: 4),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 6, vertical: 2),
                   decoration: BoxDecoration(
                     color: Colors.black.withValues(alpha: 0.6),
                     borderRadius: BorderRadius.circular(4),
@@ -1359,12 +1179,12 @@ class _WorkingScreenState extends State<WorkingScreen> {
               ],
             ),
           ),
-          // File format badge at bottom
           Positioned(
             bottom: 6,
             right: 6,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
               decoration: BoxDecoration(
                 color: Colors.black.withValues(alpha: 0.6),
                 borderRadius: BorderRadius.circular(3),
@@ -1415,7 +1235,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
         children: [
           Icon(Icons.content_cut, color: Colors.grey, size: 11),
           SizedBox(width: 2),
-          Text('Pending', style: TextStyle(fontSize: 8, color: Colors.grey)),
+          Text('Pending',
+              style: TextStyle(fontSize: 8, color: Colors.grey)),
         ],
       );
     }
@@ -1483,45 +1304,38 @@ class _ImportVideosDialogState extends State<_ImportVideosDialog> {
   Future<void> _startImport() async {
     for (int i = 0; i < _statuses.length; i++) {
       if (!mounted) break;
-      
+
       final status = _statuses[i];
       setState(() {
         status.state = ImportState.downloading;
         status.message = 'Downloading...';
       });
-      
+
       try {
-        final token = await InternalAuthService.getToken();
-        if (token == null || token.isEmpty) {
-          throw Exception('No authentication token available');
-        }
-        
-        // Download video from URL
         final response = await http.get(
           Uri.parse(status.url),
           headers: {
             'Accept': 'video/*, application/octet-stream',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Encoding': 'identity', // Don't compress
+            'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Encoding': 'identity',
           },
         );
-        
+
         if (response.statusCode != 200) {
           throw Exception('Failed to download: HTTP ${response.statusCode}');
         }
-        
+
         if (response.bodyBytes.isEmpty) {
           throw Exception('Downloaded file is empty');
         }
-        
-        // Extract filename from URL
+
         final fileName = _extractFileNameFromUrl(status.url, response);
-        
+
         setState(() {
           status.message = 'Uploading...';
         });
-        
-        // Upload to server
+
         await _uploadVideoToServer(
           bytes: response.bodyBytes,
           fileName: fileName,
@@ -1535,13 +1349,12 @@ class _ImportVideosDialogState extends State<_ImportVideosDialog> {
             }
           },
         );
-        
+
         setState(() {
           status.state = ImportState.completed;
           status.message = '✓ Complete';
           status.progress = 100;
         });
-        
       } catch (e) {
         setState(() {
           status.state = ImportState.error;
@@ -1552,12 +1365,11 @@ class _ImportVideosDialogState extends State<_ImportVideosDialog> {
         }
       }
     }
-    
+
     setState(() {
       _isComplete = true;
     });
-    
-    // Notify completion
+
     widget.onComplete();
   }
 
@@ -1573,7 +1385,8 @@ class _ImportVideosDialogState extends State<_ImportVideosDialog> {
 
     for (int i = 0; i < totalChunks; i++) {
       final start = i * chunkSize;
-      final end = (i + 1) * chunkSize > totalBytes ? totalBytes : (i + 1) * chunkSize;
+      final end =
+          (i + 1) * chunkSize > totalBytes ? totalBytes : (i + 1) * chunkSize;
       final chunk = bytes.sublist(start, end);
 
       final request = http.MultipartRequest(
@@ -1600,7 +1413,6 @@ class _ImportVideosDialogState extends State<_ImportVideosDialog> {
       onProgress(((i + 1) / totalChunks) * 100);
     }
 
-    // Finish upload
     final finishResponse = await http.post(
       Uri.parse('$authBaseUrl/finish-upload'),
       headers: {'Content-Type': 'application/json'},
@@ -1615,7 +1427,6 @@ class _ImportVideosDialogState extends State<_ImportVideosDialog> {
   }
 
   String _extractFileNameFromUrl(String url, http.Response response) {
-    // Try to get filename from Content-Disposition header
     final disposition = response.headers['content-disposition'];
     if (disposition != null) {
       final regex = RegExp(r'filename="([^"]+)"');
@@ -1624,8 +1435,7 @@ class _ImportVideosDialogState extends State<_ImportVideosDialog> {
         return match.group(1)!;
       }
     }
-    
-    // Extract from URL path
+
     try {
       final uri = Uri.parse(url);
       final path = uri.path;
@@ -1635,8 +1445,7 @@ class _ImportVideosDialogState extends State<_ImportVideosDialog> {
         return lastSegment;
       }
     } catch (_) {}
-    
-    // Generate filename
+
     final extension = _getFileExtensionFromUrl(url);
     return 'video_${DateTime.now().millisecondsSinceEpoch}.$extension';
   }
@@ -1666,8 +1475,12 @@ class _ImportVideosDialogState extends State<_ImportVideosDialog> {
           children: [
             if (!_isComplete)
               LinearProgressIndicator(
-                value: _statuses.isEmpty ? 0 : 
-                    _statuses.where((s) => s.state == ImportState.completed).length / _statuses.length,
+                value: _statuses.isEmpty
+                    ? 0
+                    : _statuses
+                            .where((s) => s.state == ImportState.completed)
+                            .length /
+                        _statuses.length,
               ),
             const SizedBox(height: 16),
             Flexible(
@@ -1687,12 +1500,15 @@ class _ImportVideosDialogState extends State<_ImportVideosDialog> {
                       status.message,
                       style: TextStyle(
                         fontSize: 12,
-                        color: status.state == ImportState.error ? Colors.red : 
-                               status.state == ImportState.completed ? Colors.green : 
-                               Colors.grey,
+                        color: status.state == ImportState.error
+                            ? Colors.red
+                            : status.state == ImportState.completed
+                                ? Colors.green
+                                : Colors.grey,
                       ),
                     ),
-                    subtitle: status.state == ImportState.downloading && status.progress > 0
+                    subtitle: status.state == ImportState.downloading &&
+                            status.progress > 0
                         ? LinearProgressIndicator(
                             value: status.progress / 100,
                             minHeight: 4,
@@ -1745,15 +1561,25 @@ class _UploadDialog extends StatefulWidget {
   final String fileName;
   final VoidCallback onUploadComplete;
 
+  /// How to reach the internal server once the file is stored locally.
+  /// `chunked` — chunk-upload + finish-upload only.
+  /// `forward` — chunk-upload, then call /forward_to_internal and
+  ///             show the JobProgressPanel while it processes.
+  /// `direct`  — POST everything to /upload in one shot (unused).
+  final UploadMode mode;
+
   const _UploadDialog({
     required this.bytes,
     required this.fileName,
     required this.onUploadComplete,
+    this.mode = UploadMode.chunked,
   });
 
   @override
   State<_UploadDialog> createState() => _UploadDialogState();
 }
+
+enum UploadMode { chunked, forward, direct }
 
 class _UploadDialogState extends State<_UploadDialog> {
   double _progress = 0.0;
@@ -1761,16 +1587,26 @@ class _UploadDialogState extends State<_UploadDialog> {
   String _statusText = 'Ready';
   bool _autoSegmentation = true;
 
+  /// Set once the server tells us the session exists.
+  String? _sessionId;
+
+  /// Set once the background processing finished on the server.
+  bool _sessionComplete = false;
+
+  /// Populated by `/finish-upload`; needed to call `/forward_to_internal`.
+  String? _videoKey;
+
   @override
   void initState() {
     super.initState();
     _startUpload();
   }
 
+  // ─── 1. Upload the file to OUR server ──────────────────────────
   Future<void> _startUpload() async {
     setState(() {
       _isUploading = true;
-      _statusText = 'Uploading...';
+      _statusText = 'Uploading…';
     });
 
     const chunkSize = 5 * 1024 * 1024;
@@ -1780,7 +1616,9 @@ class _UploadDialogState extends State<_UploadDialog> {
     try {
       for (int i = 0; i < totalChunks; i++) {
         final start = i * chunkSize;
-        final end = (i + 1) * chunkSize > totalBytes ? totalBytes : (i + 1) * chunkSize;
+        final end = (i + 1) * chunkSize > totalBytes
+            ? totalBytes
+            : (i + 1) * chunkSize;
         final chunk = widget.bytes.sublist(start, end);
 
         final request = http.MultipartRequest(
@@ -1804,13 +1642,14 @@ class _UploadDialogState extends State<_UploadDialog> {
           throw Exception('Chunk upload failed: ${response.statusCode}');
         }
 
+        if (!mounted) return;
         setState(() {
           _progress = ((i + 1) / totalChunks) * 100;
           _statusText = 'Uploading ${_progress.toStringAsFixed(0)}%';
         });
       }
 
-      // Finish upload
+      // ─── Finish the local file ──────────────────────────────────
       final finishResponse = await http.post(
         Uri.parse('$authBaseUrl/finish-upload'),
         headers: {'Content-Type': 'application/json'},
@@ -1823,19 +1662,33 @@ class _UploadDialogState extends State<_UploadDialog> {
         throw Exception('Finish upload failed');
       }
 
+      final finishData =
+          jsonDecode(finishResponse.body) as Map<String, dynamic>;
+      _videoKey = (finishData['project'] as Map?)?['key'] as String?;
+
+      if (!mounted) return;
       setState(() {
-        _statusText = 'Upload complete!';
+        _statusText = 'Upload complete';
         _isUploading = false;
       });
 
       widget.onUploadComplete();
 
-      Future.delayed(const Duration(seconds: 1), () {
-        if (mounted) {
-          Navigator.pop(context, true);
-        }
-      });
+      // ─── Depending on mode, forward to the internal server ────
+      switch (widget.mode) {
+        case UploadMode.chunked:
+          _closeSoon();
+          break;
+        case UploadMode.forward:
+          await _forwardToInternal();
+          break;
+        case UploadMode.direct:
+          // Not implemented in this dialog.
+          _closeSoon();
+          break;
+      }
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _statusText = 'Error: $e';
         _isUploading = false;
@@ -1843,8 +1696,75 @@ class _UploadDialogState extends State<_UploadDialog> {
     }
   }
 
+  // ─── 2. Ask the server to forward to the internal one ──────────
+  Future<void> _forwardToInternal() async {
+    if (_videoKey == null) {
+      _closeSoon();
+      return;
+    }
+
+    setState(() {
+      _statusText = 'Submitting to the server…';
+      _isUploading = true;
+      _progress = 0;
+    });
+
+    try {
+      final token = await InternalAuthService.getToken();
+      final resp = await http.post(
+        Uri.parse('$flaskServerUrl/forward_to_internal/$_videoKey'),
+        headers: {
+          'Content-Type': 'application/json',
+          if (token != null) 'Authorization': 'Bearer $token',
+        },
+        body: jsonEncode({
+          'token': token,
+          'name': widget.fileName.replaceAll('.mp4', ''),
+        }),
+      );
+
+      if (resp.statusCode != 200) {
+        throw Exception('Forward failed: ${resp.statusCode}');
+      }
+
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      final sessionId = data['session_id'] as String?;
+
+      if (sessionId == null) {
+        throw Exception('Server did not return a session id');
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _sessionId = sessionId;
+        _isUploading = false;
+        _statusText = 'Processing on the server…';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _statusText = 'Forward error: $e';
+        _isUploading = false;
+      });
+    }
+  }
+
+  void _closeSoon() {
+    Future.delayed(const Duration(seconds: 1), () {
+      if (mounted) Navigator.pop(context, true);
+    });
+  }
+
+  // ─── Build ─────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
+    if (_sessionId != null) {
+      return _buildProcessingDialog(_sessionId!);
+    }
+    return _buildUploadDialog();
+  }
+
+  Widget _buildUploadDialog() {
     return AlertDialog(
       title: const Text('Uploading Video'),
       content: Column(
@@ -1859,7 +1779,8 @@ class _UploadDialogState extends State<_UploadDialog> {
               children: [
                 Checkbox(
                   value: _autoSegmentation,
-                  onChanged: (v) => setState(() => _autoSegmentation = v!),
+                  onChanged: (v) =>
+                      setState(() => _autoSegmentation = v ?? false),
                 ),
                 const Text('Auto Segmentation'),
               ],
@@ -1874,5 +1795,426 @@ class _UploadDialogState extends State<_UploadDialog> {
           ),
       ],
     );
+  }
+
+  Widget _buildProcessingDialog(String sessionId) {
+    return AlertDialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 40, vertical: 24),
+      title: Row(
+        children: [
+          Icon(
+            _sessionComplete ? Icons.check_circle : Icons.hourglass_top,
+            color: _sessionComplete ? Colors.green : Colors.blue,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              _sessionComplete
+                  ? 'Processing complete'
+                  : 'Processing on the server',
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+      content: SizedBox(
+        width: 600,
+        child: SingleChildScrollView(
+          child: JobProgressPanel(
+            sessionId: sessionId,
+            onComplete: () {
+              if (!mounted) return;
+              setState(() => _sessionComplete = true);
+              widget.onUploadComplete();
+            },
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: Text(_sessionComplete ? 'Done' : 'Close'),
+        ),
+      ],
+    );
+  }
+}
+
+// ─── YouTube Download Dialog ────────────────────────────────────
+
+class _YouTubeDownloadDialog extends StatefulWidget {
+  final String youtubeUrl;
+  final VoidCallback onComplete;
+  final ValueChanged<String> onError;
+
+  const _YouTubeDownloadDialog({
+    required this.youtubeUrl,
+    required this.onComplete,
+    required this.onError,
+  });
+
+  @override
+  State<_YouTubeDownloadDialog> createState() =>
+      _YouTubeDownloadDialogState();
+}
+
+class _YouTubeDownloadDialogState extends State<_YouTubeDownloadDialog> {
+  late final String _downloadId;
+  Timer? _pollTimer;
+  final ScrollController _scrollController = ScrollController();
+
+  List<Map<String, dynamic>> _events = const [];
+  Map<String, dynamic> _details = const {};
+
+  String _stage = 'starting';
+  double _progressValue = 0.0;
+  String _message = 'Starting…';
+
+  bool _finished = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _downloadId = DateTime.now().microsecondsSinceEpoch.toString();
+    _startDownload();
+    _pollTimer = Timer.periodic(
+      const Duration(milliseconds: 700),
+      (_) => _poll(),
+    );
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _startDownload() async {
+    try {
+      final response = await http.post(
+        Uri.parse('$flaskServerUrl/api/youtube-download-and-upload'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'url': widget.youtubeUrl,
+          'auto_segmentation': true,
+          'download_id': _downloadId,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data['success'] == true) {
+          setState(() {
+            _finished = true;
+            _progressValue = 1.0;
+            _stage = 'done';
+          });
+          widget.onComplete();
+        } else {
+          final msg = data['error']?.toString() ?? 'Unknown error';
+          setState(() {
+            _finished = true;
+            _error = msg;
+          });
+          widget.onError(msg);
+        }
+      } else {
+        final msg = 'Server error: ${response.statusCode}';
+        setState(() {
+          _finished = true;
+          _error = msg;
+        });
+        widget.onError(msg);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _finished = true;
+        _error = 'Network error: $e';
+      });
+      widget.onError('Network error: $e');
+    }
+  }
+
+  Future<void> _poll() async {
+    if (!mounted) return;
+    try {
+      final resp = await http.get(
+        Uri.parse('$flaskServerUrl/api/download-progress/$_downloadId'),
+      );
+      if (resp.statusCode != 200 || !mounted) return;
+
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      final newEvents =
+          (data['events'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+
+      setState(() {
+        _events = newEvents;
+        _details = (data['details'] as Map?)?.cast<String, dynamic>() ?? {};
+        _stage = data['stage']?.toString() ?? _stage;
+        _progressValue =
+            (data['progress'] as num?)?.toDouble() ?? _progressValue;
+        _message = data['message']?.toString() ?? _message;
+      });
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollController.hasClients) {
+          _scrollController
+              .jumpTo(_scrollController.position.maxScrollExtent);
+        }
+      });
+    } catch (_) {
+      // ignore transient polling errors
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dialogWidth = MediaQuery.of(context).size.width * 0.8;
+
+    return AlertDialog(
+      title: Row(
+        children: [
+          Icon(
+            _error != null
+                ? Icons.error_outline
+                : _finished
+                    ? Icons.check_circle
+                    : Icons.downloading,
+            color: _error != null
+                ? Colors.red
+                : _finished
+                    ? Colors.green
+                    : Colors.blue,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              _error != null
+                  ? 'Import Failed'
+                  : _finished
+                      ? 'Import Complete'
+                      : 'Downloading YouTube Video',
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+      content: SizedBox(
+        width: dialogWidth.clamp(400, 700),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              widget.youtubeUrl,
+              style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: 12),
+            LinearProgressIndicator(
+              value: _progressValue.clamp(0.0, 1.0),
+              minHeight: 6,
+            ),
+            const SizedBox(height: 6),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  _stage.toUpperCase(),
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+                Text(
+                  '${(_progressValue * 100).toStringAsFixed(0)}%',
+                  style: const TextStyle(fontSize: 11),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            if (_details.isNotEmpty) _buildInfoCard(),
+            const SizedBox(height: 12),
+            const Text(
+              'Log',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+            ),
+            const SizedBox(height: 4),
+            Container(
+              height: 220,
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E1E1E),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: Colors.grey.shade700),
+              ),
+              padding: const EdgeInsets.all(8),
+              child: _events.isEmpty
+                  ? const Center(
+                      child: Text(
+                        'Waiting for server…',
+                        style: TextStyle(color: Colors.grey, fontSize: 12),
+                      ),
+                    )
+                  : ListView.builder(
+                      controller: _scrollController,
+                      itemCount: _events.length,
+                      itemBuilder: (ctx, i) {
+                        final ev = _events[i];
+                        final level = ev['level']?.toString() ?? 'info';
+                        final time = ev['time']?.toString() ?? '';
+                        final msg = ev['message']?.toString() ?? '';
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 1),
+                          child: Text.rich(
+                            TextSpan(
+                              style: const TextStyle(
+                                fontFamily: 'monospace',
+                                fontSize: 11.5,
+                                color: Colors.white,
+                                height: 1.35,
+                              ),
+                              children: [
+                                TextSpan(
+                                  text: '$time  ',
+                                  style: const TextStyle(color: Colors.grey),
+                                ),
+                                TextSpan(
+                                  text: _icon(level),
+                                  style: TextStyle(color: _colorFor(level)),
+                                ),
+                                const TextSpan(text: ' '),
+                                TextSpan(
+                                  text: msg,
+                                  style: TextStyle(color: _colorFor(level)),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        if (_finished || _error != null)
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildInfoCard() {
+    final rows = <Widget>[];
+
+    void addRow(String label, String? value, {Color? color}) {
+      if (value == null || value.isEmpty) return;
+      rows.add(Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 90,
+              child: Text(
+                label,
+                style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+              ),
+            ),
+            Expanded(
+              child: Text(
+                value,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                  color: color,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ));
+    }
+
+    addRow('Title', _details['title']?.toString());
+    addRow('Filename', _details['filename']?.toString());
+    addRow('Duration',
+        _details['duration'] != null ? '${_details['duration']} s' : null);
+    addRow(
+      'File size',
+      _details['filesize'] != null
+          ? _formatBytes((_details['filesize'] as num).toInt())
+          : null,
+    );
+    addRow(
+      'Audio',
+      _details['has_audio'] == null
+          ? null
+          : (_details['has_audio'] == true ? '✅ present' : '❌ missing'),
+      color: _details['has_audio'] == true ? Colors.green : Colors.red,
+    );
+    addRow('Codec', _details['codec']?.toString());
+    if (_details['converted'] == true) {
+      addRow('Converted', 'H.264 (browser compatible)',
+          color: Colors.green);
+    } else if (_details['converted'] == false) {
+      addRow('Converted', 'Not needed', color: Colors.grey);
+    }
+
+    if (rows.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.blue.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.blue.withValues(alpha: 0.2)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: rows,
+      ),
+    );
+  }
+
+  String _icon(String level) {
+    switch (level) {
+      case 'error':
+        return '✗';
+      case 'warning':
+        return '⚠';
+      default:
+        return '›';
+    }
+  }
+
+  Color _colorFor(String level) {
+    switch (level) {
+      case 'error':
+        return const Color(0xFFFF6B6B);
+      case 'warning':
+        return const Color(0xFFFFC107);
+      default:
+        return const Color(0xFFB0BEC5);
+    }
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes >= 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+    } else if (bytes >= 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    } else if (bytes >= 1024) {
+      return '${(bytes / 1024).toStringAsFixed(0)} KB';
+    }
+    return '$bytes B';
   }
 }

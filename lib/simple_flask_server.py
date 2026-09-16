@@ -51,7 +51,16 @@ CORS(
     ],
     supports_credentials=True,
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Forwarded-User", "Accept"],
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "X-Forwarded-User",
+        "Accept",
+        "Cache-Control",     
+        "Pragma",            
+        "Expires",           
+        "Range",             
+    ],
     expose_headers=["Location", "Content-Disposition"],
 )
 
@@ -387,6 +396,236 @@ def generate_mock_segments():
         },
     ]
 
+import threading
+
+# ─── DOWNLOAD PROGRESS TRACKING ────────────────────────────────────────
+download_progress: dict = {}
+download_progress_lock = threading.Lock()
+_PROGRESS_TTL = 3600  # keep finished entries for 1 hour
+
+
+def _progress_init(download_id: str, url: str):
+    """Create a new progress entry."""
+    with download_progress_lock:
+        download_progress[download_id] = {
+            "download_id": download_id,
+            "url": url,
+            "stage": "starting",
+            "progress": 0.0,
+            "message": "Starting…",
+            "details": {
+                "title": None,
+                "duration": None,
+                "filename": None,
+                "filesize": None,
+                "has_audio": None,
+                "codec": None,
+                "converted": None,
+            },
+            "events": [],
+            "done": False,
+            "error": None,
+            "started_at": time.time(),
+        }
+
+
+def _progress_event(download_id: str, message: str, *,
+                    level: str = "info",
+                    stage: str | None = None,
+                    progress: float | None = None,
+                    details: dict | None = None):
+    """Append a log line / update the state for a download."""
+    if not download_id:
+        return
+    with download_progress_lock:
+        entry = download_progress.get(download_id)
+        if entry is None:
+            return
+        entry["events"].append({
+            "time": datetime.datetime.now().strftime("%H:%M:%S"),
+            "level": level,
+            "message": message,
+        })
+        if stage is not None:
+            entry["stage"] = stage
+        if progress is not None:
+            entry["progress"] = float(progress)
+        if details:
+            entry["details"].update(details)
+        entry["message"] = message
+
+
+def _progress_finish(download_id: str, *,
+                     error: str | None = None,
+                     details: dict | None = None):
+    if not download_id:
+        return
+    with download_progress_lock:
+        entry = download_progress.get(download_id)
+        if entry is None:
+            return
+        if details:
+            entry["details"].update(details)
+        entry["done"] = True
+        entry["error"] = error
+        entry["stage"] = "error" if error else "done"
+        if error:
+            entry["events"].append({
+                "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                "level": "error",
+                "message": error,
+            })
+
+
+def _progress_cleanup_old():
+    """Drop entries older than _PROGRESS_TTL."""
+    cutoff = time.time() - _PROGRESS_TTL
+    with download_progress_lock:
+        stale = [k for k, v in download_progress.items()
+                 if v.get("done") and v.get("started_at", 0) < cutoff]
+        for k in stale:
+            download_progress.pop(k, None)
+
+@app.route("/api/download-progress/<download_id>", methods=["GET", "OPTIONS"])
+def download_progress_status(download_id):
+    """Return the current state of an in-flight YouTube download."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    _progress_cleanup_old()
+
+    with download_progress_lock:
+        entry = download_progress.get(download_id)
+
+    if entry is None:
+        return jsonify({"error": "not_found", "download_id": download_id}), 404
+
+    return jsonify(entry), 200
+
+# ─── JOB PROGRESS TRACKING (per session) ───────────────────────────────
+job_progress: dict = {}
+job_progress_lock = threading.Lock()
+_JOB_TTL = 7200  # keep finished entries for 2 hours
+
+
+def _job_start(session_id: str, video_key: str | None, session_name: str | None):
+    """Create a fresh job-progress entry for a session."""
+    with job_progress_lock:
+        job_progress[session_id] = {
+            "session_id": session_id,
+            "video_key": video_key,
+            "session_name": session_name or session_id,
+            "stage": "starting",
+            "progress": 0.0,
+            "message": "Starting…",
+            "events": [],
+            "files": [],
+            "total_files": 0,
+            "done": False,
+            "error": None,
+            "started_at": time.time(),
+            "updated_at": time.time(),
+        }
+
+
+def _job_log(session_id: str, message: str, *,
+             level: str = "info",
+             stage: str | None = None,
+             progress: float | None = None):
+    """Append a log line / update the state for a session's job."""
+    if not session_id:
+        return
+    with job_progress_lock:
+        entry = job_progress.get(session_id)
+        if entry is None:
+            return
+        entry["events"].append({
+            "time": datetime.datetime.now().strftime("%H:%M:%S"),
+            "level": level,
+            "message": message,
+        })
+        if stage is not None:
+            entry["stage"] = stage
+        if progress is not None:
+            entry["progress"] = float(progress)
+        entry["message"] = message
+        entry["updated_at"] = time.time()
+        # Bound memory: keep the last 500 events per session
+        if len(entry["events"]) > 500:
+            entry["events"] = entry["events"][-500:]
+
+
+def _job_add_file(session_id: str, name: str, size: int):
+    if not session_id:
+        return
+    with job_progress_lock:
+        entry = job_progress.get(session_id)
+        if entry is None:
+            return
+        entry["files"].append({"name": name, "size": size})
+        entry["total_files"] = len(entry["files"])
+        entry["updated_at"] = time.time()
+
+
+def _job_finish(session_id: str, *, error: str | None = None):
+    if not session_id:
+        return
+    with job_progress_lock:
+        entry = job_progress.get(session_id)
+        if entry is None:
+            return
+        entry["done"] = True
+        entry["error"] = error
+        entry["stage"] = "error" if error else "complete"
+        if error is None:
+            entry["progress"] = 1.0
+        entry["updated_at"] = time.time()
+        entry["events"].append({
+            "time": datetime.datetime.now().strftime("%H:%M:%S"),
+            "level": "error" if error else "info",
+            "message": error if error else "✅ Processing complete",
+        })
+
+
+def _job_cleanup():
+    cutoff = time.time() - _JOB_TTL
+    with job_progress_lock:
+        stale = [
+            k for k, v in job_progress.items()
+            if v.get("done") and v.get("updated_at", 0) < cutoff
+        ]
+        for k in stale:
+            job_progress.pop(k, None)
+
+
+@app.route("/job_progress/<path:session_id>", methods=["GET", "OPTIONS"])
+def job_progress_status(session_id):
+    """Return the live processing state of a session's background job."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    _job_cleanup()
+
+    with job_progress_lock:
+        entry = job_progress.get(session_id)
+
+    if entry is None:
+        # Fall back: the session may exist but predate this feature.
+        # Return a minimal "unknown" state so the client can keep polling.
+        return jsonify({
+            "session_id": session_id,
+            "stage": "unknown",
+            "progress": 0.0,
+            "message": "Waiting for server…",
+            "events": [],
+            "files": [],
+            "total_files": 0,
+            "done": False,
+            "error": None,
+        }), 200
+
+    return jsonify(entry), 200
+
 
 def process_job(job_id):
     """Simulate background job processing with progress updates."""
@@ -714,22 +953,24 @@ def get_actual_file_url(session_id, filename, html_content=None):
 
 
 def download_session_files(session_id, token):
-    """
-    Download all files from a session using curl with correct URLs.
-    """
     session_dir = os.path.join(SESSION_FOLDER, session_id)
     os.makedirs(session_dir, exist_ok=True)
 
     logging.info("=" * 60)
     logging.info("Downloading session %s", session_id)
+    _job_log(session_id, "Downloading session files…",
+             stage="downloading", progress=0.35)
 
     html_path = os.path.join(session_dir, "index.html")
     html_url = f"{INTERNAL_SERVER_URL}/archivesession/{session_id}"
 
     if curl_download(html_url, html_path, token):
         logging.info("Downloaded index.html")
+        _job_log(session_id, "Downloaded index.html")
+        _job_add_file(session_id, "index.html", os.path.getsize(html_path))
     else:
         logging.warning("Failed to download index.html")
+        _job_log(session_id, "Failed to download index.html", level="warning")
         return False
 
     html_content = ""
@@ -739,16 +980,25 @@ def download_session_files(session_id, token):
     except (OSError, UnicodeDecodeError):
         pass
 
+    # Video
     video_url = get_actual_file_url(session_id, "video.mp4", html_content)
     video_path = os.path.join(session_dir, "video.mp4")
     if curl_download(video_url, video_path, token):
         logging.info("Downloaded video.mp4")
+        _job_log(session_id,
+                 f"Downloaded video.mp4 "
+                 f"({os.path.getsize(video_path)} bytes)",
+                 progress=0.5)
+        _job_add_file(session_id, "video.mp4", os.path.getsize(video_path))
     else:
         logging.warning("Failed to download video.mp4")
+        _job_log(session_id, "Failed to download video.mp4", level="warning")
 
+    # Subtitles
     try:
         track_matches = re.findall(
-            r'<track label="([^"]+)" kind="subtitles" src="([^"]+)"', html_content
+            r'<track label="([^"]+)" kind="subtitles" src="([^"]+)"',
+            html_content,
         )
         for label, src in track_matches:
             if src.startswith("/"):
@@ -757,11 +1007,18 @@ def download_session_files(session_id, token):
             file_path = os.path.join(session_dir, file_name)
             if curl_download(src, file_path, token):
                 logging.info("Downloaded %s", file_name)
+                _job_log(session_id,
+                         f"Downloaded {file_name} "
+                         f"({os.path.getsize(file_path)} bytes)")
+                _job_add_file(session_id, file_name, os.path.getsize(file_path))
     except (OSError, re.error) as e:
         logging.warning("Could not download subtitles: %s", e)
 
+    # Audio (if present)
     try:
-        audio_match = re.search(r'<source src="([^"]+)"[^>]*type="audio/', html_content)
+        audio_match = re.search(
+            r'<source src="([^"]+)"[^>]*type="audio/', html_content
+        )
         if audio_match:
             audio_url = audio_match.group(1)
             if audio_url.startswith("/"):
@@ -769,28 +1026,51 @@ def download_session_files(session_id, token):
             audio_path = os.path.join(session_dir, "audio.wav")
             if curl_download(audio_url, audio_path, token):
                 logging.info("Downloaded audio.wav")
+                _job_log(session_id, "Downloaded audio.wav")
+                _job_add_file(session_id, "audio.wav",
+                              os.path.getsize(audio_path))
     except (OSError, re.error) as e:
         logging.warning("Could not download audio: %s", e)
 
+    # messages.json
     messages_url = f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/messages.json"
     messages_path = os.path.join(session_dir, "messages.json")
     if curl_download(messages_url, messages_path, token):
-        logging.info(
-            "Downloaded messages.json (%d bytes)", os.path.getsize(messages_path)
-        )
+        logging.info("Downloaded messages.json (%d bytes)",
+                     os.path.getsize(messages_path))
+        _job_log(session_id,
+                 f"Downloaded messages.json "
+                 f"({os.path.getsize(messages_path)} bytes)",
+                 progress=0.85)
+        _job_add_file(session_id, "messages.json",
+                      os.path.getsize(messages_path))
     else:
         logging.warning("Failed to download messages.json")
+        _job_log(session_id, "Failed to download messages.json",
+                 level="warning")
 
+    # Transcripts
+    _job_log(session_id, "Extracting transcripts…",
+             stage="extracting", progress=0.9)
     transcripts = extract_transcripts_from_messages(messages_path)
     if transcripts:
         save_transcripts_to_files(session_dir, transcripts)
-        logging.info("Extracted %d transcripts from messages.json", len(transcripts))
+        logging.info("Extracted %d transcripts from messages.json",
+                     len(transcripts))
+        _job_log(session_id, f"Extracted {len(transcripts)} transcripts")
+        _job_add_file(session_id, "transcripts.json",
+                      os.path.getsize(os.path.join(session_dir,
+                                                    "transcripts.json")))
+        _job_add_file(session_id, "transcript.txt",
+                      os.path.getsize(os.path.join(session_dir,
+                                                    "transcript.txt")))
     else:
         logging.warning("No transcripts extracted from messages.json")
+        _job_log(session_id, "No transcripts extracted",
+                 level="warning")
 
     files = [
-        f
-        for f in os.listdir(session_dir)
+        f for f in os.listdir(session_dir)
         if os.path.isfile(os.path.join(session_dir, f))
         and os.path.getsize(os.path.join(session_dir, f)) > 1000
     ]
@@ -802,6 +1082,8 @@ def download_session_files(session_id, token):
         logging.info("  - %s (%d bytes)", f, size)
     logging.info("=" * 60)
 
+    _job_log(session_id, f"Session ready: {len(files)} files downloaded",
+             stage="ready", progress=1.0)
     return len(files) > 0
 
 
@@ -1836,9 +2118,9 @@ def export_structured_docx(session_id, session_dir, language_filter=None):
 
             if not has_content:
                 p = doc.add_paragraph()
-                p.add_run("(No content yet)")
-                p.italic = True
-                p.font.size = Pt(10)
+                run = p.add_run("(No content yet)")
+                run.italic = True
+                run.font.size = Pt(10)
 
             doc.add_paragraph("")
     else:
@@ -2167,7 +2449,7 @@ def _resolve_export_language_name(session_dir, language):
     return first_lang if first_lang else "transcript"
 
 
-@app.route("/session_export_txt/<session_id>", methods=["GET"])
+@app.route("/session_export_txt/", methods=["GET"])
 def session_export_txt(session_id):
     """Export all session data as structured plain text matching the window view."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -2197,7 +2479,7 @@ def session_export_txt(session_id):
     )
 
 
-@app.route("/session_export_docx/<session_id>", methods=["GET"])
+@app.route("/session_export_docx/<path:session_id>", methods=["GET"])
 def session_export_docx(session_id):
     """Export session as a structured DOCX file matching the window view."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -2220,16 +2502,14 @@ def session_export_docx(session_id):
     try:
         doc_buffer = export_structured_docx(session_id, session_dir, language)
     except ImportError:
-        return (
-            jsonify(
-                {
-                    "error": "python-docx not installed. "
-                    "Please install: pip install python-docx"
-                }
-            ),
-            500,
-        )
-
+        return jsonify({
+            "error": "python-docx not installed",
+            "hint": "pip install python-docx",
+        }), 500
+    except Exception as e:                              # noqa: BLE001
+        logging.exception("DOCX export failed for %s: %s", session_id, e)
+        return jsonify({"error": f"Export failed: {type(e).__name__}: {e}"}), 500
+    
     return send_file(
         doc_buffer,
         mimetype="application/vnd.openxmlformats-officedocument"
@@ -2239,7 +2519,7 @@ def session_export_docx(session_id):
     )
 
 
-@app.route("/session_export_rtf/<session_id>", methods=["GET"])
+@app.route("/session_export_rtf/<path:session_id>", methods=["GET"])
 def session_export_rtf(session_id):
     """Export all session data as a structured RTF document."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -2286,7 +2566,7 @@ def get_available_languages(session_dir):
 # ─── EXPORT ROUTES ─────────────────────────────────────────────────────
 
 
-@app.route("/session_export/<session_id>", methods=["GET"])
+@app.route("/session_export/<path:session_id>", methods=["GET"])
 def session_export(session_id):
     """Export all session data as a formatted DOCX document."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -2322,7 +2602,7 @@ def session_export(session_id):
     )
 
 
-@app.route("/session_export_structured_json/<session_id>", methods=["GET"])
+@app.route("/session_export_structured_json/<path:session_id>", methods=["GET"])
 def session_export_structured_json(session_id):
     """Export session as structured JSON with all metadata."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -2376,7 +2656,7 @@ def session_export_structured_json(session_id):
     )
 
 
-@app.route("/session_export_all_languages/<session_id>", methods=["GET"])
+@app.route("/session_export_all_languages/<path:session_id>", methods=["GET"])
 def session_export_all_languages(session_id):
     """Export all languages as separate files in a ZIP archive."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -2442,7 +2722,7 @@ def session_export_all_languages(session_id):
     )
 
 
-@app.route("/session_languages/<session_id>", methods=["GET"])
+@app.route("/session_languages/<path:session_id>", methods=["GET"])
 def session_languages(session_id):
     """Get list of available languages for a session."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -2453,7 +2733,7 @@ def session_languages(session_id):
     return jsonify({"languages": languages}), 200
 
 
-@app.route("/session_transcript_json/<session_id>", methods=["GET"])
+@app.route("/session_transcript_json/<path:session_id>", methods=["GET"])
 def session_transcript_json(session_id):
     """Export session transcripts as JSON."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -2469,7 +2749,7 @@ def session_transcript_json(session_id):
     return jsonify({"error": "No transcript data found"}), 404
 
 
-@app.route("/session_messages_json/<session_id>", methods=["GET"])
+@app.route("/session_messages_json/<path:session_id>", methods=["GET"])
 def session_messages_json(session_id):
     """Download the raw messages.json file from the session."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -2551,7 +2831,7 @@ def download_session_zip(session_id):
 # In simple_flask_server.py - Update session_transcript_save_vtt
 
 
-@app.route("/session_transcript_save_vtt/<session_id>", methods=["POST"])
+@app.route("/session_transcript_save_vtt/<path:session_id>", methods=["POST"])
 def session_transcript_save_vtt(session_id):
     """
     Save transcript and update VTT file with proper naming.
@@ -2804,7 +3084,7 @@ def _extract_simple_language_name(language):
     return clean
 
 
-@app.route("/update_video_subtitles/<session_id>", methods=["POST"])
+@app.route("/update_video_subtitles/<path:session_id>", methods=["POST"])
 def update_video_subtitles(session_id):
     """
     Update the embedded subtitles in video.mp4 with the edited VTT files.
@@ -3220,22 +3500,41 @@ def _sync_vtt_files(session_dir):
 
         logging.info("Synced %s -> subtitles.vtt", english_vtt)
 
-def _remote_size(url, headers, cookies, timeout=20):
-    """Get the total size of a remote file via a 1-byte Range GET.
-    Falls back to reading Content-Length if the server ignores Range."""
-    range_headers = dict(headers)
-    range_headers["Range"] = "bytes=0-0"
+def _internal_headers(token: str) -> dict:
+    """Standard headers for requests to the internal server."""
+    return {
+        "X-Forward-Auth": token,
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "Mozilla/5.0 (compatible; LT-Uploader/1.0)",
+    }
+
+
+def _internal_cookies(token: str) -> dict:
+    return {"_forward_auth": token}
+
+
+def _remote_size(url: str, token: str, timeout: int = 20) -> int:
+    """Return the total size of a remote file via a 1-byte Range GET.
+
+    Falls back to Content-Length if the server ignores Range.
+    Takes a token string, not a prebuilt headers dict — this prevents
+    the caller from accidentally passing the wrong type (which used to
+    raise 'object is not iterable' inside dict(headers)).
+    """
+    headers = _internal_headers(token)
+    headers["Range"] = "bytes=0-0"
+
     try:
         with requests.get(
             url,
-            headers=range_headers,
-            cookies=cookies,
+            headers=headers,
+            cookies=_internal_cookies(token),
             verify=False,
             timeout=timeout,
             stream=True,
             allow_redirects=True,
         ) as r:
-            cr = r.headers.get("Content-Range", "")     # e.g. "bytes 0-0/152217"
+            cr = r.headers.get("Content-Range", "")  # "bytes 0-0/152217"
             if "/" in cr:
                 try:
                     return int(cr.rsplit("/", 1)[-1])
@@ -3245,8 +3544,6 @@ def _remote_size(url, headers, cookies, timeout=20):
             if cl:
                 try:
                     n = int(cl)
-                    # A range request may return Content-Length: 1, which is
-                    # not the real size — only trust it if it's large.
                     if n > 1:
                         return n
                 except ValueError:
@@ -3263,28 +3560,31 @@ def wait_for_session_ready(
     poll_interval=15,
     stable_needed=3,
 ):
-    """
-    Poll the internal server until messages.json stops growing.
-    Uses a Range GET because HEAD is unreliable on this server.
-    """
+    """Poll the internal server until messages.json stops growing."""
     url = f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/messages.json"
-    headers = {
-        "X-Forward-Auth": token,
-        "Authorization": f"Bearer {token}",
-        "User-Agent": "Mozilla/5.0 (compatible; LT-Uploader/1.0)",
-    }
-    cookies = {"_forward_auth": token}
 
     last_size = -1
     stable = 0
     start = time.time()
 
+    _job_log(
+        session_id,
+        "Waiting for the internal server to finish processing…",
+        stage="waiting",
+        progress=0.05,
+    )
+
     while time.time() - start < max_wait_seconds:
-        size = _remote_size(url, headers, cookies)
+        size = _remote_size(url, token)
 
         logging.info(
             "Session %s: messages.json size=%d (stable=%d/%d)",
             session_id, size, stable, stable_needed,
+        )
+        _job_log(
+            session_id,
+            f"messages.json: {size} bytes (stable {stable}/{stable_needed})",
+            stage="waiting",
         )
 
         if size > 0 and size == last_size:
@@ -3293,6 +3593,12 @@ def wait_for_session_ready(
                 logging.info(
                     "✅ Session %s appears complete (%d bytes)",
                     session_id, size,
+                )
+                _job_log(
+                    session_id,
+                    f"✅ Session complete ({size} bytes)",
+                    stage="downloading",
+                    progress=0.30,
                 )
                 return True
         else:
@@ -3305,13 +3611,25 @@ def wait_for_session_ready(
         "⚠️ Session %s did not stabilize within %ds; downloading anyway",
         session_id, max_wait_seconds,
     )
+    _job_log(
+        session_id,
+        f"⚠️ Session did not stabilize within {max_wait_seconds}s; "
+        "downloading anyway",
+        level="warning",
+        stage="downloading",
+        progress=0.30,
+    )
     return False
+
 
 def process_session_in_background(session_id, token, video_key):
     """
     Wait for the internal server to finish processing, then download.
     Runs in a daemon thread — started right after upload.
     """
+    session_name = sessions.get(session_id, {}).get("name", session_id)
+    _job_start(session_id, video_key, session_name)
+
     try:
         ready = wait_for_session_ready(session_id, token)
         if not ready:
@@ -3319,23 +3637,27 @@ def process_session_in_background(session_id, token, video_key):
                 "Session %s never stabilized; downloading what we have",
                 session_id,
             )
-        download_session_files(session_id, token)
+
+        ok = download_session_files(session_id, token)
 
         # Mark the job complete in our local state
         job = jobs.get(session_id)
         if job:
-            job["status"] = "completed"
+            job["status"] = "completed" if ok else "partial"
             job["progress"] = 1.0
         save_state()
+
+        _job_finish(session_id, error=None if ok else "Partial download")
         logging.info("✅ Background download finished for %s", session_id)
     except Exception as e:                                    # noqa: BLE001
         logging.error(
             "Background session processing failed for %s: %s",
             session_id, e, exc_info=True,
         )
+        _job_finish(session_id, error=f"{type(e).__name__}: {e}")
 
 
-@app.route("/extract_video_subtitles/<session_id>", methods=["GET"])
+@app.route("/extract_video_subtitles/<path:session_id>", methods=["GET"])
 def extract_video_subtitles(session_id):
     """Extract embedded subtitles from video.mp4 to VTT files."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -3699,6 +4021,106 @@ def finish_upload():
     save_state()
     return jsonify({"message": "Upload finished", "project": project}), 200
 
+# ─── PROJECT MANAGEMENT (no auth) ──────────────────────────────────────
+
+
+@app.route("/delete_video/<video_key>", methods=["POST", "DELETE", "OPTIONS"])
+def delete_video(video_key):
+    """Delete a single project: file, thumbnail, sessions and jobs."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    target = next((v for v in videos if v.get("key") == video_key), None)
+    if not target:
+        return jsonify({"error": "Video not found"}), 404
+
+    file_name = target.get("file_name")
+
+    # 1. Delete the video file from disk
+    if file_name:
+        file_path = os.path.join(UPLOAD_FOLDER, file_name)
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                logging.info("🗑️ Deleted video file: %s", file_path)
+            except OSError as e:
+                logging.warning("Could not delete %s: %s", file_path, e)
+
+        # 2. Delete the thumbnail
+        thumb_name = f"{os.path.splitext(file_name)[0]}_thumb.jpg"
+        thumb_path = os.path.join(UPLOAD_FOLDER, thumb_name)
+        if os.path.exists(thumb_path):
+            try:
+                os.remove(thumb_path)
+                logging.info("🗑️ Deleted thumbnail: %s", thumb_path)
+            except OSError as e:
+                logging.warning("Could not delete %s: %s", thumb_path, e)
+
+    # 3. Delete any sessions and jobs that belong to this video
+    session_ids_to_remove = [
+        sid for sid, s in sessions.items() if s.get("video_key") == video_key
+    ]
+    for sid in session_ids_to_remove:
+        session_dir = os.path.join(SESSION_FOLDER, sid)
+        if os.path.isdir(session_dir):
+            try:
+                shutil.rmtree(session_dir)
+                logging.info("🗑️ Deleted session dir: %s", session_dir)
+            except OSError as e:
+                logging.warning("Could not delete session dir %s: %s", session_dir, e)
+        sessions.pop(sid, None)
+
+    job_ids_to_remove = [
+        jid for jid, j in jobs.items() if j.get("video_key") == video_key
+    ]
+    for jid in job_ids_to_remove:
+        jobs.pop(jid, None)
+
+    # 4. Remove the video entry itself
+    videos.remove(target)
+    save_state()
+
+    logging.info("✅ Deleted project '%s' (key=%s)", target.get("name"), video_key)
+
+    return jsonify({"success": True, "deleted_key": video_key}), 200
+
+
+@app.route("/update_project_name/<video_key>", methods=["POST", "OPTIONS"])
+def update_project_name(video_key):
+    """Rename a project in place (no auth)."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    data = request.get_json(silent=True) or {}
+    new_name = (data.get("project_name") or "").strip()
+    if not new_name:
+        return jsonify({"error": "project_name is required"}), 400
+
+    target = next((v for v in videos if v.get("key") == video_key), None)
+    if not target:
+        return jsonify({"error": "Video not found"}), 404
+
+    target["name"] = new_name
+    save_state()
+    return jsonify({"success": True, "project": target}), 200
+
+
+@app.route("/stop_segmentation/<video_key>", methods=["POST", "OPTIONS"])
+def stop_segmentation(video_key):
+    """Mark any running segmentation jobs for this video as stopped."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    stopped = 0
+    for job in jobs.values():
+        if job.get("video_key") == video_key and job.get("status") == "processing":
+            job["status"] = "stopped"
+            stopped += 1
+
+    if stopped:
+        save_state()
+
+    return jsonify({"success": True, "stopped_jobs": stopped}), 200
 
 # ─── JOB ENDPOINTS ──────────────────────────────────────────────────────
 
@@ -3747,7 +4169,7 @@ def job_status(job_id):
 # In simple_flask_server.py - Update get_session_output
 
 
-@app.route("/session_output/<session_id>", methods=["GET"])
+@app.route("/session_output/<path:session_id>", methods=["GET"])
 def get_session_output(session_id):
     """Get the session output as a JSON response with file URLs."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -3787,22 +4209,21 @@ def get_session_output(session_id):
                     }
                 )
 
+    with job_progress_lock:
+        job_snapshot = job_progress.get(session_id)
+
     status = "ready" if files else "processing"
-    return (
-        jsonify(
-            {
-                "session_id": session_id,
-                "files": files,
-                "total_files": len(files),
-                "session_url": f"{INTERNAL_SERVER_URL}/archivesession/{session_id}",
-                "status": status,
-            }
-        ),
-        200,
-    )
+    return jsonify({
+        "session_id": session_id,
+        "files": files,
+        "total_files": len(files),
+        "session_url": f"{INTERNAL_SERVER_URL}/archivesession/{session_id}",
+        "status": status,
+        "job": job_snapshot,   # 👈 new
+    }), 200
 
 
-@app.route("/session_file/<session_id>/<filename>", methods=["GET"])
+@app.route("/session_file/<path:session_id>/<filename>", methods=["GET"])
 def get_session_file(session_id, filename):
     """Download a specific file from the session."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -4207,7 +4628,7 @@ def convert_video_to_browser_compatible(input_path, output_path):
         logging.error("❌ Video conversion error: %s", e)
         return False
 
-@app.route("/session_refresh/<session_id>", methods=["POST"])
+@app.route("/session_refresh/<path:session_id>", methods=["POST"])
 def session_refresh(session_id):
     """Force a re-download of a session from the internal server."""
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
@@ -4247,18 +4668,14 @@ def _session_files_look_incomplete(session_dir):
 
 @app.route("/api/youtube-download-and-upload", methods=["POST", "OPTIONS"])
 def youtube_download_and_upload():
-    """
-    Download a YouTube video and upload it to the internal server.
-    """
     if request.method == "OPTIONS":
         response = jsonify({"message": "OK"})
         response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add(
-            "Access-Control-Allow-Headers", "Content-Type,Authorization"
-        )
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
         response.headers.add("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
         return response, 200
 
+    download_id = None
     try:
         data = request.get_json()
         if not data or "url" not in data:
@@ -4266,19 +4683,31 @@ def youtube_download_and_upload():
 
         youtube_url = data["url"]
         auto_segmentation = data.get("auto_segmentation", True)
+        download_id = data.get("download_id")
 
+        if download_id:
+            _progress_init(download_id, youtube_url)
+
+        _progress_event(download_id,
+                        "Starting YouTube download",
+                        stage="info", progress=0.02)
         logging.info("=" * 60)
         logging.info("📥 Starting YouTube download: %s", youtube_url)
         logging.info("=" * 60)
 
-        # Get video info first
+        # ── 1. Get video info ────────────────────────────────────────
+        _progress_event(download_id,
+                        "Getting video info…",
+                        stage="info", progress=0.05)
         try:
             logging.info("📋 Getting video info...")
             ydl_opts = {
                 "quiet": True,
                 "no_warnings": True,
                 "http_headers": {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                  "Chrome/120.0.0.0 Safari/537.36",
                 },
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -4288,7 +4717,6 @@ def youtube_download_and_upload():
 
             clean_title = re.sub(r'[\\/*?:"<>|]', "_", title)
             filename = f"{clean_title}.mp4"
-
             if len(filename) > 200:
                 name, ext = os.path.splitext(filename)
                 filename = f"{name[:195]}{ext}"
@@ -4297,148 +4725,187 @@ def youtube_download_and_upload():
             logging.info("📹 Duration: %s seconds", duration)
             logging.info("📹 Filename: %s", filename)
 
-        except (
-            yt_dlp.utils.DownloadError,
-            OSError,
-            ValueError,
-            TypeError,
-            KeyError,
-        ) as e:
-            logging.error("❌ Error getting video info: %s", str(e), exc_info=True)
-            return jsonify({"success": False, "error": f"Info error: {e}"}), 400
+            _progress_event(
+                download_id,
+                f"Video: {title}",
+                stage="info", progress=0.08,
+                details={
+                    "title": title,
+                    "duration": duration,
+                    "filename": filename,
+                },
+            )
+            _progress_event(download_id,
+                            f"Duration: {duration} s",
+                            stage="info", progress=0.08)
+        except (yt_dlp.utils.DownloadError, OSError, ValueError,
+                TypeError, KeyError) as e:
+            msg = f"Info error: {e}"
+            logging.error("❌ %s", msg, exc_info=True)
+            _progress_finish(download_id, error=msg)
+            return jsonify({"success": False, "error": msg}), 400
 
-        # Download the video
+        # ── 2. Download ──────────────────────────────────────────────
+        _progress_event(download_id,
+                        "Downloading video + audio…",
+                        stage="downloading", progress=0.15)
         try:
-            logging.info("📥 Starting download...")
             download_result = download_youtube_video_adaptive(
                 youtube_url, UPLOAD_FOLDER, filename
             )
-
-            logging.info("📊 Download result: %s", download_result)
-
-        except (
-            yt_dlp.utils.DownloadError,
-            OSError,
-            ValueError,
-            TypeError,
-            KeyError,
-        ) as e:
-            logging.error("❌ Error downloading video: %s", str(e), exc_info=True)
-            return (
-                jsonify({"success": False, "error": f"Download error: {e}"}),
-                400,
-            )
+        except (yt_dlp.utils.DownloadError, OSError, ValueError,
+                TypeError, KeyError) as e:
+            msg = f"Download error: {e}"
+            logging.error("❌ %s", msg, exc_info=True)
+            _progress_finish(download_id, error=msg)
+            return jsonify({"success": False, "error": msg}), 400
 
         if not download_result.get("success"):
-            error_msg = download_result.get("error", "Download failed")
-            logging.error("❌ Download error: %s", error_msg)
-            return jsonify({"success": False, "error": error_msg}), 400
+            msg = download_result.get("error", "Download failed")
+            logging.error("❌ Download error: %s", msg)
+            _progress_finish(download_id, error=msg)
+            return jsonify({"success": False, "error": msg}), 400
 
         file_path = download_result.get("file_path")
         if not file_path or not os.path.exists(file_path):
-            logging.error("❌ File not found: %s", file_path)
-            return jsonify({"error": "Downloaded file not found"}), 500
+            msg = "Downloaded file not found"
+            _progress_finish(download_id, error=msg)
+            return jsonify({"error": msg}), 500
 
         file_size = download_result.get("filesize", 0)
-        duration = download_result.get("duration", 0)
+        duration = download_result.get("duration", duration)
         actual_filename = download_result.get("filename", filename)
         has_audio = download_result.get("has_audio", False)
 
         logging.info("✅ Video downloaded: %s (%s bytes)", file_path, file_size)
         logging.info("🎵 Has audio: %s", has_audio)
 
-        # Check if file is valid
+        _progress_event(
+            download_id,
+            f"Download complete: {actual_filename} ({file_size} bytes)",
+            stage="downloaded", progress=0.45,
+            details={
+                "filename": actual_filename,
+                "filesize": file_size,
+                "duration": duration,
+                "has_audio": has_audio,
+            },
+        )
+        _progress_event(download_id,
+                        f"Audio present: {has_audio}",
+                        stage="downloaded", progress=0.45)
+
         if file_size < 1000:
-            logging.error("❌ Downloaded file is too small (%s bytes)", file_size)
+            msg = "Downloaded file is too small (corrupted)"
+            logging.error("❌ %s", msg)
             if os.path.exists(file_path):
                 try:
                     os.remove(file_path)
-                except (OSError, PermissionError):
+                except OSError:
                     pass
-            return jsonify({"error": "Downloaded file is too small (corrupted)"}), 500
+            _progress_finish(download_id, error=msg)
+            return jsonify({"error": msg}), 500
 
-        # ----- NEW: Convert video to browser-compatible format -----
-        converted_path = None
+        # ── 3. Codec check + conversion ──────────────────────────────
+        codec = ""
         try:
-            # Check if the video is already in a compatible format
-            # Use ffprobe to check the codec
             probe_cmd = [
-                "ffprobe",
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=codec_name",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name",
+                "-of", "default=noprint_wrappers=1:nokey=1",
                 file_path,
             ]
-            result = subprocess.run(
-                probe_cmd, capture_output=True, text=True, timeout=10, check=False
-            )
-
+            result = subprocess.run(probe_cmd, capture_output=True,
+                                    text=True, timeout=10, check=False)
             codec = result.stdout.strip() if result.returncode == 0 else ""
             logging.info("📹 Video codec: %s", codec)
+            _progress_event(download_id,
+                            f"Video codec: {codec or 'unknown'}",
+                            stage="probing", progress=0.50,
+                            details={"codec": codec})
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError) as e:
+            logging.warning("⚠️ Could not probe codec: %s", e)
 
-            # If not H.264, convert
-            if codec != "h264":
-                logging.info("🔄 Converting video to browser-compatible format...")
+        if codec and codec != "h264":
+            _progress_event(download_id,
+                            "Converting video to browser-compatible format…",
+                            stage="converting", progress=0.55)
+            logging.info("🔄 Converting video to browser-compatible format...")
+            try:
                 base_name = os.path.splitext(actual_filename)[0]
                 converted_filename = f"{base_name}_converted.mp4"
                 converted_path = os.path.join(UPLOAD_FOLDER, converted_filename)
 
                 if convert_video_to_browser_compatible(file_path, converted_path):
-                    # Replace the original with the converted version
-                    # Keep the original as backup
                     backup_path = file_path + ".backup"
                     os.rename(file_path, backup_path)
                     os.rename(converted_path, file_path)
-
-                    # Update file info
                     file_size = os.path.getsize(file_path)
                     actual_filename = os.path.basename(file_path)
-                    logging.info("✅ Video converted successfully: %s", actual_filename)
 
-                    # Clean up backup after successful conversion
+                    _progress_event(
+                        download_id,
+                        f"Conversion complete: {actual_filename}",
+                        stage="converted", progress=0.70,
+                        details={
+                            "filename": actual_filename,
+                            "filesize": file_size,
+                            "converted": True,
+                        },
+                    )
+                    logging.info("✅ Video converted successfully: %s",
+                                 actual_filename)
+
                     if os.path.exists(backup_path):
                         try:
                             os.remove(backup_path)
-                        except (OSError, PermissionError):
+                        except OSError:
                             pass
                 else:
-                    logging.warning("⚠️ Video conversion failed, using original file")
+                    _progress_event(download_id,
+                                    "Conversion failed — using original file",
+                                    level="warning",
+                                    stage="converted", progress=0.70)
+                    logging.warning("⚠️ Video conversion failed, using original")
                     if os.path.exists(converted_path):
                         try:
                             os.remove(converted_path)
-                        except (OSError, PermissionError):
+                        except OSError:
                             pass
-            else:
-                logging.info("✅ Video already in compatible format (H.264)")
+            except (OSError, subprocess.SubprocessError,
+                    ValueError, TypeError) as e:
+                logging.warning("⚠️ Could not convert video: %s", e)
+                _progress_event(download_id,
+                                f"Conversion error: {e}",
+                                level="warning",
+                                stage="converted", progress=0.70)
+        else:
+            _progress_event(download_id,
+                            "Video already browser-compatible (H.264)",
+                            stage="converted", progress=0.70,
+                            details={"converted": False})
 
-        except (OSError, subprocess.SubprocessError, ValueError, TypeError) as e:
-            logging.warning("⚠️ Could not check/convert video: %s", str(e))
-
-        # Generate thumbnail
+        # ── 4. Thumbnail ─────────────────────────────────────────────
+        _progress_event(download_id,
+                        "Generating thumbnail…",
+                        stage="thumbnail", progress=0.78)
         try:
-            logging.info("🖼️ Generating thumbnail...")
             thumb_filename = f"{os.path.splitext(actual_filename)[0]}_thumb.jpg"
             thumb_path = os.path.join(UPLOAD_FOLDER, thumb_filename)
             thumbnail_url = None
-
-            # Try multiple thumbnail methods
             thumbnail_generated = False
 
-            # Method 1: Use ffmpeg
             try:
                 if generate_video_thumbnail_simple(file_path, thumb_path):
                     thumbnail_url = f"/thumbnails/{thumb_filename}"
                     thumbnail_generated = True
                     logging.info("✅ Thumbnail generated with ffmpeg")
+                    _progress_event(download_id, "Thumbnail generated",
+                                    stage="thumbnail", progress=0.82)
             except (OSError, RuntimeError, ValueError, TypeError) as e:
-                logging.warning("⚠️ FFmpeg thumbnail failed: %s", str(e))
+                logging.warning("⚠️ FFmpeg thumbnail failed: %s", e)
 
-            # Method 2: Use OpenCV
             if not thumbnail_generated:
                 try:
                     cv2 = importlib.import_module("cv2")
@@ -4448,120 +4915,108 @@ def youtube_download_and_upload():
                         cv2.imwrite(thumb_path, frame)
                         thumbnail_url = f"/thumbnails/{thumb_filename}"
                         thumbnail_generated = True
-                        logging.info("✅ Thumbnail generated with OpenCV")
+                        _progress_event(download_id,
+                                        "Thumbnail generated (OpenCV)",
+                                        stage="thumbnail", progress=0.82)
                     cap.release()
-                except (ImportError, OSError, RuntimeError, ValueError, TypeError) as e:
-                    logging.warning("⚠️ OpenCV thumbnail failed: %s", str(e))
+                except (ImportError, OSError, RuntimeError,
+                        ValueError, TypeError) as e:
+                    logging.warning("⚠️ OpenCV thumbnail failed: %s", e)
 
             if not thumbnail_generated:
-                logging.warning("⚠️ No thumbnail generated")
-
+                _progress_event(download_id,
+                                "No thumbnail generated",
+                                level="warning",
+                                stage="thumbnail", progress=0.82)
         except (OSError, RuntimeError, ValueError, TypeError) as e:
-            logging.warning("⚠️ Thumbnail generation error: %s", str(e))
+            logging.warning("⚠️ Thumbnail generation error: %s", e)
             thumbnail_url = None
 
-        # Get video metadata
+        # ── 5. Metadata ──────────────────────────────────────────────
         try:
-            logging.info("📊 Getting video metadata...")
             if duration == 0:
                 duration, fps = get_video_metadata(file_path)
             else:
                 fps = 30.0
-            logging.info("📊 Duration: %s, FPS: %s", duration, fps)
-        except (OSError, RuntimeError, ValueError, TypeError) as e:
-            logging.warning("⚠️ Metadata error: %s", str(e))
-            duration = 120.0
+        except (OSError, RuntimeError, ValueError, TypeError):
+            duration = duration or 120.0
             fps = 30.0
 
-        # Create project entry
-        try:
-            logging.info("💾 Creating project entry...")
-            video_key = str(uuid.uuid4())
-            project = {
-                "key": video_key,
-                "name": clean_title,
-                "file_name": actual_filename,
-                "uploaded": utc_now_iso(),
-                "last_opened": None,
-                "duration": duration,
-                "fps": fps,
-                "file_size": file_size,
-                "segment_count": 0,
-                "languages": ["en"],
-                "thumbnail_url": thumbnail_url,
-                "segmentation_done": auto_segmentation,
-                "segmentation_progress": 100 if auto_segmentation else 0,
-            }
+        # ── 6. Save project ──────────────────────────────────────────
+        _progress_event(download_id,
+                        "Saving project…",
+                        stage="saving", progress=0.90)
+        video_key = str(uuid.uuid4())
+        project = {
+            "key": video_key,
+            "name": clean_title,
+            "file_name": actual_filename,
+            "uploaded": utc_now_iso(),
+            "last_opened": None,
+            "duration": duration,
+            "fps": fps,
+            "file_size": file_size,
+            "segment_count": 0,
+            "languages": ["en"],
+            "thumbnail_url": thumbnail_url,
+            "segmentation_done": auto_segmentation,
+            "segmentation_progress": 100 if auto_segmentation else 0,
+        }
+        videos.append(project)
+        save_state()
 
-            # Add to videos list
-            videos.append(project)
-            save_state()
-            logging.info("✅ Project saved with key: %s", video_key)
-
-        except (OSError, RuntimeError, ValueError, TypeError) as e:
-            logging.error("❌ Error saving project: %s", str(e), exc_info=True)
-            return jsonify({"success": False, "error": f"Save error: {e}"}), 500
-
-        # Start segmentation job if enabled
+        # ── 7. Optional segmentation job ─────────────────────────────
         if auto_segmentation:
-            try:
-                logging.info("🔄 Starting segmentation job...")
-                job_id = str(uuid.uuid4())
-                job = {
-                    "id": job_id,
-                    "video_key": video_key,
-                    "status": "processing",
-                    "progress": 0.0,
-                    "transcript": None,
-                    "segments": None,
-                    "created_at": utc_now_iso(),
-                    "config": {"auto_segmentation": True},
-                }
-                jobs[job_id] = job
-                threading.Thread(
-                    target=process_job, args=(job_id,), daemon=True
-                ).start()
-                save_state()
-                logging.info("✅ Segmentation job started: %s", job_id)
-            except (OSError, RuntimeError, ValueError, TypeError) as e:
-                logging.warning("⚠️ Could not start segmentation job: %s", str(e))
+            job_id = str(uuid.uuid4())
+            job = {
+                "id": job_id,
+                "video_key": video_key,
+                "status": "processing",
+                "progress": 0.0,
+                "transcript": None,
+                "segments": None,
+                "created_at": utc_now_iso(),
+                "config": {"auto_segmentation": True},
+            }
+            jobs[job_id] = job
+            threading.Thread(target=process_job, args=(job_id,),
+                             daemon=True).start()
+            save_state()
+
+        _progress_event(download_id,
+                        f'Imported "{clean_title}"',
+                        stage="done", progress=1.0)
+        _progress_finish(download_id, details={
+            "title": clean_title,
+            "video_key": video_key,
+        })
 
         logging.info("=" * 60)
         logging.info("✅ YouTube video uploaded successfully: %s", clean_title)
         logging.info("=" * 60)
 
-        return (
-            jsonify(
-                {
-                    "success": True,
-                    "video_info": {
-                        "title": clean_title,
-                        "duration": duration,
-                        "file_size": file_size,
-                        "thumbnail": thumbnail_url,
-                        "has_audio": has_audio,
-                    },
-                    "project": project,
-                    "message": f'Video "{clean_title}" imported successfully',
-                    "filename": actual_filename,
-                    "video_key": video_key,
-                }
-            ),
-            200,
-        )
+        return jsonify({
+            "success": True,
+            "video_info": {
+                "title": clean_title,
+                "duration": duration,
+                "file_size": file_size,
+                "thumbnail": thumbnail_url,
+                "has_audio": has_audio,
+            },
+            "project": project,
+            "message": f'Video "{clean_title}" imported successfully',
+            "filename": actual_filename,
+            "video_key": video_key,
+        }), 200
 
-    except (
-        OSError,
-        RuntimeError,
-        ValueError,
-        TypeError,
-        KeyError,
-        yt_dlp.utils.DownloadError,
-    ) as e:
-        logging.error("❌ YouTube download error: %s", str(e), exc_info=True)
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError,
+            yt_dlp.utils.DownloadError) as e:
+        logging.error("❌ YouTube download error: %s", e, exc_info=True)
+        _progress_finish(download_id, error=f"Server error: {e}")
         return jsonify({"success": False, "error": f"Server error: {e}"}), 500
-        
 
+    
 def generate_video_thumbnail_simple(video_path, thumbnail_path):
     """
     Generate a thumbnail using ffmpeg with multiple attempts.
@@ -4679,6 +5134,7 @@ def upload_lecture():
         response.headers.add("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
         return response, 200
 
+    # ─── 1. Validate inputs ─────────────────────────────────────────
     token = request.form.get("token", "")
     if not token:
         return jsonify({"error": "Missing token"}), 400
@@ -4691,57 +5147,46 @@ def upload_lecture():
 
     session_name = request.form.get("name", file_storage.filename)
 
-    # ============ FIX: Use original filename with .mp4 extension ============
+    # ─── 2. Normalize filename (force .mp4) ────────────────────────
     original_filename = file_storage.filename
-
-    # If filename doesn't have .mp4 extension, add it
     if not original_filename.lower().endswith(".mp4"):
         name_without_ext = os.path.splitext(original_filename)[0]
         original_filename = f"{name_without_ext}.mp4"
         logging.info("📹 Added .mp4 extension: %s", original_filename)
-    # ====================================================
 
-    # Check if this video already exists
+    # ─── 3. Reuse existing project or create a new one ────────────
     existing_video = None
     for video in videos:
         if video.get("file_name") == original_filename:
             existing_video = video
             break
 
-    # ============ FIX: Initialize variables ============
     file_size = 0
     local_filename = original_filename
     local_path = os.path.join(UPLOAD_FOLDER, local_filename)
     project = None
     video_key = None
-    # ====================================================
 
     if existing_video:
-        # Use existing video
         video_key = existing_video["key"]
-        project = existing_video  # Use the existing project
+        project = existing_video
         logging.info(
             "📹 Using existing video: %s (key: %s)", original_filename, video_key
         )
 
-        # Check if file exists on disk
         if not os.path.exists(local_path):
-            # File was deleted, save it again
             file_storage.save(local_path)
             file_size = os.path.getsize(local_path)
             project["file_size"] = file_size
             logging.info("✅ Restored video file: %s", local_filename)
         else:
-            # File exists, get its size
             file_size = os.path.getsize(local_path)
             project["file_size"] = file_size
             logging.info(
                 "✅ Using existing file: %s (%d bytes)", local_filename, file_size
             )
     else:
-        # New video - use original filename without UUID
-        local_filename = original_filename
-        # Ensure we don't overwrite
+        # New video — pick a unique filename
         base_name, ext = os.path.splitext(original_filename)
         if not ext:
             ext = ".mp4"
@@ -4773,10 +5218,7 @@ def upload_lecture():
         }
         videos.append(project)
 
-    # ============ FIX: Use the existing code below but with project defined ============
-    # Now project is always defined, so the rest of the code works
-
-    # Build data for the internal server
+    # ─── 4. Build the data dict for the internal server ────────────
     data = {}
     for key in request.form.keys():
         if key == "token":
@@ -4793,30 +5235,30 @@ def upload_lecture():
     }
     cookies = {"_forward_auth": token}
 
+    # ─── 5. Build the multipart body into a temp file ──────────────
+    #     We build it explicitly so we can send an explicit Content-Length.
+    #     Many proxies and the internal server reject chunked uploads.
+    #
+    #     IMPORTANT (Windows): NamedTemporaryFile holds an exclusive lock
+    #     on the file until its handle is closed. If we try to reopen the
+    #     file for reading while the write handle is still open, Windows
+    #     raises PermissionError → Flask returns 500. Using `with` here
+    #     guarantees the handle is released before we re-open for reading.
     temp_multipart_path = None
     try:
         logging.info("Uploading to internal server: %s", TARGET_URL)
         logging.info("Data keys: %s", list(data.keys()))
         logging.info("File size: %d bytes", file_size)
 
-                                         
         boundary = f"----WebKitFormBoundary{uuid.uuid4().hex[:16]}"
         content_type = f"multipart/form-data; boundary={boundary}"
 
-        # ---------- Build the multipart body into a temp file ----------
-        # This lets us set an explicit Content-Length so that
-        # proxies and the internal server do not reset large uploads.
-        temp_multipart = tempfile.NamedTemporaryFile(delete=False)
-        temp_multipart_path = temp_multipart.name
         total_size = 0
-                                            
-                         
-                                                 
-                                                                                     
-                                            
 
-        try:
-            # Write form fields
+        with tempfile.NamedTemporaryFile(delete=False) as temp_multipart:
+            temp_multipart_path = temp_multipart.name
+
+            # Form fields
             for key, value in data.items():
                 if isinstance(value, list):
                     for v in value:
@@ -4836,7 +5278,7 @@ def upload_lecture():
                     temp_multipart.write(part)
                     total_size += len(part)
 
-            # Write file header
+            # File header
             upload_filename = file_storage.filename
             mimetype = mimetypes.guess_type(upload_filename)[0] or "video/mp4"
             file_header = (
@@ -4848,7 +5290,7 @@ def upload_lecture():
             temp_multipart.write(file_header)
             total_size += len(file_header)
 
-            # Write file content (streaming in 1 MB chunks)
+            # File content, streamed in 1 MB chunks
             with open(local_path, "rb") as f:
                 while True:
                     chunk = f.read(1024 * 1024)
@@ -4857,16 +5299,15 @@ def upload_lecture():
                     temp_multipart.write(chunk)
                     total_size += len(chunk)
 
-            # Write trailer
+            # Trailer
             trailer = f"\r\n--{boundary}--\r\n".encode("utf-8")
             temp_multipart.write(trailer)
             total_size += len(trailer)
-        finally:
-            temp_multipart.close()
 
+        # `with` closed the handle here — safe to reopen on Windows now.
         logging.info("Multipart body prepared: %d bytes total", total_size)
 
-        # ---------- Send with explicit Content-Length ----------
+        # ─── 6. POST to the internal server ────────────────────────
         headers_with_length = {
             **headers,
             "Content-Type": content_type,
@@ -4877,7 +5318,8 @@ def upload_lecture():
             resp = requests.post(
                 TARGET_URL,
                 data=body_file,
-                headers=headers_with_length,                cookies=cookies,
+                headers=headers_with_length,
+                cookies=cookies,
                 timeout=(60, 3600),
                 verify=False,
                 allow_redirects=True,
@@ -4886,6 +5328,14 @@ def upload_lecture():
         logging.info("Response status: %s", resp.status_code)
         logging.info("Response URL: %s", resp.url)
 
+        if resp.status_code >= 400:
+            logging.error(
+                "Internal server rejected upload: %s\nBody: %s",
+                resp.status_code,
+                resp.text[:2000],
+            )
+
+        # ─── 7. Extract session id ─────────────────────────────────
         final_url = resp.url
         session_id = None
 
@@ -4905,6 +5355,7 @@ def upload_lecture():
 
         content = resp.text
 
+        # ─── 8. Register session + start background download ──────
         if session_id:
             project["session_id"] = session_id
             project["session_url"] = f"{BASE_URL}/archivesession/{session_id}"
@@ -4935,6 +5386,7 @@ def upload_lecture():
             ).start()
             save_state()
 
+        # ─── 9. Respond to the client ─────────────────────────────
         try:
             response_data = json.loads(content)
             if session_id:
@@ -4979,16 +5431,24 @@ def upload_lecture():
             )
 
     except requests.exceptions.Timeout:
-        logging.error("Request timeout")
+        logging.error("Request to internal server timed out", exc_info=True)
         return jsonify({"error": "Request timeout - file may be too large"}), 504
     except requests.exceptions.RequestException as e:
-        logging.error("Request error: %s", str(e))
-        return jsonify({"error": f"Request failed: {str(e)}"}), 500
+        logging.error(
+            "Request error (%s): %s", type(e).__name__, e, exc_info=True
+        )
+        return jsonify({
+            "error": f"Request failed: {type(e).__name__}: {e}",
+        }), 500
     except OSError as e:
-        logging.error("Upload error: %s", str(e), exc_info=True)
-        return jsonify({"error": f"Upload failed: {str(e)}"}), 500
+        logging.error(
+            "Upload error (%s): %s", type(e).__name__, e, exc_info=True
+        )
+        return jsonify({
+            "error": f"Upload failed: {type(e).__name__}: {e}",
+        }), 500
     finally:
-        # Always clean up the temp multipart file
+        # Always clean up the temp multipart body, even on success.
         if temp_multipart_path and os.path.exists(temp_multipart_path):
             try:
                 os.unlink(temp_multipart_path)

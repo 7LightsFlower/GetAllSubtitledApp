@@ -6,7 +6,7 @@ const String appTitle = 'Subtitles in many languages';
 // ─── Environment mode ─────────────────────────────────────────
 // true  → local `flutter run -d chrome`
 // false → production (Docker / Nginx)
-const bool isDevelopment = false;
+const bool isDevelopment = true;
 
 // ─── Server addresses ─────────────────────────────────────────
 /// Public URL where the web app is hosted (frontend, i.e. the browser origin).
@@ -48,7 +48,7 @@ const String dummyPassword = 'YourSecurePassword123';
 
 // ─── Dex OAuth 2.0 Configuration ──────────────────────────────
 const String dexClientId = 'traefik-forward-auth';
-const String dexClientSecret = 'YourSecretKeyHere'; // Must match the Dex client secret in the Dex config.
+const String dexClientSecret = 'YourSecretKeyHere'; // Must match the Dex client secret in the Dex config. //'bar' for lt2srv-scherrer.isl.iar.kit.edu
 const List<String> dexScopes = ['openid', 'profile', 'email'];
 
 /// Dex is mounted on the internal server host.

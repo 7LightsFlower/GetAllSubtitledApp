@@ -280,7 +280,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
             Uri.parse(url),
             headers: {
               'Authorization': 'Bearer ${token ?? ''}',
-              'Cache-Control': 'no-cache',
             },
           );
           
@@ -1510,81 +1509,99 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           color: Colors.grey.shade100,
           child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Text(
-                'Editing: ${transcript.language}',
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                  color: Colors.orange,
+              // Language label — shrinks first
+              Expanded(
+                child: Text(
+                  'Editing: ${transcript.language}',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: Colors.orange,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
-              Row(
-                children: [
-                  TextButton(
-                    onPressed: _isSaving ? null : () {
-                      for (final controller in textControllers) {
-                        controller.dispose();
-                      }
-                      for (final focusNode in focusNodes) {
-                        focusNode.dispose();
-                      }
-                      setState(() {
-                        _isEditingMode = false;
-                      });
-                    },
-                    child: const Text('Cancel'),
+              const SizedBox(width: 8),
+              // Buttons — scroll horizontally if they still don't fit
+              Flexible(
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  reverse: true,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextButton(
+                        onPressed: _isSaving
+                            ? null
+                            : () {
+                                for (final c in textControllers) {
+                                  c.dispose();
+                                }
+                                for (final f in focusNodes) {
+                                  f.dispose();
+                                }
+                                setState(() => _isEditingMode = false);
+                              },
+                        child: const Text('Cancel'),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton.icon(
+                        onPressed: _isSaving
+                            ? null
+                            : () async {
+                                final updatedTranscript = TranscriptData(
+                                  language: transcript.language,
+                                  text: transcript.text,
+                                  segments: editableSegments,
+                                  sender: transcript.sender,
+                                );
+                                await _saveEditedTranscript(updatedTranscript);
+                              },
+                        icon: _isSaving
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Icon(Icons.cloud_upload),
+                        label: Text(_isSaving ? 'Saving…' : 'Save to Server'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green,
+                          foregroundColor: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        onPressed: _isSaving
+                            ? null
+                            : () async {
+                                final updatedTranscript = TranscriptData(
+                                  language: transcript.language,
+                                  text: transcript.text,
+                                  segments: editableSegments,
+                                  sender: transcript.sender,
+                                );
+                                await _saveAndDownloadVTT(updatedTranscript);
+                              },
+                        icon: const Icon(Icons.download),
+                        label: const Text('Download VTT'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.blue,
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 8),
-                  ElevatedButton.icon(
-                    onPressed: _isSaving ? null : () async {
-                      final updatedTranscript = TranscriptData(
-                        language: transcript.language,
-                        text: transcript.text,
-                        segments: editableSegments,
-                        sender: transcript.sender,
-                      );
-                      await _saveEditedTranscript(updatedTranscript);
-                    },
-                    icon: _isSaving 
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
-                            ),
-                          )
-                        : const Icon(Icons.cloud_upload),
-                    label: Text(_isSaving ? 'Saving...' : 'Save to Server'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green,
-                      foregroundColor: Colors.white,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  OutlinedButton.icon(
-                    onPressed: _isSaving ? null : () async {
-                      final updatedTranscript = TranscriptData(
-                        language: transcript.language,
-                        text: transcript.text,
-                        segments: editableSegments,
-                        sender: transcript.sender,
-                      );
-                      await _saveAndDownloadVTT(updatedTranscript);
-                    },
-                    icon: const Icon(Icons.download),
-                    label: const Text('Download VTT Only'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.blue,
-                    ),
-                  ),
-                ],
+                ),
               ),
             ],
           ),
         ),
-        Expanded(
+                Expanded(
           child: ListView.builder(
             controller: _scrollController,
             padding: const EdgeInsets.all(16),
