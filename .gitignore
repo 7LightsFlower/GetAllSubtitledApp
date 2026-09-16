@@ -43,3 +43,16 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+# Local uploads / session data — never commit
+lib/uploads/
+lib/sessions/
+lib/session/
+lib/server_state.pkl
+uploads/
+sessions/
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.wav
+*.m4a

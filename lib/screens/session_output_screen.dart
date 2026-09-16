@@ -798,6 +798,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         content: Text('Preparing download... This may take a moment.'),
         duration: Duration(seconds: 2),
       ),
+      
     );
 
     try {

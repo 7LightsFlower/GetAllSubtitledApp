@@ -1,5 +1,5 @@
 name: asr_live_translator
-description: Live ASR transcripts with TTS, latest output only.
+description: Get all automatically translated and subtitled in 25 languages, editing and downloading the video with subtitles.
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -44,6 +44,7 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.0
+  flutter_launcher_icons: ^0.14.3
 
 flutter:
   uses-material-design: true
@@ -54,3 +55,22 @@ flutter:
     - assets/fonts/NotoSansJP-Regular.ttf      # Japanese
     - assets/fonts/NotoSansKR-Regular.ttf      # Korean
     - assets/fonts/NotoSansArabic-Regular.ttf  # Arabic / Persian
+    
+# --- launcher icon generation ---
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "assets/icon/app_icon.png"
+  remove_alpha_ios: true
+  web:
+    generate: true
+    image_path: "assets/icon/app_icon.png"
+    background_color: "#4F46E5"
+    theme_color: "#4F46E5"
+  windows:
+    generate: true
+    image_path: "assets/icon/app_icon.png"
+    icon_size: 256
+  macos:
+    generate: true
+    image_path: "assets/icon/app_icon.png"
