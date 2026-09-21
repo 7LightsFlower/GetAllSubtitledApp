@@ -1,5 +1,6 @@
 // session_output_screen.dart - Fixed without ignoring warnings
 
+import 'package:asr_live_translator/theme/responsive.dart';
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 import 'package:http/http.dart' as http;
@@ -12,9 +13,9 @@ import 'package:asr_live_translator/models/session_data.dart';
 import 'package:asr_live_translator/models/subtitle_track.dart'; 
 import 'package:asr_live_translator/widgets/video_player_widget.dart';
 import 'package:asr_live_translator/widgets/transcript_view.dart';
-import 'package:asr_live_translator/widgets/language_tabs.dart';
 import 'package:asr_live_translator/widgets/chapter_seekbar.dart';
 import 'package:asr_live_translator/widgets/export_dialog.dart';
+import 'package:asr_live_translator/widgets/language_selector.dart';
 
 class SessionOutputScreen extends StatefulWidget {
   final String sessionId;
@@ -63,11 +64,13 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   bool _isEditingMode = false;
   bool _isSaving = false;
   String _selectedLanguage = '';
+  String _secondaryLanguage = '';
   String _errorMessage = '';
   String _videoUrl = '';
   
   int _currentSegmentIndex = -1;
   final ScrollController _scrollController = ScrollController();
+  final ScrollController _secondaryScrollController = ScrollController();
   bool _isVideoReady = false;
 
   // Subtitle related variables - properly initialized
@@ -75,8 +78,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   String? _selectedSubtitle;
   Map<String, List<VTTCue>> _parsedSubtitles = const {};
 
-  static const double _maxVideoHeight = 200;
-  static const double _minVideoHeight = 150;
 
   @override
   void initState() {
@@ -89,6 +90,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     _videoController?.removeListener(_onVideoProgress);
     _videoController?.dispose();
     _scrollController.dispose();
+    _secondaryScrollController.dispose();
     super.dispose();
   }
 
@@ -315,107 +317,25 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     });
   }
 
-  /// Extract language name from filename
+  /// Extract language name from filename.
   String _extractLanguageFromFilename(String filename) {
-    // Remove 'subtitles_' prefix and '.vtt' suffix
     String name = filename
         .replaceFirst('subtitles_', '')
         .replaceFirst('.vtt', '');
-    
-    // Handle URL encoding
     name = Uri.decodeComponent(name);
-    
-    // If the name is a simple language code, map it to full name
-    const langMap = {
-      'English': 'English',
-      'German': 'German',
-      'Japanese': 'Japanese',
-      'Persian': 'Persian',
-      'Russian': 'Russian',
-      'French': 'French',
-      'Spanish': 'Spanish',
-      'Italian': 'Italian',
-      'Portuguese': 'Portuguese',
-      'Dutch': 'Dutch',
-      'Chinese': 'Chinese',
-      'Arabic': 'Arabic',
-      'Hindi': 'Hindi',
-      'Korean': 'Korean',
-      'Turkish': 'Turkish',
-      'Vietnamese': 'Vietnamese',
-      'Thai': 'Thai',
-      'Indonesian': 'Indonesian',
-      'Polish': 'Polish',
-      'Ukrainian': 'Ukrainian',
-    };
-    
-    // Check if it's a simple language code
-    if (langMap.containsKey(name)) {
-      return name;
-    }
-    
-    // If it contains parentheses, it's already a full name
-    if (name.contains('(')) {
-      return name;
-    }
-    
-    // Try to find a language code in the name
-    for (final code in langMap.keys) {
-      if (name.contains(code) || name.toLowerCase().contains(code.toLowerCase())) {
-        return code;
-      }
-    }
-    
-    // Return as-is
-    return name;
+    if (name == 'Transcript') return 'Transcript';
+    return resolveLanguageName(name);
   }
 
-  /// Get language label for display
+  /// Get language label for display.
   String _getLanguageLabel(String language) {
-    // If the language contains parentheses, it's already a full name
-    if (language.contains('(')) {
-      return language;
-    }
-    
-    // Map language codes to full names
-    const langMap = {
-      'English': 'English',
-      'German': 'German',
-      'Japanese': 'Japanese',
-      'Persian': 'Persian',
-      'Russian': 'Russian',
-      'French': 'French',
-      'Spanish': 'Spanish',
-      'Italian': 'Italian',
-      'Portuguese': 'Portuguese',
-      'Dutch': 'Dutch',
-      'Chinese': 'Chinese',
-      'Arabic': 'Arabic',
-      'Hindi': 'Hindi',
-      'Korean': 'Korean',
-      'Turkish': 'Turkish',
-      'Vietnamese': 'Vietnamese',
-      'Thai': 'Thai',
-      'Indonesian': 'Indonesian',
-      'Polish': 'Polish',
-      'Ukrainian': 'Ukrainian',
-    };
-    
-    // Handle special cases
-    if (language.contains('Original ASR')) {
-      return 'Original ASR';
-    }
-    if (language.contains('Translation')) {
-      return language;
-    }
-    if (language.contains('Structured')) {
-      return language;
-    }
-    
-    return langMap[language] ?? language;
+    if (language.contains('Original ASR')) return 'Transcript';
+    if (language.contains('Translation')) return language;
+    if (language.contains('Structured')) return language;
+    return resolveLanguageName(language);
   }
 
-  /// When subtitle is changed
+  /// Called by VideoPlayerWidget when the user picks a different subtitle track.
   void _onSubtitleChanged(String? language) {
     setState(() {
       _selectedSubtitle = language;
@@ -579,6 +499,9 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           
           if (_transcripts.isNotEmpty) {
             _selectedLanguage = _transcripts.first.language;
+            _secondaryLanguage = _transcripts.length > 1
+                ? _transcripts[1].language
+                : _transcripts.first.language;
             _extractChapters();
           }
         }
@@ -653,21 +576,42 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   }
 
   void _initializeVideoPlayer() {
+    // Tear down any previous controller so a reload never leaves a stale
+    // video playing in the background.
+    final old = _videoController;
+    if (old != null) {
+      old.removeListener(_onVideoProgress);
+      old.dispose();
+      _videoController = null;
+    }
+
+    // Default state on load / reload: stopped.
+    // We initialize the controller (so the first frame and duration are
+    // available) but do NOT call play(). The user starts playback with
+    // the play button.
     _videoController = VideoPlayerController.networkUrl(
       Uri.parse(_videoUrl),
     )..initialize().then((_) {
+        if (!mounted) {
+          // Widget was disposed while we were initializing.
+          _videoController?.dispose();
+          _videoController = null;
+          return;
+        }
         setState(() {
           _isVideoReady = true;
         });
         _videoController!.addListener(_onVideoProgress);
-        _videoController!.play();
+        // NOTE: no play() here — the video stays paused until the user
+        // presses the play button.
       }).catchError((error) {
+        if (!mounted) return;
         setState(() {
           _errorMessage = 'Failed to load video: $error';
         });
       });
   }
-
+  
   void _onVideoProgress() {
     if (_videoController == null || !_videoController!.value.isInitialized) return;
     
@@ -719,6 +663,12 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       _selectedLanguage = language;
     });
     _extractChapters();
+  }
+
+  void _selectSecondaryLanguage(String language) {
+    setState(() {
+      _secondaryLanguage = language;
+    });
   }
 
   void _togglePlayPause() {
@@ -879,11 +829,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     );
   }
 
-  double _getVideoHeight() {
-    final screenHeight = MediaQuery.of(context).size.height;
-    return (screenHeight * 0.25).clamp(_minVideoHeight, _maxVideoHeight);
-  }
-
   // Helper method to convert SegmentData to JSON
   Map<String, dynamic> _segmentToJson(SegmentData segment) {
     return {
@@ -1040,46 +985,8 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
   /// Extract simple language name (without parentheses or special characters)
   String _extractSimpleLanguage(String language) {
-    // If it contains parentheses, extract the code
-    final match = RegExp(r'\(([^)]+)\)').firstMatch(language);
-    if (match != null) {
-      final code = match.group(1)!;
-      // Map language codes to simple names
-      const codeMap = {
-        'en': 'English',
-        'de': 'German',
-        'ja': 'Japanese',
-        'fa': 'Persian',
-        'ru': 'Russian',
-        'fr': 'French',
-        'es': 'Spanish',
-        'it': 'Italian',
-        'pt': 'Portuguese',
-        'nl': 'Dutch',
-        'zh': 'Chinese',
-        'ar': 'Arabic',
-        'hi': 'Hindi',
-        'ko': 'Korean',
-        'tr': 'Turkish',
-        'vi': 'Vietnamese',
-        'th': 'Thai',
-        'id': 'Indonesian',
-        'pl': 'Polish',
-        'uk': 'Ukrainian',
-      };
-      return codeMap[code] ?? code;
-    }
-    
-    // Clean up the language name
-    String clean = language
-        .replaceAll('Translation (Language ', '')
-        .replaceAll('Transcript (', '')
-        .replaceAll(')', '')
-        .replaceAll('Original ASR - ', '')
-        .replaceAll('Structured - ', '')
-        .replaceAll(' ', '_');
-    
-    return clean;
+    final name = resolveLanguageName(language);
+    return name.replaceAll(' ', '_');
   }
 
   // Download VTT directly - simplified version without unused variable
@@ -1318,12 +1225,13 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       );
     }
 
-    final videoHeight = _getVideoHeight();
-    final screenWidth = MediaQuery.of(context).size.width;
+    final r = Responsive.of(context);
+    final videoHeight = r.videoHeight;
+    final screenWidth = r.width;
 
     return Column(
       children: [
-        // Video Player with fixed height - centered
+                // ─── Video player ────────────────────────────────────────────
         Container(
           height: videoHeight,
           color: Colors.black,
@@ -1342,61 +1250,68 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                     onPlayPause: _togglePlayPause,
                     onSeek: _seekTo,
                     height: videoHeight,
-                    subtitleTracks: _subtitleTracks.isNotEmpty ? _subtitleTracks : null,
+                    subtitleTracks: _subtitleTracks.isNotEmpty
+                        ? _subtitleTracks
+                        : null,
                     selectedSubtitle: _selectedSubtitle,
                     onSubtitleChanged: _onSubtitleChanged,
                   ),
                 ),
               ),
-              
+
               // Subtitle overlay
               if (_selectedSubtitle != null && _parsedSubtitles.isNotEmpty)
                 Positioned(
-                  bottom: 50,
-                  left: 20,
-                  right: 20,
+                  bottom: r.subtitleOverlayBottom,
+                  left: r.spaceL,
+                  right: r.spaceL,
                   child: AnimatedOpacity(
                     opacity: 1.0,
                     duration: const Duration(milliseconds: 300),
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 6),
                       decoration: BoxDecoration(
                         color: Colors.black.withValues(alpha: 0.7),
-                        borderRadius: BorderRadius.circular(8),
+                        borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text(
                         _getSubtitleAtTime(
-                          _videoController?.value.position.inSeconds.toDouble() ?? 0
-                        ) ?? '',
+                              _videoController
+                                      ?.value.position.inSeconds
+                                      .toDouble() ??
+                                  0,
+                            ) ??
+                            '',
                         textAlign: TextAlign.center,
-                        style: const TextStyle(
+                        style: TextStyle(
                           color: Colors.white,
-                          fontSize: 18,
+                          fontSize: r.subtitleOverlayFont,
                           fontWeight: FontWeight.w500,
-                          shadows: [
-                            Shadow(
-                              blurRadius: 4,
-                              color: Colors.black,
-                            ),
+                          shadows: const [
+                            Shadow(blurRadius: 4, color: Colors.black),
                           ],
                         ),
                       ),
                     ),
                   ),
                 ),
-              
-              // Chapter seekbar
+
+              // ─── Chapter strip — pinned to the bottom of the black
+              //     video pane, same 90 %-width as the video itself. ──
               if (_chapters.isNotEmpty && _isVideoReady)
                 Positioned(
                   bottom: 0,
-                  left: 0,
-                  right: 0,
-                  child: Container(
-                    height: 6,
-                    color: Colors.transparent,
+                  left: screenWidth * 0.05,
+                  right: screenWidth * 0.05,
+                  child: SizedBox(
+                    height: r.chapterBarHeight,
                     child: ChapterSeekbar(
                       chapters: _chapters,
-                      currentTime: _videoController?.value.position.inSeconds.toDouble() ?? 0,
+                      currentTime: _videoController
+                              ?.value.position.inSeconds
+                              .toDouble() ??
+                          0,
                       onTap: _jumpToChapter,
                     ),
                   ),
@@ -1404,58 +1319,96 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
             ],
           ),
         ),
-        
-        // Show either File List or Transcript
+
+
+        // ─── File list OR transcript panel ───────────────────────────
         Expanded(
           child: _showFileList
               ? _buildFileList()
               : Column(
                   children: [
-                    // Language tabs with edit indicator
+                    // Language selector bar
                     Container(
-                      constraints: BoxConstraints(
-                        maxWidth: screenWidth * 0.9,
-                      ),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: LanguageTabs(
-                              transcripts: _transcripts,
-                              selectedLanguage: _selectedLanguage,
-                              onLanguageSelected: _selectLanguage,
-                            ),
-                          ),
-                          if (_isEditingMode)
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                              margin: const EdgeInsets.only(right: 8),
-                              decoration: BoxDecoration(
-                                color: Colors.orange,
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                              child: const Text(
-                                'EDITING',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.bold,
+                      constraints:
+                          BoxConstraints(maxWidth: screenWidth * 0.9),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 4, vertical: 4),
+                      child: _isSplitView
+                          // ── Split view: one selector pinned to each side
+                          ? Row(
+                              children: [
+                                Expanded(
+                                  child: Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: LanguageSelector(
+                                      transcripts: _transcripts,
+                                      selectedLanguage: _selectedLanguage,
+                                      onLanguageSelected: _selectLanguage,
+                                      enabled:
+                                          !_isEditingMode && !_isSaving,
+                                    ),
+                                  ),
                                 ),
-                              ),
-                            ),
-                          if (_isSaving)
-                            const Padding(
-                              padding: EdgeInsets.only(right: 8),
-                              child: SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
+                                Expanded(
+                                  child: Align(
+                                    alignment: Alignment.centerRight,
+                                    child: LanguageSelector(
+                                      transcripts: _transcripts,
+                                      selectedLanguage:
+                                          _secondaryLanguage,
+                                      onLanguageSelected:
+                                          _selectSecondaryLanguage,
+                                      enabled:
+                                          !_isEditingMode && !_isSaving,
+                                    ),
+                                  ),
                                 ),
-                              ),
+                              ],
+                            )
+                          // ── Single view: one selector on the left,
+                          //    EDITING badge / spinner on the right
+                          : Row(
+                              children: [
+                                LanguageSelector(
+                                  transcripts: _transcripts,
+                                  selectedLanguage: _selectedLanguage,
+                                  onLanguageSelected: _selectLanguage,
+                                  enabled: !_isEditingMode && !_isSaving,
+                                ),
+                                const Spacer(),
+                                if (_isEditingMode)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 4),
+                                    margin:
+                                        const EdgeInsets.only(right: 8),
+                                    decoration: BoxDecoration(
+                                      color: Colors.orange,
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: const Text(
+                                      'EDITING',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
+                                if (_isSaving)
+                                  const Padding(
+                                    padding: EdgeInsets.only(right: 8),
+                                    child: SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2),
+                                    ),
+                                  ),
+                              ],
                             ),
-                        ],
-                      ),
                     ),
+
                     // Transcript view
                     Expanded(
                       child: _isSplitView
@@ -1711,48 +1664,84 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     }
   }
 
+  Widget _getFileIcon(String filename) {
+    final r = Responsive.of(context);
+    final size = r.iconLarge;
+    if (filename.endsWith('.mp4') || filename.endsWith('.webm')) {
+      return Icon(Icons.video_file, color: Colors.blue, size: size);
+    } else if (filename.endsWith('.wav') || filename.endsWith('.mp3')) {
+      return Icon(Icons.audio_file, color: Colors.green, size: size);
+    } else if (filename.endsWith('.vtt') || filename.endsWith('.srt')) {
+      return Icon(Icons.subtitles, color: Colors.orange, size: size);
+    } else if (filename.endsWith('.html') || filename.endsWith('.htm')) {
+      return Icon(Icons.html, color: Colors.purple, size: size);
+    } else if (filename.endsWith('.zip')) {
+      return Icon(Icons.folder_zip, color: Colors.brown, size: size);
+    } else if (filename.endsWith('.json')) {
+      return Icon(Icons.code, color: Colors.teal, size: size);
+    } else if (filename.endsWith('.rtf')) {
+      return Icon(Icons.description, color: Colors.orange, size: size);
+    } else if (filename.endsWith('.docx') || filename.endsWith('.doc')) {
+      return Icon(Icons.file_present, color: Colors.blue, size: size);
+    } else if (filename.endsWith('.txt')) {
+      return Icon(Icons.text_snippet, color: Colors.grey, size: size);
+    } else if (filename == 'transcripts.json') {
+      return Icon(Icons.data_array, color: Colors.deepPurple, size: size);
+    } else if (filename == 'messages.json') {
+      return Icon(Icons.message, color: Colors.indigo, size: size);
+    } else if (filename == 'index.html') {
+      return Icon(Icons.web, color: Colors.orange, size: size);
+    } else {
+      return Icon(Icons.insert_drive_file, color: Colors.grey, size: size);
+    }
+  }
+
   Widget _buildFileList() {
     if (_files.isEmpty) {
-      return const Center(
-        child: Text('No files available'),
-      );
+      return const Center(child: Text('No files available'));
     }
 
+    final r = Responsive.of(context);
+
     return ListView.builder(
-      padding: const EdgeInsets.all(16),
+      padding: EdgeInsets.all(r.spaceL),
       itemCount: _files.length,
       itemBuilder: (context, index) {
         final file = _files[index];
         return Card(
-          margin: const EdgeInsets.only(bottom: 8),
+          margin: EdgeInsets.only(bottom: r.spaceS),
           child: ListTile(
             leading: _getFileIcon(file.name),
             title: Text(
               file.name,
-              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+              style: TextStyle(
+                fontSize: r.fileListTitleFont,
+                fontWeight: FontWeight.w500,
+              ),
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
             ),
             subtitle: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const SizedBox(height: 4),
+                SizedBox(height: r.spaceXS),
                 Text(
                   _formatFileSize(file.size),
-                  style: const TextStyle(fontSize: 12),
+                  style: TextStyle(fontSize: r.fileListMetaFont + 1),
                 ),
                 if (file.modified != null)
                   Text(
                     'Modified: ${_formatDate(file.modified!)}',
-                    style: const TextStyle(
-                      fontSize: 11,
+                    style: TextStyle(
+                      fontSize: r.fileListMetaFont,
                       color: Colors.grey,
                     ),
                   ),
               ],
             ),
             trailing: IconButton(
-              icon: const Icon(Icons.download, color: Colors.blue),
+              icon: Icon(Icons.download,
+                  color: Colors.blue, size: r.iconMedium - 2),
               onPressed: () => _downloadFile(file),
               tooltip: 'Download',
             ),
@@ -1786,70 +1775,49 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   }
 
   Widget _buildSplitTranscriptView() {
-    final languages = _transcripts.take(2).toList();
-    if (languages.length < 2) {
+    if (_transcripts.length < 2) {
       return TranscriptView(
-        transcript: languages.isNotEmpty ? languages.first : TranscriptData.empty(),
+        transcript: _transcripts.isNotEmpty
+            ? _transcripts.first
+            : TranscriptData.empty(),
         highlightedIndex: _currentSegmentIndex,
         scrollController: _scrollController,
       );
     }
 
+    // Honour the *chosen* languages instead of always taking the first two.
+    final left = _transcripts.firstWhere(
+      (t) => t.language == _selectedLanguage,
+      orElse: () => _transcripts.first,
+    );
+    final right = _transcripts.firstWhere(
+      (t) => t.language == _secondaryLanguage,
+      orElse: () => _transcripts.length > 1 ? _transcripts[1] : _transcripts.first,
+    );
+
     return Row(
       children: [
         Expanded(
           child: _isEditingMode
-              ? _buildEditableTranscript(languages[0])
+              ? _buildEditableTranscript(left)
               : TranscriptView(
-                  transcript: languages[0],
+                  transcript: left,
                   highlightedIndex: _currentSegmentIndex,
-                  scrollController: ScrollController(),
-                  title: languages[0].language,
+                  scrollController: _scrollController,
                 ),
         ),
         const VerticalDivider(width: 1),
         Expanded(
           child: _isEditingMode
-              ? _buildEditableTranscript(languages[1])
+              ? _buildEditableTranscript(right)
               : TranscriptView(
-                  transcript: languages[1],
+                  transcript: right,
                   highlightedIndex: _currentSegmentIndex,
-                  scrollController: ScrollController(),
-                  title: languages[1].language,
+                  scrollController: _secondaryScrollController,
                 ),
         ),
       ],
     );
-  }
-
-  Widget _getFileIcon(String filename) {
-    if (filename.endsWith('.mp4') || filename.endsWith('.webm')) {
-      return const Icon(Icons.video_file, color: Colors.blue);
-    } else if (filename.endsWith('.wav') || filename.endsWith('.mp3')) {
-      return const Icon(Icons.audio_file, color: Colors.green);
-    } else if (filename.endsWith('.vtt') || filename.endsWith('.srt')) {
-      return const Icon(Icons.subtitles, color: Colors.orange);
-    } else if (filename.endsWith('.html') || filename.endsWith('.htm')) {
-      return const Icon(Icons.html, color: Colors.purple);
-    } else if (filename.endsWith('.zip')) {
-      return const Icon(Icons.folder_zip, color: Colors.brown);
-    } else if (filename.endsWith('.json')) {
-      return const Icon(Icons.code, color: Colors.teal);
-    } else if (filename.endsWith('.rtf')) {
-      return const Icon(Icons.description, color: Colors.orange);
-    } else if (filename.endsWith('.docx') || filename.endsWith('.doc')) {
-      return const Icon(Icons.file_present, color: Colors.blue);
-    } else if (filename.endsWith('.txt')) {
-      return const Icon(Icons.text_snippet, color: Colors.grey);
-    } else if (filename == 'transcripts.json') {
-      return const Icon(Icons.data_array, color: Colors.deepPurple);
-    } else if (filename == 'messages.json') {
-      return const Icon(Icons.message, color: Colors.indigo);
-    } else if (filename == 'index.html') {
-      return const Icon(Icons.web, color: Colors.orange);
-    } else {
-      return const Icon(Icons.insert_drive_file, color: Colors.grey);
-    }
   }
 
   String _formatFileSize(int bytes) {

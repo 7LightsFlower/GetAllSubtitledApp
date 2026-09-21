@@ -46,8 +46,21 @@ class _JobProgressPanelState extends State<JobProgressPanel> {
     super.dispose();
   }
 
+  int _pollCount = 0;
+
   Future<void> _poll() async {
     if (!mounted) return;
+    _pollCount++;
+
+    // Hard cap: ~5 minutes at 1s interval, then give up.
+    if (_pollCount > 300) {
+      _timer?.cancel();
+      if (!_completedNotified) {
+        _completedNotified = true;
+        widget.onComplete?.call();
+      }
+      return;
+    }
     try {
       final encoded = Uri.encodeComponent(widget.sessionId);
       final resp = await http.get(

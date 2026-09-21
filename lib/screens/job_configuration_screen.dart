@@ -35,8 +35,10 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   final TextEditingController _topicNameController = TextEditingController();
   final TextEditingController _speakerNameController = TextEditingController();
   final TextEditingController _shortenController = TextEditingController();
-  final TextEditingController _muteController = TextEditingController(text: '120');
-  final TextEditingController _pauseController = TextEditingController(text: '2');
+  final TextEditingController _muteController =
+      TextEditingController(text: '120');
+  final TextEditingController _pauseController =
+      TextEditingController(text: '2');
 
   String _date = '';
   String? _thumbnailUrl;
@@ -45,7 +47,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   final List<String> _inputLanguages = ['en'];
   final List<String> _outputLanguages = ['de'];
   final List<String> _audioLanguages = ['de'];
-  
+
   String _availability = 'private';
   bool _profanityFilter = true;
   bool _filterMusic = true;
@@ -72,6 +74,9 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   final TextEditingController _tokenController = TextEditingController();
   String _tokenStatus = '';
 
+  // Bookmarklet state
+  bool _showBookmarklet = false;
+
   // Response display state
   String _responseMessage = '';
   String _responseHtml = '';
@@ -93,25 +98,49 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
 
   // --- Constants ---
   static const List<String> _availabilityOptions = [
-    'private', 'private+qr', 'kitemployee', 'kitall', 'public'
+    'private',
+    'private+qr',
+    'kitemployee',
+    'kitall',
+    'public'
   ];
   static const List<String> _formatOptions = [
-    'mixed', 'resending', 'online', 'offline'
+    'mixed',
+    'resending',
+    'online',
+    'offline'
   ];
   static const List<String> _chapteringOptions = [
-    'online_dynamic', 'online_static', 'offline', 'streaming_simple'
+    'online_dynamic',
+    'online_static',
+    'offline',
+    'streaming_simple'
   ];
   static const List<String> _ttsQualityOptions = ['low_latency', 'high_quality'];
   static const List<String> _errorCorrectionOptions = ['None', 'dialog', 'dialog2'];
   static const List<String> _postproductionOptions = ['50', '70', '90'];
 
+  // Bookmarklet: one click on the /gettoken page copies the token to clipboard.
+  static const String _bookmarkletJs =
+      "javascript:(function(){"
+      "const pre=document.querySelector('pre');"
+      "if(!pre){alert('Not on the /gettoken page');return;}"
+      "const t=pre.textContent.trim();"
+      "navigator.clipboard.writeText(t).then("
+      "()=>alert('Token copied \u2014 go back to the app and click \"Paste Token\"'),"
+      "()=>prompt('Copy manually:',t)"
+      ");"
+      "})();";
+
   // --- Init ---
   @override
   void initState() {
     super.initState();
-    _sessionNameController = TextEditingController(text: _getDefaultSessionName());
+    _sessionNameController =
+        TextEditingController(text: _getDefaultSessionName());
     final now = DateTime.now();
-    _date = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+    _date =
+        '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
     _topicNameController.text = _sessionNameController.text;
     _checkConnection();
     _fetchThumbnail();
@@ -120,7 +149,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     if (widget.sessionId != null && widget.sessionId!.isNotEmpty) {
       _savedSessionId = widget.sessionId!;
       _hasSessionId = true;
-      _outputStatus = '✅ Session ID loaded: ${widget.sessionId}\nClick "Check Output" to see results.';
+      _outputStatus =
+          '✅ Session ID loaded: ${widget.sessionId}\nClick "Check Output" to see results.';
     }
   }
 
@@ -157,8 +187,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         final List<dynamic> history = jsonDecode(jsonString);
         setState(() {
           _jobHistory = history.cast<Map<String, dynamic>>();
-          // Sort by date, newest first
-          _jobHistory.sort((a, b) => (b['timestamp'] ?? '').compareTo(a['timestamp'] ?? ''));
+          _jobHistory.sort((a, b) =>
+              (b['timestamp'] ?? '').compareTo(a['timestamp'] ?? ''));
         });
       }
     } catch (e) {
@@ -179,12 +209,12 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     try {
       final prefs = await SharedPreferences.getInstance();
       final key = 'job_history_${widget.videoKey}';
-      
+
       // Check if this session already exists in history
       final existingIndex = _jobHistory.indexWhere(
         (job) => job['session_id'] == sessionId
-      );
-      
+      );		
+
       if (existingIndex != -1) {
         // Update existing entry instead of creating new one
         _jobHistory[existingIndex]['status'] = status;
@@ -207,22 +237,22 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           'output_languages': _outputLanguages.join(','),
           'availability': _availability,
         };
-        
+
         _jobHistory.insert(0, jobEntry);
       }
-      
+
       // Keep only last 20 jobs per video
       if (_jobHistory.length > 20) {
         _jobHistory = _jobHistory.sublist(0, 20);
       }
-      
+
       // Save to shared preferences
       final jsonString = jsonEncode(_jobHistory);
       await prefs.setString(key, jsonString);
-      
-      if (mounted) {
-        setState(() {});
-      }
+
+					
+      if (mounted) setState(() {});
+	   
     } catch (e) {
       if (kDebugMode) print('Error saving job history: $e');
     }
@@ -232,12 +262,12 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     try {
       final prefs = await SharedPreferences.getInstance();
       final key = 'job_history_${widget.videoKey}';
-      
+
       _jobHistory.removeWhere((job) => job['session_id'] == sessionId);
-      
+
       final jsonString = jsonEncode(_jobHistory);
       await prefs.setString(key, jsonString);
-      
+
       if (mounted) {
         setState(() {});
         ScaffoldMessenger.of(context).showSnackBar(
@@ -259,7 +289,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Clear All History?'),
-        content: Text('This will remove all ${_jobHistory.length} jobs for this video.'),
+        content:
+            Text('This will remove all ${_jobHistory.length} jobs for this video.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -273,7 +304,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         ],
       ),
     );
-    
+
     if (confirm == true) {
       try {
         final prefs = await SharedPreferences.getInstance();
@@ -302,12 +333,12 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     try {
       final token = await InternalAuthService.getToken();
       if (token == null || token.isEmpty) return;
-      
+
       final response = await http.get(
         Uri.parse('$authBaseUrl/video_detail/${widget.videoKey}'),
         headers: {'Authorization': 'Bearer $token'},
       );
-      
+
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         final thumbnailUrl = data['thumbnail_url'] as String?;
@@ -367,7 +398,9 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
 
   // --- Manual token ---
   Future<void> _setManualToken() async {
-    final token = _tokenController.text.trim();
+    final raw = _tokenController.text;
+    final token = _extractToken(raw) ?? raw.trim();
+
     if (token.isEmpty) {
       setState(() => _tokenStatus = '⚠️ Please enter a token');
       return;
@@ -413,10 +446,85 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     }
   }
 
+  // Opens the /gettoken page in a new tab.
+  void _openTokenPage() {
+    final url = '$internalServerUrl/gettoken';
+    html.window.open(url, 'gettoken_tab');
+    setState(() {
+      _tokenStatus =
+          '📋 Copy the token from the new tab, then click "Paste Token"';
+    });
+  }
+
+  // Extracts a token from either a raw value or a copied gettoken HTML page.
+  String? _extractToken(String raw) {
+    if (raw.isEmpty) return null;
+
+    // 1. gettoken HTML:  <pre>   XXXXX=|timestamp|email   </pre>
+    final preMatch = RegExp(
+      r'<pre>\s*([^<]+?)\s*</pre>',
+      multiLine: true,
+    ).firstMatch(raw);
+    if (preMatch != null) {
+      final t = preMatch.group(1)?.trim();
+      if (t != null && t.isNotEmpty) return t;
+    }
+
+    // 2. Raw cookie format: anything|10-digit-timestamp|email
+    final cookieMatch = RegExp(
+      r"([^\s'<>|]+\|\d{10}\|[^\s'<>]+)",
+    ).firstMatch(raw);
+    if (cookieMatch != null) {
+      return cookieMatch.group(1)?.trim();
+    }
+
+    // 3. Fallback: trimmed input as-is.
+    final trimmed = raw.trim();
+    return trimmed.isNotEmpty ? trimmed : null;
+  }
+
+  // Reads the clipboard, extracts the token, and stores it.
+  Future<void> _pasteFromClipboard() async {
+    try {
+      final text = await html.window.navigator.clipboard?.readText();
+      if (text == null || text.isEmpty) {
+        setState(() => _tokenStatus = '⚠️ Clipboard is empty');
+        return;
+      }
+
+      final token = _extractToken(text);
+      if (token == null || token.isEmpty) {
+        setState(() => _tokenStatus = '⚠️ No token found in clipboard');
+        return;
+      }
+
+      _tokenController.text = token;
+      setState(() => _tokenStatus = '✅ Token extracted — saving...');
+      await _setManualToken();
+    } catch (e) {
+      if (mounted) {
+        setState(() => _tokenStatus = '⚠️ Clipboard read failed: $e');
+      }
+    }
+  }
+
+  // Copies the bookmarklet to the clipboard for one-time bookmark creation.
+  void _copyBookmarklet() {
+    html.window.navigator.clipboard?.writeText(_bookmarkletJs);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Bookmarklet copied. Create a new bookmark and paste this as its URL.',
+        ),
+      ),
+    );
+  }
+
   Future<String> _getToken() async {
     final token = await InternalAuthService.getToken();
     if (token == null || token.isEmpty) {
-      throw Exception('Not connected to internal server. Please click "Connect" or set a manual token first.');
+      throw Exception(
+          'Not connected to internal server. Please click "Connect" or set a manual token first.');
     }
     return token;
   }
@@ -426,7 +534,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     if (_savedSessionId.isEmpty) {
       if (mounted) {
         setState(() {
-          _outputStatus = '❌ No session ID available. Please upload a video first.';
+          _outputStatus =
+              '❌ No session ID available. Please upload a video first.';
         });
       }
       return;
@@ -442,7 +551,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     try {
       final token = await _getToken();
       final url = '$flaskServerUrl/session_output/$_savedSessionId';
-      
+
       final response = await http.get(
         Uri.parse(url),
         headers: {
@@ -456,9 +565,9 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
 
         if (totalFiles > 0) {
           // Update job history - find and update existing entry instead of creating new one
-          final jobIndex = _jobHistory.indexWhere(
-            (job) => job['session_id'] == _savedSessionId
-          );
+          final jobIndex = _jobHistory
+              .indexWhere((job) => job['session_id'] == _savedSessionId);
+			
           if (jobIndex != -1) {
             // Update existing entry
             setState(() {
@@ -485,7 +594,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               _isCheckingOutput = false;
               _outputStatus = '✅ Output is ready! Found $totalFiles files.';
             });
-            
+
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 content: Text('✅ Output ready! $totalFiles files available.'),
@@ -499,7 +608,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             setState(() {
               _isCheckingOutput = false;
               _outputStatus = '⏳ Still processing... No output files found yet.\n'
-                            'Please wait a few more minutes and try again.';
+                  'Please wait a few more minutes and try again.';
             });
           }
         }
@@ -539,9 +648,9 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
       MaterialPageRoute(
         builder: (_) => SessionOutputScreen(
           sessionId: sessionId,
-          sessionUrl: sessionUrl.isNotEmpty 
-              ? sessionUrl 
-              : 'https://lt2srv-sscherrer.isl.iar.kit.edu/archivesession/$sessionId',
+          sessionUrl: sessionUrl.isNotEmpty
+              ? sessionUrl
+              : '$internalServerUrl/archivesession/$sessionId',
         ),
       ),
     );
@@ -592,16 +701,19 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
       const userEmail = 'admin@example.com';
 
       final localMediaUrl = Uri.parse('$authBaseUrl/media/${widget.videoKey}');
-      if (kDebugMode) print('🌐 [DEBUG] Fetching video from local server: $localMediaUrl');
+      if (kDebugMode) {
+        print('🌐 [DEBUG] Fetching video from local server: $localMediaUrl');
+      }
 
       http.Response localResponse = await http.get(localMediaUrl);
       if (localResponse.statusCode != 200) {
-        final fallbackUrl = Uri.parse('$authBaseUrl/videos/${widget.videoKey}/download');
+        final fallbackUrl =
+            Uri.parse('$authBaseUrl/videos/${widget.videoKey}/download');
         final fallbackResponse = await http.get(fallbackUrl);
         if (fallbackResponse.statusCode != 200) {
           throw Exception(
             'Failed to fetch video from local server (HTTP ${fallbackResponse.statusCode}). '
-            'Body: ${fallbackResponse.body}'
+            'Body: ${fallbackResponse.body}',
           );
         }
         localResponse = fallbackResponse;
@@ -612,7 +724,9 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         throw Exception('Video file is empty.');
       }
 
-      if (kDebugMode) print('✅ [DEBUG] Video fetched from local: ${videoBytes.length} bytes');
+      if (kDebugMode) {
+        print('✅ [DEBUG] Video fetched from local: ${videoBytes.length} bytes');
+      }
 
       await _uploadToInternalServer(
         videoBytes: videoBytes,
@@ -644,7 +758,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         mute: int.tryParse(_muteController.text.trim()) ?? 120,
         pause: double.tryParse(_pauseController.text.trim()) ?? 2.0,
       );
-
+	  
     } catch (e) {
       if (kDebugMode) print('❌ [DEBUG] Exception caught: $e');
       if (mounted) {
@@ -726,7 +840,9 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     if (enableDiarization) formData.append('saasr', '1');
     if (enableAIAssistant) formData.append('aiassistant', '1');
     if (saveSession) formData.append('logging', '1');
-    if (distinguishUnknownSpeakers) formData.append('distinguish_unknown_speakers', '1');
+    if (distinguishUnknownSpeakers) {
+      formData.append('distinguish_unknown_speakers', '1');
+    }
 
     formData.append('legals', '1');
     formData.append('profile', 'profile_1');
@@ -741,7 +857,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     }
 
     final blob = html.Blob([videoBytes]);
-    // Make sure fileName has .mp4 extension
+											
     String uploadFileName = fileName;
     if (!uploadFileName.toLowerCase().endsWith('.mp4')) {
       uploadFileName = '$uploadFileName.mp4';
@@ -766,10 +882,10 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         try {
           final data = jsonDecode(responseText ?? '{}');
           setState(() {
-            _responseMessage = data['data']?['raw_response'] ?? 
-                              data['data']?['message'] ?? 
-                              data['message'] ??
-                              'Upload successful!';
+            _responseMessage = data['data']?['raw_response'] ??
+                data['data']?['message'] ??
+                data['message'] ??
+                'Upload successful!';
             _responseHtml = data['html'] ?? '';
             _sessionUrl = data['session_url'] ?? '';
             _sessionId = data['session_id']?.toString() ?? '';
@@ -779,10 +895,12 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           _printSessionLink();
         } catch (_) {
           // Parse HTML response and save session ID
-          final parsedSessionId = _parseHtmlResponseAndReturnSessionId(responseText ?? '');
+          final parsedSessionId =
+              _parseHtmlResponseAndReturnSessionId(responseText ?? '');
           if (parsedSessionId != null && parsedSessionId.isNotEmpty) {
             if (mounted) {
-              await InternalAuthService.saveSessionId(widget.videoKey, parsedSessionId);
+              await InternalAuthService.saveSessionId(
+                  widget.videoKey, parsedSessionId);
             }
           }
 
@@ -807,12 +925,12 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             _savedSessionUrl = finalUrl;
             _hasSessionId = true;
             _outputStatus = '✅ Upload complete! Session ID: $sessionId\n'
-                          'Click "Check Output" to see if processing is finished.';
+                'Click "Check Output" to see if processing is finished.';
           });
 
           // Save session ID
           await InternalAuthService.saveSessionId(widget.videoKey, sessionId);
-          
+
           // Save to job history ONLY if not already saved
           if (!historySaved) {
             await _saveJobToHistory(
@@ -824,7 +942,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             );
             historySaved = true;
           }
-          
+
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
@@ -851,12 +969,12 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               _savedSessionUrl = data['session_url'] ?? '';
               _hasSessionId = true;
               _outputStatus = '✅ Upload complete! Session ID: $sessionId\n'
-                            'Click "Check Output" to see if processing is finished.';
+                  'Click "Check Output" to see if processing is finished.';
             });
-            
+
             // Save session ID
             await InternalAuthService.saveSessionId(widget.videoKey, sessionId);
-            
+
             // Save to job history ONLY if not already saved
             if (!historySaved) {
               await _saveJobToHistory(
@@ -868,7 +986,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               );
               historySaved = true;
             }
-            
+
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
@@ -887,7 +1005,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
       return;
     }
   }
-      
+
   String? _parseHtmlResponseAndReturnSessionId(String html) {
     final RegExp linkRegex = RegExp(r'<a href="([^"]+)"[^>]*>([^<]+)</a>');
     final linkMatch = linkRegex.firstMatch(html);
@@ -897,10 +1015,12 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         String cleanUrl = url.replaceAll(RegExp(r'\s+'), '');
         cleanUrl = cleanUrl.replaceAll('ist.iar', 'isl.iar');
         _sessionUrl = cleanUrl;
-        
+
         if (cleanUrl.contains('/archivesession/')) {
-          final sessionId = cleanUrl.split('/archivesession/')[-1].split('/')[0];
-          final cleanedId = sessionId.replaceAll(RegExp(r'\s+'), '').split('"')[0];
+          final sessionId =
+              cleanUrl.split('/archivesession/')[-1].split('/')[0];
+          final cleanedId =
+              sessionId.replaceAll(RegExp(r'\s+'), '').split('"')[0];
           if (cleanedId.isNotEmpty) {
             _sessionId = cleanedId;
             return cleanedId;
@@ -908,15 +1028,17 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         }
       }
     }
-    
-    final RegExp videoKeyRegex = RegExp(r'<strong>Video Key:</strong>\s*([^<]+)');
+
+    final RegExp videoKeyRegex =
+        RegExp(r'<strong>Video Key:</strong>\s*([^<]+)');
     final videoMatch = videoKeyRegex.firstMatch(html);
     if (videoMatch != null && videoMatch.groupCount >= 1) {
       _videoKey = videoMatch.group(1)?.trim() ?? '';
     }
-    
+
     if (_sessionId.isEmpty) {
-      final RegExp sessionIdRegex = RegExp(r'<strong>Session ID:</strong>\s*([^<]+)');
+      final RegExp sessionIdRegex =
+          RegExp(r'<strong>Session ID:</strong>\s*([^<]+)');
       final sessionMatch = sessionIdRegex.firstMatch(html);
       if (sessionMatch != null && sessionMatch.groupCount >= 1) {
         _sessionId = sessionMatch.group(1)?.trim() ?? '';
@@ -925,7 +1047,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         }
       }
     }
-    
+
     return null;
   }
 
@@ -950,16 +1072,16 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
       }
     }
     if (_videoKey.isNotEmpty && kDebugMode) {
-      if (kDebugMode) {
-        print('🎬 VIDEO KEY: $_videoKey');
-      }
+					   
+											
     }
   }
+   
 
   // --- Response display widget ---
   Widget _buildResponseDisplay() {
     if (!_showResponse) return const SizedBox.shrink();
-    
+
     return Container(
       margin: const EdgeInsets.only(top: 16),
       padding: const EdgeInsets.all(16),
@@ -993,7 +1115,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             ],
           ),
           const SizedBox(height: 8),
-          
+
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
@@ -1017,7 +1139,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ],
             ),
           ),
-          
+		  
           if (_savedSessionId.isNotEmpty) ...[
             const SizedBox(height: 8),
             Container(
@@ -1043,9 +1165,9 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ),
             ),
           ],
-          
+
           const SizedBox(height: 12),
-          
+
           if (_sessionUrl.isNotEmpty) ...[
             Container(
               padding: const EdgeInsets.all(14),
@@ -1103,7 +1225,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                       ),
                       child: Row(
                         children: [
-                          const Icon(Icons.fingerprint, size: 14, color: Colors.grey),
+                          const Icon(Icons.fingerprint,
+                              size: 14, color: Colors.grey),
                           const SizedBox(width: 6),
                           Expanded(
                             child: Column(
@@ -1137,7 +1260,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             ),
             const SizedBox(height: 8),
           ],
-          
+		  
           if (_videoKey.isNotEmpty) ...[
             Container(
               padding: const EdgeInsets.all(8),
@@ -1163,7 +1286,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             ),
             const SizedBox(height: 8),
           ],
-          
+
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
@@ -1195,7 +1318,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               ],
             ),
           ),
-          
+
           const SizedBox(height: 16),
           Wrap(
             spacing: 8,
@@ -1252,7 +1375,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
     try {
       final token = await _getToken();
       final url = '$flaskServerUrl/session_output/$sessionId';
-      
+
       final response = await http.get(
         Uri.parse(url),
         headers: {
@@ -1264,11 +1387,11 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         final data = jsonDecode(response.body);
         final totalFiles = data['total_files'] ?? 0;
 
-        // Find and update the job in history
-        final jobIndex = _jobHistory.indexWhere(
-          (job) => job['session_id'] == sessionId
-        );
-        
+											 
+        final jobIndex =
+            _jobHistory.indexWhere((job) => job['session_id'] == sessionId);
+		  
+
         if (jobIndex != -1) {
           if (totalFiles > 0) {
             setState(() {
@@ -1277,7 +1400,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               _jobHistory[jobIndex]['output_files'] = totalFiles;
             });
             await _saveJobHistoryToPrefs();
-            
+
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
@@ -1293,7 +1416,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
-                  content: Text('⏳ Still processing... No output files found yet.'),
+                  content:
+                      Text('⏳ Still processing... No output files found yet.'),
                   duration: Duration(seconds: 3),
                 ),
               );
@@ -1393,7 +1517,9 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
               final job = _jobHistory[index];
               final timestamp = DateTime.tryParse(job['timestamp'] ?? '');
               final dateStr = timestamp != null
-                  ? '${timestamp.day}/${timestamp.month}/${timestamp.year} ${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}'
+                  ? '${timestamp.day}/${timestamp.month}/${timestamp.year} '
+                      '${timestamp.hour.toString().padLeft(2, '0')}:'
+                      '${timestamp.minute.toString().padLeft(2, '0')}'
                   : job['date'] ?? 'Unknown date';
               final sessionName = job['session_name'] ?? 'Unknown Session';
               final status = job['status'] ?? 'Unknown';
@@ -1443,7 +1569,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                       if (hasOutput)
                         Text(
                           '📁 $outputFiles file${outputFiles > 1 ? 's' : ''} available',
-                          style: TextStyle(fontSize: 11, color: Colors.green[700]),
+                          style:
+                              TextStyle(fontSize: 11, color: Colors.green[700]),
                         ),
                     ],
                   ),
@@ -1496,9 +1623,11 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                               value: 'check',
                               child: Row(
                                 children: [
-                                  Icon(Icons.refresh, size: 18, color: Colors.blue),
+                                  Icon(Icons.refresh,
+                                      size: 18, color: Colors.blue),
                                   SizedBox(width: 8),
-                                  Text('Check Status', style: TextStyle(color: Colors.blue)),
+                                  Text('Check Status',
+                                      style: TextStyle(color: Colors.blue)),
                                 ],
                               ),
                             ),
@@ -1519,7 +1648,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                               children: [
                                 Icon(Icons.delete, size: 18, color: Colors.red),
                                 SizedBox(width: 8),
-                                Text('Delete', style: TextStyle(color: Colors.red)),
+                                Text('Delete',
+                                    style: TextStyle(color: Colors.red)),
                               ],
                             ),
                           ),
@@ -1546,16 +1676,17 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   // --- Output check section widget ---
   Widget _buildOutputCheckSection() {
     if (!_hasSessionId) return const SizedBox.shrink();
-    
+
     // Find the current session in history
-    final currentJobIndex = _jobHistory.indexWhere(
-      (job) => job['session_id'] == _savedSessionId
-    );
-    final bool hasOutput = currentJobIndex != -1 && 
-                          (_jobHistory[currentJobIndex]['has_output'] ?? false);
-    final int outputFiles = currentJobIndex != -1 ? 
-                            (_jobHistory[currentJobIndex]['output_files'] ?? 0) : 0;
-    
+    final currentJobIndex =
+        _jobHistory.indexWhere((job) => job['session_id'] == _savedSessionId);
+	  
+    final bool hasOutput = currentJobIndex != -1 &&
+        (_jobHistory[currentJobIndex]['has_output'] ?? false);
+    final int outputFiles = currentJobIndex != -1
+        ? (_jobHistory[currentJobIndex]['output_files'] ?? 0)
+        : 0;
+
     return Container(
       margin: const EdgeInsets.only(top: 16),
       padding: const EdgeInsets.all(16),
@@ -1647,7 +1778,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                         orElse: () => {},
                       );
                       _viewHistoricalOutput(
-                        _savedSessionId, 
+                        _savedSessionId,
                         job['session_url'] ?? _savedSessionUrl
                       );
                     },
@@ -1667,9 +1798,9 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                         ? const SizedBox(
                             width: 16,
                             height: 16,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                            ),
+                            child: CircularProgressIndicator(strokeWidth: 2),
+											 
+							  
                           )
                         : const Icon(Icons.refresh, size: 16),
                     label: Text(
@@ -1719,7 +1850,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
   void _showFullResponseDialog() {
     final String cleanText = _stripHtmlTags(_responseHtml);
     final String videoKey = _extractVideoKey(_responseHtml);
-    
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -1968,7 +2099,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         const SizedBox(height: 16),
 
         // Input Languages
-        const Text('Input Languages', style: TextStyle(fontWeight: FontWeight.bold)),
+        const Text('Input Languages',
+            style: TextStyle(fontWeight: FontWeight.bold)),
         const SizedBox(height: 8),
         Wrap(
           spacing: 8,
@@ -2053,7 +2185,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
         ),
         const SizedBox(height: 16),
 
-        // TTS Quality Mode
+        // TTS Quality Mode						   
         _buildDropdownField<String>(
           label: 'TTS Quality Mode',
           value: _ttsQualityMode,
@@ -2076,7 +2208,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
           label: 'Shortening (Post-production)',
           selected: _postproduction,
           allOptions: _postproductionOptions,
-          onChanged: (newList) => setState(() => _postproduction..clear()..addAll(newList)),
+          onChanged: (newList) =>
+              setState(() => _postproduction..clear()..addAll(newList)),
         ),
         const SizedBox(height: 16),
 
@@ -2089,7 +2222,9 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             hintText: 'Leave empty for random',
           ),
           validator: (val) {
-            if (val != null && val.isNotEmpty && !RegExp(r'^[A-Za-z0-9]*$').hasMatch(val)) {
+            if (val != null &&
+                val.isNotEmpty &&
+                !RegExp(r'^[A-Za-z0-9]*$').hasMatch(val)) {
               return 'Only letters and numbers allowed';
             }
             return null;
@@ -2193,7 +2328,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
             CheckboxListTile(
               title: const Text('Distinguish unknown speakers'),
               value: _distinguishUnknownSpeakers,
-              onChanged: (v) => setState(() => _distinguishUnknownSpeakers = v!),
+              onChanged: (v) =>
+                  setState(() => _distinguishUnknownSpeakers = v!),
               controlAffinity: ListTileControlAffinity.leading,
               dense: true,
             ),
@@ -2356,7 +2492,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                         const SizedBox(width: 8),
                         if (_jobHistory.isNotEmpty)
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 2),
                             decoration: BoxDecoration(
                               color: Colors.blue.shade100,
                               borderRadius: BorderRadius.circular(12),
@@ -2412,7 +2549,8 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                         ),
                         const SizedBox(width: 8),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 2),
                           decoration: BoxDecoration(
                             color: Colors.blue.shade100,
                             borderRadius: BorderRadius.circular(12),
@@ -2484,30 +2622,37 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                                   if (!_showTokenInput) {
                                     _tokenStatus = '';
                                     _tokenController.clear();
+                                    _showBookmarklet = false;
                                   }
                                 });
                               },
                               icon: Icon(
-                                _showTokenInput ? Icons.keyboard_arrow_up : Icons.vpn_key,
+                                _showTokenInput
+                                    ? Icons.keyboard_arrow_up
+                                    : Icons.vpn_key,
                                 size: 18,
                               ),
-                              label: Text(_showTokenInput ? 'Hide Token' : 'Manual Token'),
+                              label: Text(
+                                  _showTokenInput ? 'Hide Token' : 'Manual Token'),
                               style: TextButton.styleFrom(
                                 foregroundColor: Colors.blue,
                               ),
                             ),
                             const SizedBox(width: 4),
                             ElevatedButton(
-                              onPressed: _isConnecting ? null : _connectToInternal,
+                              onPressed:
+                                  _isConnecting ? null : _connectToInternal,
                               style: ElevatedButton.styleFrom(
-                                backgroundColor: _isConnected ? Colors.grey : Colors.blue,
+                                backgroundColor:
+                                    _isConnected ? Colors.grey : Colors.blue,
                                 foregroundColor: Colors.white,
                               ),
                               child: _isConnecting
                                   ? const SizedBox(
                                       width: 20,
                                       height: 20,
-                                      child: CircularProgressIndicator(strokeWidth: 2),
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2),
                                     )
                                   : Text(_isConnected ? 'Reconnect' : 'Connect'),
                             ),
@@ -2517,56 +2662,232 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                     ),
                     if (_showTokenInput) ...[
                       const SizedBox(height: 8),
+
+                      // Step-by-step hint
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.amber[50],
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: Colors.amber[200]!),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(Icons.lightbulb_outline,
+                                size: 18, color: Colors.amber[800]),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                '1. Click "Get Token" → new tab opens.\n'
+                                '2. On that tab press Ctrl+A then Ctrl+C.\n'
+                                '3. Come back and click "Paste Token".',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.amber[900],
+                                  height: 1.4,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+
+                      // Token field
+                      TextField(
+                        controller: _tokenController,
+                        decoration: InputDecoration(
+                          hintText: 'Token will appear here after pasting...',
+                          border: const OutlineInputBorder(),
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 10),
+                          errorText: _tokenStatus.contains('❌')
+                              ? _tokenStatus
+                              : null,
+                          helperText: _tokenStatus.contains('✅')
+                              ? _tokenStatus
+                              : null,
+                          helperStyle: const TextStyle(color: Colors.green),
+                          suffixIcon: _tokenController.text.isNotEmpty
+                              ? IconButton(
+                                  icon: const Icon(Icons.clear, size: 18),
+                                  onPressed: () => setState(
+                                      () => _tokenController.clear()),
+                                )
+                              : null,
+                        ),
+                        maxLines: 2,
+                        minLines: 1,
+                        onChanged: (_) {
+                          if (_tokenStatus.isNotEmpty &&
+                              !_tokenStatus.startsWith('📋')) {
+                            setState(() => _tokenStatus = '');
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 10),
+
+                      // Row 1: Get Token / Paste Token
                       Row(
                         children: [
                           Expanded(
-                            child: TextField(
-                              controller: _tokenController,
-                              decoration: InputDecoration(
-                                hintText: 'Paste token here...',
-                                border: const OutlineInputBorder(),
-                                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                                errorText: _tokenStatus.contains('❌') ? _tokenStatus : null,
-                                helperText: _tokenStatus.contains('✅') ? _tokenStatus : null,
-                                helperStyle: const TextStyle(color: Colors.green),
+                            child: OutlinedButton.icon(
+                              onPressed: _openTokenPage,
+                              icon: const Icon(Icons.open_in_new, size: 18),
+                              label: const Text('Get Token'),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: Colors.blue,
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 12),
                               ),
-                              maxLines: 2,
-                              onChanged: (_) {
-                                if (_tokenStatus.isNotEmpty) {
-                                  setState(() => _tokenStatus = '');
-                                }
-                              },
                             ),
                           ),
                           const SizedBox(width: 8),
-                          ElevatedButton.icon(
-                            onPressed: _setManualToken,
-                            icon: const Icon(Icons.save, size: 18),
-                            label: const Text('Set'),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.green,
-                              foregroundColor: Colors.white,
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: _pasteFromClipboard,
+                              icon: const Icon(Icons.content_paste, size: 18),
+                              label: const Text('Paste Token'),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.teal,
+                                foregroundColor: Colors.white,
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 12),
+                              ),
                             ),
                           ),
-                          const SizedBox(width: 4),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+
+                      // Row 2: Set Manually / Clear
+                      Row(
+                        children: [
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: _setManualToken,
+                              icon: const Icon(Icons.save, size: 18),
+                              label: const Text('Set Manually'),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.green,
+                                foregroundColor: Colors.white,
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 12),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
                           OutlinedButton.icon(
                             onPressed: _clearManualToken,
                             icon: const Icon(Icons.clear, size: 18),
                             label: const Text('Clear'),
                             style: OutlinedButton.styleFrom(
                               foregroundColor: Colors.red,
+                              padding: const EdgeInsets.symmetric(
+                                  vertical: 12, horizontal: 16),
                             ),
                           ),
                         ],
                       ),
-                      if (_tokenStatus.isNotEmpty && !_tokenStatus.contains('❌') && !_tokenStatus.contains('✅'))
+
+                      // Neutral status hint
+                      if (_tokenStatus.isNotEmpty &&
+                          !_tokenStatus.contains('❌') &&
+                          !_tokenStatus.contains('✅'))
                         Padding(
-                          padding: const EdgeInsets.only(top: 4.0),
+                          padding: const EdgeInsets.only(top: 8),
                           child: Text(
                             _tokenStatus,
-                            style: const TextStyle(fontSize: 12, color: Colors.grey),
+                            style: const TextStyle(
+                                fontSize: 12, color: Colors.grey),
                           ),
                         ),
+
+                      const SizedBox(height: 8),
+
+                      // Power-user tip: bookmarklet
+                      InkWell(
+                        onTap: () => setState(
+                            () => _showBookmarklet = !_showBookmarklet),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 6),
+                          child: Row(
+                            children: [
+                              Icon(
+                                _showBookmarklet
+                                    ? Icons.keyboard_arrow_up
+                                    : Icons.keyboard_arrow_down,
+                                size: 18,
+                                color: Colors.blueGrey,
+                              ),
+                              const SizedBox(width: 6),
+                              const Text(
+                                'Power-user tip: one-click copy bookmarklet',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.blueGrey,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+
+                      if (_showBookmarklet) ...[
+                        const SizedBox(height: 6),
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: Colors.blueGrey[50],
+                            borderRadius: BorderRadius.circular(6),
+                            border:
+                                Border.all(color: Colors.blueGrey[200]!),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Create a bookmark whose URL is the text '
+                                'below. Then on the /gettoken page, click '
+                                'it once to copy the token.',
+                                style: TextStyle(
+                                    fontSize: 11, color: Colors.blueGrey),
+                              ),
+                              const SizedBox(height: 8),
+                              Container(
+                                padding: const EdgeInsets.all(8),
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(
+                                      color: Colors.blueGrey[100]!),
+                                ),
+                                child: const SelectableText(
+                                  _bookmarkletJs,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontFamily: 'monospace',
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              SizedBox(
+                                width: double.infinity,
+                                child: OutlinedButton.icon(
+                                  onPressed: _copyBookmarklet,
+                                  icon: const Icon(Icons.copy, size: 16),
+                                  label: const Text('Copy Bookmarklet'),
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: Colors.blueGrey[800],
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ],
                   ],
                 ),
@@ -2587,13 +2908,13 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
                     ? const CircularProgressIndicator(color: Colors.white)
                     : const Text('Start Processing'),
               ),
-              
-              // ─── Live progress panel ───          👈 NEW
+
+              // ─── Live progress panel ───         
               _buildLiveProgressPanel(),
               
               // ─── Output check section ───
               _buildOutputCheckSection(),
-              
+
               // ─── Response display ───
               _buildResponseDisplay(),
             ],

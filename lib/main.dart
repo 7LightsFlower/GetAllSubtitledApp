@@ -6,8 +6,14 @@ import 'package:asr_live_translator/screens/forgot_password_screen.dart';
 import 'package:asr_live_translator/screens/working_screen.dart';
 import 'package:asr_live_translator/screens/splash_screen.dart';
 import 'package:asr_live_translator/constants.dart';
+import 'package:asr_live_translator/models/language_config.dart';
 
-void main() {
+Future<void> main() async {
+    WidgetsFlutterBinding.ensureInitialized();
+
+  await LanguageConfig.load();
+  refreshLanguageConstants();
+  
   runApp(const MyApp());
 }
 

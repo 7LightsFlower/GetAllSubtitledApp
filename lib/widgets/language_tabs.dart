@@ -1,6 +1,7 @@
 // widgets/language_tabs.dart
 import 'package:flutter/material.dart';
 import 'package:asr_live_translator/models/session_data.dart';
+import 'package:asr_live_translator/constants.dart';
 
 class LanguageTabs extends StatelessWidget {
   final List<TranscriptData> transcripts;
@@ -60,7 +61,7 @@ class LanguageTabs extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              _getShortLanguageName(transcript.language),
+              _getLanguageLabel(transcript.language),
               style: TextStyle(
                 color: isSelected ? Colors.white : Colors.grey.shade700,
                 fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
@@ -90,43 +91,21 @@ class LanguageTabs extends StatelessWidget {
     );
   }
 
-  String _getShortLanguageName(String fullName) {
-    // Map of common language names to short codes
-    final Map<String, String> shortNames = {
-      'Transcript': 'TR',
-      'English': 'EN',
-      'German': 'DE',
-      'Spanish': 'ES',
-      'French': 'FR',
-      'Italian': 'IT',
-      'Portuguese': 'PT',
-      'Dutch': 'NL',
-      'Russian': 'RU',
-      'Japanese': 'JA',
-      'Korean': 'KO',
-      'Chinese': 'ZH',
-      'Arabic': 'AR',
-      'Hindi': 'HI',
-      'Polish': 'PL',
-      'Turkish': 'TR',
-      'Ukrainian': 'UK',
-      'Vietnamese': 'VI',
-      'Thai': 'TH',
-      'Indonesian': 'ID',
-      'Malay': 'MS',
-    };
+  String _getLanguageLabel(String language) {
+    if (language.isEmpty) return 'Unknown';
 
-    // Check if the name contains any of the short names
-    for (final entry in shortNames.entries) {
-      if (fullName.contains(entry.key)) {
-        return entry.value;
-      }
+    final lower = language.toLowerCase();
+
+    // Speaker's own track (Original ASR) → just "Transcript"
+    if (lower.contains('original') || lower.contains('asr')) {
+      return 'Transcript';
     }
 
-    // If no match found, use first few letters
-    if (fullName.length > 3) {
-      return fullName.substring(0, 3).toUpperCase();
-    }
-    return fullName;
+    // Everything else → plain language name
+    // "Translation (Language Arabic)" → "Arabic"
+    // "Translation (Language de)"     → "German"
+    // "Structured (English)"          → "English"
+    // "English"                       → "English"
+    return resolveLanguageName(language);
   }
 }

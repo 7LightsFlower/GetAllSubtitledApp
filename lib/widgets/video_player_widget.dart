@@ -1,7 +1,7 @@
 // video_player_widget.dart
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
-import 'package:asr_live_translator/models/subtitle_track.dart'; // Import the shared model
+import 'package:asr_live_translator/models/subtitle_track.dart';
 
 class VideoPlayerWidget extends StatefulWidget {
   final VideoPlayerController? controller;
@@ -11,7 +11,7 @@ class VideoPlayerWidget extends StatefulWidget {
   final double height;
   final List<SubtitleTrack>? subtitleTracks;
   final String? selectedSubtitle;
-  final Function(String?)? onSubtitleChanged; // Note: nullable parameter
+  final Function(String?)? onSubtitleChanged;
 
   const VideoPlayerWidget({
     super.key,
@@ -46,10 +46,13 @@ class _VideoPlayerWidgetState extends State<VideoPlayerWidget> {
     final position = controller.value.position;
     _currentPosition = position.inSeconds.toDouble();
 
+    final hasSubtitles =
+        widget.subtitleTracks != null && widget.subtitleTracks!.isNotEmpty;
+
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        // Video player
+        // ─── Video pane ──────────────────────────────────────────────
         Expanded(
           child: Stack(
             alignment: Alignment.center,
@@ -59,64 +62,66 @@ class _VideoPlayerWidgetState extends State<VideoPlayerWidget> {
                 aspectRatio: controller.value.aspectRatio,
                 child: VideoPlayer(controller),
               ),
-              
+
               // Play/Pause overlay button
               Center(
                 child: IconButton(
                   icon: Icon(
-                    controller.value.isPlaying ? Icons.pause : Icons.play_arrow,
-                    color: Colors.white.withValues(alpha: 0.7), // Fixed: withValues instead of withOpacity
+                    controller.value.isPlaying
+                        ? Icons.pause
+                        : Icons.play_arrow,
+                    color: Colors.white.withValues(alpha: 0.7),
                     size: 48,
                   ),
                   onPressed: widget.onPlayPause,
                 ),
               ),
+
+              // ─── Subtitle selector — floating pill, top-right ──────
+              if (hasSubtitles)
+                Positioned(
+                  top: 8,
+                  right: 8,
+                  child: _buildSubtitleSelector(),
+                ),
             ],
           ),
         ),
-        
-        // Controls
+
+        // ─── Bottom controls — progress slider only ─────────────────
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          color: Colors.black.withValues(alpha: 0.6), // Fixed: withValues instead of withOpacity
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+          color: Colors.black.withValues(alpha: 0.6),
+          child: Row(
             children: [
-              // Subtitle selector
-              if (widget.subtitleTracks != null && widget.subtitleTracks!.isNotEmpty)
-                _buildSubtitleSelector(),
-              
-              // Progress slider
-              Row(
-                children: [
-                  Text(
-                    _formatDuration(position),
-                    style: const TextStyle(color: Colors.white, fontSize: 12),
-                  ),
-                  Expanded(
-                    child: Slider(
-                      value: _isDragging ? _currentPosition : position.inSeconds.toDouble(),
-                      min: 0,
-                      max: duration.inSeconds.toDouble(),
-                      onChanged: (value) {
-                        setState(() {
-                          _isDragging = true;
-                          _currentPosition = value;
-                        });
-                      },
-                      onChangeEnd: (value) {
-                        _isDragging = false;
-                        widget.onSeek(value);
-                      },
-                      activeColor: Colors.blue,
-                      inactiveColor: Colors.grey,
-                    ),
-                  ),
-                  Text(
-                    _formatDuration(duration),
-                    style: const TextStyle(color: Colors.white, fontSize: 12),
-                  ),
-                ],
+              Text(
+                _formatDuration(position),
+                style: const TextStyle(color: Colors.white, fontSize: 12),
+              ),
+              Expanded(
+                child: Slider(
+                  value: _isDragging
+                      ? _currentPosition
+                      : position.inSeconds.toDouble(),
+                  min: 0,
+                  max: duration.inSeconds.toDouble(),
+                  onChanged: (value) {
+                    setState(() {
+                      _isDragging = true;
+                      _currentPosition = value;
+                    });
+                  },
+                  onChangeEnd: (value) {
+                    _isDragging = false;
+                    widget.onSeek(value);
+                  },
+                  activeColor: Colors.blue,
+                  inactiveColor: Colors.grey,
+                ),
+              ),
+              Text(
+                _formatDuration(duration),
+                style: const TextStyle(color: Colors.white, fontSize: 12),
               ),
             ],
           ),
@@ -126,52 +131,57 @@ class _VideoPlayerWidgetState extends State<VideoPlayerWidget> {
   }
 
   Widget _buildSubtitleSelector() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Icon(
-            Icons.closed_caption,
-            color: Colors.white,
-            size: 16,
-          ),
-          const SizedBox(width: 8),
-          SizedBox(
-            width: 200,
-            height: 30,
-            child: DropdownButtonHideUnderline(
-              child: DropdownButton<String>(
-                value: widget.selectedSubtitle,
-                isExpanded: true,
-                dropdownColor: Colors.grey[900],
-                style: const TextStyle(color: Colors.white, fontSize: 12),
-                icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
-                items: [
-                  const DropdownMenuItem<String>(
-                    value: null,
-                    child: Text('Off', style: TextStyle(color: Colors.grey)),
-                  ),
-                  // Fixed: removed unnecessary toList()
-                  ...widget.subtitleTracks!.map((track) {
-                    return DropdownMenuItem<String>(
-                      value: track.language,
+    return Material(
+      color: Colors.black.withValues(alpha: 0.55),
+      borderRadius: BorderRadius.circular(20),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.closed_caption,
+              color: Colors.white,
+              size: 16,
+            ),
+            const SizedBox(width: 6),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 180),
+              child: DropdownButtonHideUnderline(
+                child: DropdownButton<String>(
+                  value: widget.selectedSubtitle,
+                  isDense: true,
+                  isExpanded: false,
+                  dropdownColor: Colors.grey[900],
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                  icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
+                  items: [
+                    const DropdownMenuItem<String>(
+                      value: null,
                       child: Text(
-                        track.label,
-                        style: const TextStyle(color: Colors.white),
+                        'Off',
+                        style: TextStyle(color: Colors.grey),
                       ),
-                    );
-                  }),
-                ],
-                onChanged: (value) {
-                  if (widget.onSubtitleChanged != null) {
-                    widget.onSubtitleChanged!(value);
-                  }
-                },
+                    ),
+                    ...widget.subtitleTracks!.map((track) {
+                      return DropdownMenuItem<String>(
+                        value: track.language,
+                        child: Text(
+                          track.label,
+                          style: const TextStyle(color: Colors.white),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      );
+                    }),
+                  ],
+                  onChanged: (value) {
+                    widget.onSubtitleChanged?.call(value);
+                  },
+                ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
