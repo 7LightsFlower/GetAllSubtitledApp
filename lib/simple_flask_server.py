@@ -1224,9 +1224,54 @@ def get_actual_file_url(session_id, filename, html_content=None):
 
 
 # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+_session_download_locks: dict[str, threading.Lock] = {}
+_session_download_locks_guard = threading.Lock()
 
+
+def _get_session_download_lock(session_id: str) -> threading.Lock:
+    """One lock per session so /session_output and the BG worker
+    never write the same files at the same time."""
+    with _session_download_locks_guard:
+        lock = _session_download_locks.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            _session_download_locks[session_id] = lock
+        return lock
 
 def download_session_files(session_id, token):
+    """Download the media files and transcripts associated with a session.
+
+    Serialised per session_id: concurrent callers (the background worker
+    and /session_output) will queue up instead of racing each other.
+    """
+    lock = _get_session_download_lock(session_id)
+    if not lock.acquire(blocking=False):
+        # Another thread is already downloading this session. Wait for it
+        # to finish, then return — the files are already there.
+        lock.acquire()
+        lock.release()
+        logging.info(
+            "download_session_files: %s already downloaded by another "
+            "thread, skipping", session_id,
+        )
+        return True
+
+    try:
+        # Re-check under the lock — the other thread may have already
+        # finished between _session_files_look_incomplete() and here.
+        session_dir = os.path.join(SESSION_FOLDER, session_id)
+        if not _session_files_look_incomplete(session_dir):
+            logging.info(
+                "download_session_files: %s is already complete, skipping",
+                session_id,
+            )
+            return True
+        return _download_session_files_locked(session_id, token)
+    finally:
+        lock.release()
+        
+
+def _download_session_files_locked(session_id, token):
     """Download the media files and transcripts associated with a session."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
     os.makedirs(session_dir, exist_ok=True)
