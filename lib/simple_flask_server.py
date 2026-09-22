@@ -82,6 +82,7 @@ sessions = {}
 internal_session = requests.Session()
 internal_session.verify = False
 _state = {"token": None}
+_warned_senders: set[str] = set()
 
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1410,11 +1411,27 @@ def extract_transcripts_from_messages(messages_path):
                     except (json.JSONDecodeError, TypeError):
                         continue
 
-                    if isinstance(msg_data, dict) and "seq" in msg_data:
+                    # ── accept any of several text fields, not just "seq" ──
+                    if isinstance(msg_data, dict):
                         sender = msg_data.get("sender", "")
-                        text = msg_data.get("seq", "").strip()
+                        text = (
+                            msg_data.get("seq")
+                            or msg_data.get("text")
+                            or msg_data.get("translation")
+                            or ""
+                        )
+                        text = text.strip() if isinstance(text, str) else ""
 
                         if not text:
+                            # Log the keys once per unknown sender so a
+                            # future field rename is visible immediately.
+                            if sender and sender not in _warned_senders:
+                                _warned_senders.add(sender)
+                                logging.warning(
+                                    "extract: message with no text field "
+                                    "(sender=%r, keys=%s)",
+                                    sender, sorted(msg_data.keys()),
+                                )
                             continue
 
                         if sender in language_map:
@@ -1423,7 +1440,7 @@ def extract_transcripts_from_messages(messages_path):
                             lang_name = (
                                 numeric_language_map.get(lang_id)
                                 or get_language_name_from_sender(sender, lang_id)
-                )
+                        )
 
                         existing = next(
                             (t for t in transcripts if t.get("language") == lang_name),
@@ -3888,24 +3905,38 @@ def _fetch_messages_json_bytes(session_id: str, token: str) -> bytes:
         logging.warning("fetch_messages_json failed: %s", e)
     return b""
 
-
 def _messages_look_done(raw: bytes) -> bool:
-    """True if `raw` is a valid, non-empty messages.json."""
+    """Return True only when we have both ASR content AND translation content."""
     if not raw or len(raw) < MIN_MESSAGES_BYTES:
         return False
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, TypeError, ValueError):
         return False
-    if isinstance(data, list):
-        return len(data) > 0
-    if isinstance(data, dict):
-        msgs = data.get("messages")
-        if isinstance(msgs, list):
-            return len(msgs) > 0
-        return len(data) > 0
-    return False
+    if not isinstance(data, list) or not data:
+        return False
 
+    asr_count = 0
+    mt_count = 0
+    for item in data:
+        if not (isinstance(item, list) and len(item) >= 2):
+            continue
+        try:
+            m = json.loads(item[1]) if isinstance(item[1], str) else item[1]
+        except Exception:
+            continue
+        if not isinstance(m, dict):
+            continue
+        if not m.get("seq", "").strip():
+            continue
+        s = m.get("sender", "")
+        if s.startswith("asr:"):
+            asr_count += 1
+        elif s.startswith("mt:") or s.startswith("translation:"):
+            mt_count += 1
+
+    # Require at least a handful of ASR messages AND at least one translated message
+    return asr_count >= 5 and mt_count >= 1
 
 def _count_messages(raw: bytes) -> int:
     """Best-effort count of messages inside a messages.json blob."""
@@ -5046,25 +5077,48 @@ def session_refresh(session_id):
     return jsonify({"success": True, "session_id": session_id}), 200
 
 
+@app.route("/session_resync/<path:session_id>", methods=["POST"])
+def session_resync(session_id):
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        return jsonify({"error": "No token"}), 401
+    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    if os.path.exists(session_dir):
+        shutil.rmtree(session_dir)
+    os.makedirs(session_dir, exist_ok=True)
+    download_session_files(session_id, token)
+    return jsonify({"success": True, "session_id": session_id}), 200
+
+
 def _session_files_look_incomplete(session_dir):
-    """
-    Heuristic: a completed session should have:
-      - messages.json > 5 KB
-      - transcripts.json present
-      - at least one subtitles_*.vtt
-    """
     messages = os.path.join(session_dir, "messages.json")
     transcripts = os.path.join(session_dir, "transcripts.json")
+
     if not os.path.exists(transcripts):
         return True
     if not os.path.exists(messages) or os.path.getsize(messages) < 5000:
         return True
+
+    try:
+        with open(transcripts, "r", encoding="utf-8") as f:
+            ts = json.load(f)
+    except Exception:
+        return True
+
+    # How many languages did we actually extract text for?
+    languages_with_text = [
+        t for t in ts
+        if any(seg.get("text", "").strip() for seg in t.get("segments", []))
+    ]
+
     vtt_files = [
         f for f in os.listdir(session_dir)
         if f.startswith("subtitles_") and f.endswith(".vtt")
         and os.path.getsize(os.path.join(session_dir, f)) > 20
     ]
-    if not vtt_files:
+
+    # If we have more languages with text than VTTs, we're behind.
+    if len(vtt_files) < len(languages_with_text):
         return True
     return False
 
@@ -5841,9 +5895,14 @@ def upload_lecture():
                 "config": dict(request.form),
             }
             jobs[session_id] = job
+
+            # collect the requested target languages for the readiness gate
+            expected_mt = request.form.getlist("mtLanguage") or ["de"]
+            logging.info("Expected translation languages: %s", expected_mt)
+
             threading.Thread(
                 target=process_session_in_background,
-                args=(session_id, token, video_key),
+                args=(session_id, token, video_key, expected_mt),   
                 daemon=True,
             ).start()
             save_state()
@@ -6160,9 +6219,20 @@ def forward_to_internal(video_key):
             "config": {"source": "forward_to_internal"},
         }
 
+        # forward_to_internal has no form fields, so fall back to the
+        # defaults the Flutter client sends in /upload. If you ever add
+        # mtLanguage to the JSON body, read it from data_in instead.
+        expected_mt = (
+            data_in.get("mtLanguage")
+            or data_in.get("mt_languages")
+            or ["de"]
+        )
+        if isinstance(expected_mt, str):
+            expected_mt = [expected_mt]
+
         threading.Thread(
             target=process_session_in_background,
-            args=(session_id, token, video_key),
+            args=(session_id, token, video_key, expected_mt),
             daemon=True,
         ).start()
         save_state()
