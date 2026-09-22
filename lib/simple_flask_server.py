@@ -5,6 +5,7 @@ import base64
 import contextvars
 import datetime
 import importlib
+import hashlib
 import io
 import json
 import logging
@@ -127,18 +128,50 @@ def full_language_name(code_or_name: str) -> str:
 # ─── STATE PERSISTENCE ──────────────────────────────────────────────────
 
 
-def save_state():
-    """Save server state to disk."""
+# Hash of the last state we actually wrote to disk. Used by save_state()
+# to skip redundant writes when nothing meaningful changed.
+_last_state_hash: str | None = None
+
+
+def _state_payload() -> dict:
+    """The part of the state that actually matters for persistence.
+
+    Kept separate from the on-disk blob so the 'timestamp' field does not
+    invalidate the dedup hash on every call.
+    """
+    return {
+        "users": users,
+        "videos": videos,
+        "jobs": jobs,
+        "sessions": sessions,
+    }
+
+
+def save_state(force: bool = False):
+    """Save server state to disk.
+
+    Skips the write entirely when the meaningful state is byte-identical
+    to the last successful save, unless `force=True` is passed.
+    """
+    global _last_state_hash
     try:
+        payload = _state_payload()
+        blob = pickle.dumps(payload)
+        digest = hashlib.sha256(blob).hexdigest()
+
+        if not force and digest == _last_state_hash:
+            # Nothing changed since the last write — don't touch the disk
+            # and don't spam the log.
+            return
+
         state = {
-            "users": users,
-            "videos": videos,
-            "jobs": jobs,
-            "sessions": sessions,
+            **payload,
             "timestamp": datetime.datetime.now().isoformat(),
         }
         with open(STATE_FILE, "wb") as f:
             pickle.dump(state, f)
+
+        _last_state_hash = digest
         logging.info("State saved to %s", STATE_FILE)
     except (OSError, pickle.PickleError, TypeError, ValueError) as e:
         logging.error("Failed to save state: %s", e)
@@ -873,6 +906,10 @@ def process_job(job_id):
                 original_video = video
                 break
 
+    # Persist the "processing" status once, so a restart during the job
+    # can still see that this video was mid-flight.
+    save_state()
+
     progress = 0.0
     while progress < 1.0:
         time.sleep(1)
@@ -880,23 +917,26 @@ def process_job(job_id):
         if progress > 1.0:
             progress = 1.0
         job["progress"] = progress
-        if progress >= 1.0:
-            job["status"] = "completed"
-            job["transcript"] = generate_mock_transcript()
-            job["segments"] = generate_mock_segments()
 
-            # Update the original video with processing results - DON'T create a new one
-            if original_video:
-                original_video["segmentation_done"] = True
-                original_video["segmentation_progress"] = 100
-                original_video["segment_count"] = len(job["segments"])
-                original_video["languages"] = ["en"]
-                logging.info(
-                    "✅ Updated video %s with job results", original_video.get("name")
-                )
-            else:
-                logging.warning("⚠️ No original video found for job %s", job_id)
-        save_state()
+    # Loop is done — finalise the job.
+    job["status"] = "completed"
+    job["transcript"] = generate_mock_transcript()
+    job["segments"] = generate_mock_segments()
+
+    # Update the original video with processing results — DON'T create a new one
+    if original_video:
+        original_video["segmentation_done"] = True
+        original_video["segmentation_progress"] = 100
+        original_video["segment_count"] = len(job["segments"])
+        original_video["languages"] = ["en"]
+        logging.info(
+            "✅ Updated video %s with job results", original_video.get("name")
+        )
+    else:
+        logging.warning("⚠️ No original video found for job %s", job_id)
+
+    # Single write at the end of the job.
+    save_state()
 
 
 def generate_video_thumbnail(video_path, thumbnail_path, time_offset=1.0):
@@ -1423,9 +1463,28 @@ def extract_transcripts_from_messages(messages_path):
                         text = text.strip() if isinstance(text, str) else ""
 
                         if not text:
-                            # Log the keys once per unknown sender so a
-                            # future field rename is visible immediately.
-                            if sender and sender not in _warned_senders:
+                            # Messages that carry no `seq` / `text` /
+                            # `translation` field fall into two buckets:
+                            #
+                            #  1. Mediator control/transport messages. They
+                            #     have a fixed shape: 'message_id', 'session',
+                            #     'tag', 'access', 'controll', 'directory',
+                            #     'host', 'meta', 'time_arrive_mediator'.
+                            #     No text is expected — this is normal.
+                            #
+                            #  2. Actual transcript messages whose field was
+                            #     renamed. These are the ones we want to hear
+                            #     about, so we log them once per sender.
+                            looks_like_control = (
+                                "message_id" in msg_data
+                                and "session" in msg_data
+                                and "tag" in msg_data
+                            )
+                            if (
+                                sender
+                                and sender not in _warned_senders
+                                and not looks_like_control
+                            ):
                                 _warned_senders.add(sender)
                                 logging.warning(
                                     "extract: message with no text field "
@@ -4012,7 +4071,7 @@ def wait_for_session_ready(session_id, token, timeout=1800):
 
         time.sleep(2)
 
-def process_session_in_background(session_id, token, video_key):
+def process_session_in_background(session_id, token, video_key, expected_mt=None):
     """Wait for the internal server to finish, then download the session.
 
     Runs in a daemon thread, started right after a successful upload.
