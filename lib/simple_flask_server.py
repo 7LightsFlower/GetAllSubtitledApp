@@ -4142,7 +4142,7 @@ def wait_for_session_ready(session_id, token, timeout=1800):
 
         logging.info(
             "Session %s: messages.json size=%d (stable=%d/%d)",
-            session_id, size, stable_count, _STABLE_NEEDED,
+            _short_sid(session_id), size, stable_count, _STABLE_NEEDED,
         )
 
         if stable_count >= _STABLE_NEEDED:
