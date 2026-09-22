@@ -444,6 +444,19 @@ def utc_now_iso():
         .replace("+00:00", "Z")
     )
 
+def _public_base_url() -> str:
+    """Base URL the browser should use, honouring the proxy chain.
+
+    Prefers X-Forwarded-Host / X-Forwarded-Proto when nginx (or any
+    upstream proxy) sets them. Falls back to request.host_url otherwise,
+    which is what Flask sees from the Host header.
+    """
+    fwd_host = request.headers.get("X-Forwarded-Host")
+    if fwd_host:
+        proto = request.headers.get("X-Forwarded-Proto", "http")
+        return f"{proto}://{fwd_host}".rstrip("/")
+    return request.host_url.rstrip("/")
+
 
 def _short_sid(session_id: str | None, keep: int = 8) -> str:
     """First N chars of a session id, for logs.
@@ -4437,7 +4450,7 @@ def get_videos():
     # Build absolute thumbnail URLs from the incoming request so they work
     # behind any host/proxy (localhost, Nginx, public domain, ...).
     # Do NOT mutate the stored dicts: their thumbnail_url stays relative.
-    base = request.host_url.rstrip("/")
+    base = _public_base_url()
     unique_videos_serialized = []
     for video in unique_videos:
         v = dict(video)  # shallow copy
@@ -6491,7 +6504,7 @@ def dex_userinfo():
 @app.route("/debug-videos", methods=["GET"])
 def debug_videos():
     """Debug endpoint: return all video metadata (including duplicates)."""
-    base = request.host_url.rstrip("/")
+    base = _public_base_url()
     serialized = []
     for video in videos:
         v = dict(video)
