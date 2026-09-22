@@ -66,6 +66,28 @@ CORS(
     expose_headers=["Location", "Content-Disposition"],
 )
 
+@app.after_request
+def add_no_cache_for_api(response):
+    """Never let the browser or any proxy cache API / session responses.
+
+    The web tier (index.html, main.dart.js, ...) is served by nginx and
+    gets its own cache policy. Everything Flask returns is dynamic and
+    must always be re-fetched.
+    """
+    if request.path.startswith((
+        "/job_progress/",
+        "/session_output/",
+        "/session_file/",
+        "/session_languages/",
+        "/session_transcript_json/",
+        "/api/",
+    )):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 INTERNAL_SERVER_URL = "https://lt2srv-sscherrer.isl.iar.kit.edu"
 TARGET_URL = f"{INTERNAL_SERVER_URL}/upload_lecture"
 BASE_URL = INTERNAL_SERVER_URL
@@ -298,7 +320,7 @@ def cleanup_orphaned_data():
             orphaned_sessions.append(session_id)
             logging.warning(
                 "Removing orphaned session %s (video_key: %s)",
-                session_id,
+                _short_sid(session_id),
                 video_key,
             )
 
@@ -421,6 +443,18 @@ def utc_now_iso():
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z")
     )
+
+
+def _short_sid(session_id: str | None, keep: int = 8) -> str:
+    """First N chars of a session id, for logs.
+
+    Session ids here are base64-encoded paths and can be 120+ chars.
+    Logging them in full drowns out everything else. The full id is
+    still used for filesystem paths and HTTP responses.
+    """
+    if not session_id:
+        return "<none>"
+    return session_id[:keep] + "…"
 
 # Which panel entry (if any) this thread's log lines should be routed to.
 # Value is either ('job', session_id) or ('download', download_id), or None.
@@ -826,7 +860,7 @@ def job_progress(session_id):
         if token:
             persisted["_recovery_started"] = True
             video_key = persisted.get("video_key")
-            logging.info("♻️ Restarting background worker for %s", session_id)
+            logging.info("♻️ Restarting background worker for %s", _short_sid(session_id))
             threading.Thread(
                 target=process_session_in_background,
                 args=(session_id, token, video_key),
@@ -1252,7 +1286,7 @@ def download_session_files(session_id, token):
         lock.release()
         logging.info(
             "download_session_files: %s already downloaded by another "
-            "thread, skipping", session_id,
+            "thread, skipping", _short_sid(session_id),
         )
         return True
 
@@ -1263,13 +1297,13 @@ def download_session_files(session_id, token):
         if not _session_files_look_incomplete(session_dir):
             logging.info(
                 "download_session_files: %s is already complete, skipping",
-                session_id,
+                _short_sid(session_id),
             )
             return True
         return _download_session_files_locked(session_id, token)
     finally:
         lock.release()
-        
+
 
 def _download_session_files_locked(session_id, token):
     """Download the media files and transcripts associated with a session."""
@@ -1404,7 +1438,7 @@ def _download_session_files_locked(session_id, token):
     ]
 
     logging.info("=" * 60)
-    logging.info("Session %s: Downloaded %s files total", session_id, len(files))
+    logging.info("Session %s: Downloaded %s files total", _short_sid(session_id), len(files))
     for f in files:
         size = os.path.getsize(os.path.join(session_dir, f))
         logging.info("  - %s (%d bytes)", f, size)
@@ -3425,7 +3459,7 @@ def session_transcript_save_vtt(session_id):
         logging.info(
             "Saved transcript and updated VTT for language '%s' in session %s",
             language,
-            session_id,
+            _short_sid(session_id),
         )
 
         # --- 5. Return the refreshed file list ----------------------------
@@ -3525,14 +3559,14 @@ def update_video_subtitles(session_id):
 
     logging.info(
         "update_video_subtitles: session=%r dir_exists=%s video_exists=%s",
-        session_id,
+        _short_sid(session_id),
         os.path.isdir(session_dir),
         os.path.exists(video_path),
     )
 
     if not os.path.exists(video_path):
         logging.warning(
-            "update_video_subtitles: video.mp4 missing for session %s", session_id
+            "update_video_subtitles: video.mp4 missing for session %s", _short_sid(session_id)
         )
         return jsonify({"error": "video.mp4 not found"}), 404
 
@@ -4073,7 +4107,7 @@ def wait_for_session_ready(session_id, token, timeout=1800):
         elapsed = time.time() - started
         if elapsed > timeout:
             raise TimeoutError(
-                f"Session {session_id} not ready after {timeout}s"
+                f"Session {_short_sid(session_id)} not ready after {timeout}s"
             )
 
         # Warm-up: don't hammer the internal server while it's still
@@ -4104,13 +4138,13 @@ def wait_for_session_ready(session_id, token, timeout=1800):
             if _messages_look_done(raw):
                 logging.info(
                     "✅ Session %s appears complete (%d bytes, %d msgs)",
-                    session_id, len(raw), _count_messages(raw),
+                    _short_sid(session_id), len(raw), _count_messages(raw),
                 )
                 return True
             logging.warning(
                 "Session %s: size stable but content invalid, "
                 "resetting stability counter",
-                session_id,
+                _short_sid(session_id),
             )
             stable_count = 0
 
@@ -4127,7 +4161,7 @@ def process_session_in_background(session_id, token, video_key, expected_mt=None
     # 👇 everything logged from this thread now lands in this session's panel
     token_cv = _log_target.set(("job", session_id))
     try:
-        logging.info("🟢 [BG] Starting background processing for %s", session_id)
+        logging.info("🟢 [BG] Starting background processing for %s", _short_sid(session_id))
         session_name = sessions.get(session_id, {}).get("name", session_id)
         _job_start(session_id, video_key, session_name)
         _job_log(
@@ -4141,7 +4175,7 @@ def process_session_in_background(session_id, token, video_key, expected_mt=None
         if not ready:
             logging.warning(
                 "Session %s never stabilized; downloading what we have",
-                session_id,
+                _short_sid(session_id),
             )
 
         ok = download_session_files(session_id, token)
@@ -4153,13 +4187,13 @@ def process_session_in_background(session_id, token, video_key, expected_mt=None
         save_state()
 
         _job_finish(session_id, error=None if ok else "Partial download")
-        logging.info("✅ Background download finished for %s", session_id)
+        logging.info("✅ Background download finished for %s", _short_sid(session_id))
 
     except (requests.exceptions.RequestException, OSError, subprocess.SubprocessError,
             TimeoutError, ValueError, TypeError, KeyError, RuntimeError) as e:
         logging.error(
             "Background session processing failed for %s: %s",
-            session_id, e, exc_info=True,
+            _short_sid(session_id), e, exc_info=True,
         )
         _job_finish(session_id, error=f"{type(e).__name__}: {e}")
     finally:
@@ -4710,7 +4744,7 @@ def get_session_output(session_id):
     if token and _session_files_look_incomplete(session_dir):
         logging.info(
             "Session %s looks incomplete — re-downloading from internal server",
-            session_id,
+            _short_sid(session_id),
         )
         download_session_files(session_id, token)
 
@@ -6543,7 +6577,7 @@ if __name__ == "__main__":
             try:
                 os.remove(os.path.join(sess_dir, sess_filename))
                 logging.info(
-                    "🧹 Removed stale video %s in session %s", sess_filename, sess_id
+                    "🧹 Removed stale video %s in session %s", sess_filename, _short_sid(sess_id)
                 )
             except OSError:
                 pass
