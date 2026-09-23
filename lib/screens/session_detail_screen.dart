@@ -185,6 +185,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   String _savedSessionId = '';
   String _savedSessionUrl = '';
   bool _isCheckingOutput = false;
+  bool _isCancelling = false; 
   String _outputStatus = '';
 
   // Job history
@@ -863,6 +864,79 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     }
   }
 
+    Future<void> _cancelJob() async {
+    if (_savedSessionId.isEmpty || _isCancelling) return;
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Cancel processing?'),
+        content: const Text(
+          'The background worker will stop within a few seconds. Files '
+          'already downloaded stay on the server, but no further '
+          'translations will be fetched.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Keep running'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Cancel processing'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    setState(() => _isCancelling = true);
+    try {
+      final token = await _getToken();
+      final url = '$flaskServerUrl/cancel_session/$_savedSessionId';
+      final response = await http.post(
+        Uri.parse(url),
+        headers: {'Authorization': 'Bearer $token'},
+      );
+      if (!mounted) return;
+
+      if (response.statusCode == 200) {
+        final idx = _jobHistory
+            .indexWhere((j) => j['session_id'] == _savedSessionId);
+        if (idx != -1) {
+          _jobHistory[idx]['status'] = 'Cancelled 🛑';
+          _jobHistory[idx]['has_output'] = false;
+          await _saveJobHistoryToPrefs();
+        }
+
+        setState(() {
+          _outputStatus =
+              '🛑 Cancel requested — the worker will stop shortly.';
+        });
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Cancel requested'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+      } else {
+        setState(() {
+          _outputStatus = '❌ Cancel failed: HTTP ${response.statusCode}';
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _outputStatus = '❌ Cancel error: $e');
+      }
+    } finally {
+      if (mounted) setState(() => _isCancelling = false);
+    }
+  }
+
   Future<void> _checkHistoricalOutput(String sessionId) async {
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1115,6 +1189,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     final formData = html.FormData();
 
     formData.append('token', token);
+    formData.append('targetServer', internalServerUrl); 
     formData.append('path', '/home/$userEmail');
     formData.append('name', sessionName);
     formData.append('topicname', topicName);
@@ -2287,73 +2362,112 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
               ),
             ),
           const SizedBox(height: 12),
-          Row(
-            children: [
-              if (!hasOutput)
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _isCheckingOutput ? null : _checkOutput,
-                    icon: _isCheckingOutput
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
-                            ),
-                          )
-                        : const Icon(Icons.refresh),
-                    label: Text(
-                      _isCheckingOutput ? 'Checking...' : 'Check Status',
+                    Builder(
+            builder: (context) {
+              final currentJob = currentJobIndex != -1
+                  ? _jobHistory[currentJobIndex]
+                  : null;
+              final currentStatus =
+                  (currentJob?['status'] as String? ?? '');
+              final isRunning = !hasOutput &&
+                  (currentStatus.contains('Processing') ||
+                      currentStatus.isEmpty);
+
+              return Row(
+                children: [
+                  if (!hasOutput)
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _isCheckingOutput ? null : _checkOutput,
+                        icon: _isCheckingOutput
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Icon(Icons.refresh),
+                        label: Text(
+                          _isCheckingOutput ? 'Checking...' : 'Check Status',
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.blue,
+                          foregroundColor: Colors.white,
+                        ),
+                      ),
                     ),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.blue,
-                      foregroundColor: Colors.white,
+                  if (isRunning) ...[
+                    if (!hasOutput) const SizedBox(width: 8),
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _isCancelling ? null : _cancelJob,
+                        icon: _isCancelling
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Icon(Icons.cancel, size: 18),
+                        label: Text(
+                          _isCancelling ? 'Cancelling…' : 'Cancel',
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.red,
+                          foregroundColor: Colors.white,
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-              if (hasOutput) ...[
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: () {
-                      final job = _jobHistory.firstWhere(
-                        (j) => j['session_id'] == _savedSessionId,
-                        orElse: () => {},
-                      );
-                      _viewHistoricalOutput(
-                        _savedSessionId,
-                        job['session_url'] ?? _savedSessionUrl,
-                      );
-                    },
-                    icon: const Icon(Icons.folder_open),
-                    label: Text('View Output ($outputFiles files)'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green,
-                      foregroundColor: Colors.white,
+                  ],
+                  if (hasOutput) ...[
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: () {
+                          final job = _jobHistory.firstWhere(
+                            (j) => j['session_id'] == _savedSessionId,
+                            orElse: () => {},
+                          );
+                          _viewHistoricalOutput(
+                            _savedSessionId,
+                            job['session_url'] ?? _savedSessionUrl,
+                          );
+                        },
+                        icon: const Icon(Icons.folder_open),
+                        label: Text('View Output ($outputFiles files)'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green,
+                          foregroundColor: Colors.white,
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _isCheckingOutput ? null : _checkOutput,
-                    icon: _isCheckingOutput
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.refresh, size: 16),
-                    label: Text(
-                      _isCheckingOutput ? 'Checking...' : 'Refresh',
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _isCheckingOutput ? null : _checkOutput,
+                        icon: _isCheckingOutput
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2),
+                              )
+                            : const Icon(Icons.refresh, size: 16),
+                        label: Text(
+                          _isCheckingOutput ? 'Checking...' : 'Refresh',
+                        ),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.blue,
+                        ),
+                      ),
                     ),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.blue,
-                    ),
-                  ),
-                ),
-              ],
-            ],
+                  ],
+                ],
+              );
+            },
           ),
         ],
       ),

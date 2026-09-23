@@ -23,7 +23,7 @@ import zipfile
 
 import requests
 import yt_dlp
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, g, jsonify, request, send_file
 from flask_cors import CORS
 from docx import Document
 from docx.shared import Pt, RGBColor
@@ -66,6 +66,7 @@ CORS(
     expose_headers=["Location", "Content-Disposition"],
 )
 
+
 @app.after_request
 def add_no_cache_for_api(response):
     """Never let the browser or any proxy cache API / session responses.
@@ -74,21 +75,41 @@ def add_no_cache_for_api(response):
     gets its own cache policy. Everything Flask returns is dynamic and
     must always be re-fetched.
     """
-    if request.path.startswith((
-        "/job_progress/",
-        "/session_output/",
-        "/session_file/",
-        "/session_languages/",
-        "/session_transcript_json/",
-        "/api/",
-    )):
+    if request.path.startswith(
+        (
+            "/job_progress/",
+            "/session_output/",
+            "/session_file/",
+            "/session_languages/",
+            "/session_transcript_json/",
+            "/api/",
+        )
+    ):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
     return response
 
 
-INTERNAL_SERVER_URL = "https://lt2srv-sscherrer.isl.iar.kit.edu"
+# Servers we are willing to forward uploads to. The client may only
+# pick from this list.
+ALLOWED_TARGET_SERVERS = {
+    "https://lt2srv-sscherrer.isl.iar.kit.edu",
+    "https://lecture-translator.kit.edu",
+    "https://lt2srv-backup.iar.kit.edu",
+}
+INTERNAL_SERVER_URL = "https://lt2srv-sscherrer.isl.iar.kit.edu"  # default
+
+
+def _resolve_target_url(requested: str | None) -> str:
+    """Pick a target upload URL, restricted to the allow-list."""
+    if requested and requested.rstrip("/") in ALLOWED_TARGET_SERVERS:
+        return f"{requested.rstrip('/')}/upload_lecture"
+    if requested:
+        logging.warning("Rejected unknown target server: %r", requested)
+    return f"{INTERNAL_SERVER_URL}/upload_lecture"
+
+
 TARGET_URL = f"{INTERNAL_SERVER_URL}/upload_lecture"
 BASE_URL = INTERNAL_SERVER_URL
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
@@ -126,8 +147,7 @@ def _load_language_names() -> dict:
         names = data.get("names") or {}
         if not isinstance(names, dict) or not names:
             raise ValueError("languages.json has no 'names' object")
-        logging.info("Loaded %d language names from %s",
-                     len(names), _LANGUAGES_JSON)
+        logging.info("Loaded %d language names from %s", len(names), _LANGUAGES_JSON)
         return {str(k): str(v) for k, v in names.items()}
     except (OSError, json.JSONDecodeError, ValueError) as e:
         logging.error("Could not load %s: %s", _LANGUAGES_JSON, e)
@@ -147,12 +167,15 @@ def full_language_name(code_or_name: str) -> str:
     key = code_or_name.strip().lower()
     return LANGUAGE_NAMES.get(key, code_or_name.strip())
 
+
 # ─── STATE PERSISTENCE ──────────────────────────────────────────────────
 
 
 # Hash of the last state we actually wrote to disk. Used by save_state()
 # to skip redundant writes when nothing meaningful changed.
-_last_state_hash: str | None = None
+# Store this in a mutable container so save_state() can update it without
+# using a module-level global statement.
+_state_cache = {"last_hash": None}
 
 
 def _state_payload() -> dict:
@@ -175,13 +198,12 @@ def save_state(force: bool = False):
     Skips the write entirely when the meaningful state is byte-identical
     to the last successful save, unless `force=True` is passed.
     """
-    global _last_state_hash
     try:
         payload = _state_payload()
         blob = pickle.dumps(payload)
         digest = hashlib.sha256(blob).hexdigest()
 
-        if not force and digest == _last_state_hash:
+        if not force and digest == _state_cache["last_hash"]:
             # Nothing changed since the last write — don't touch the disk
             # and don't spam the log.
             return
@@ -193,7 +215,7 @@ def save_state(force: bool = False):
         with open(STATE_FILE, "wb") as f:
             pickle.dump(state, f)
 
-        _last_state_hash = digest
+        _state_cache["last_hash"] = digest
         logging.info("State saved to %s", STATE_FILE)
     except (OSError, pickle.PickleError, TypeError, ValueError) as e:
         logging.error("Failed to save state: %s", e)
@@ -444,6 +466,7 @@ def utc_now_iso():
         .replace("+00:00", "Z")
     )
 
+
 def _public_base_url() -> str:
     """Base URL the browser should use, honouring the proxy chain.
 
@@ -469,17 +492,21 @@ def _short_sid(session_id: str | None, keep: int = 8) -> str:
         return "<none>"
     return session_id[:keep] + "…"
 
+
 # Which panel entry (if any) this thread's log lines should be routed to.
 # Value is either ('job', session_id) or ('download', download_id), or None.
-_log_target: contextvars.ContextVar = contextvars.ContextVar(
-    'log_target', default=None
-)
-_local = threading.local()   # re-entrancy guard
+_log_target: contextvars.ContextVar = contextvars.ContextVar("log_target", default=None)
+_local = threading.local()  # re-entrancy guard
 
 
 class _PanelLogHandler(logging.Handler):
-    """Forward every logging.* call to the JobProgressPanel / download panel
-    that belongs to the current thread, if any."""
+    # Substrings that should go to the console only, not to the panel.
+    # The polling chatter from wait_for_session_ready is useful in the
+    # terminal but drowns out everything else in the panel.
+    _CONSOLE_ONLY_SUBSTRINGS = (
+        "messages.json size=",
+        "size stable but content",
+    )
 
     def emit(self, record):
         # Never recurse into ourselves.
@@ -497,6 +524,10 @@ class _PanelLogHandler(logging.Handler):
 
             kind, ident = target
             msg = record.getMessage()
+
+            # Check if the log message should only go to the console.
+            if any(substring in msg for substring in self._CONSOLE_ONLY_SUBSTRINGS):
+                return
 
             lvl = (record.levelname or "info").lower()
             if lvl not in ("info", "warning", "error"):
@@ -518,6 +549,60 @@ class _PanelLogHandler(logging.Handler):
 _panel_handler = _PanelLogHandler()
 _panel_handler.setLevel(logging.INFO)
 logging.getLogger().addHandler(_panel_handler)
+
+
+# ─── ROUTE REQUEST LOGS TO THE RIGHT PANEL ────────────────────────────
+# Any endpoint whose URL carries a session_id. When Flask handles one
+# of these, we set _log_target so logging.* calls made during that
+# request show up in that session's JobProgressPanel — not just in the
+# console.
+_SESSION_SCOPED_ENDPOINTS = {
+    "get_session_output",
+    "session_refresh",
+    "session_resync",
+    "job_progress",
+    "session_transcript_save_vtt",
+    "download_session_zip",
+    "session_messages_json",
+    "extract_video_subtitles",
+    "update_video_subtitles",
+    "session_languages",
+    "session_transcript_json",
+    "session_file",
+    "session_export",
+    "session_export_txt",
+    "session_export_docx",
+    "session_export_rtf",
+    "session_export_structured_json",
+    "session_export_all_languages",
+}
+
+
+@app.before_request
+def _route_logs_to_session_panel():
+    """Bind the current request's logging to its session's panel."""
+    endpoint = request.endpoint or ""
+    if endpoint not in _SESSION_SCOPED_ENDPOINTS:
+        return
+    session_id = (request.view_args or {}).get("session_id")
+    if not session_id:
+        return
+    # Stash the token so teardown can restore the previous value.
+    setattr(g, "_panel_log_token", _log_target.set(("job", session_id)))
+
+
+@app.teardown_request
+def _unroute_logs_from_session_panel(_exc):
+    """Restore the previous _log_target after the request finishes."""
+    token = getattr(g, "_panel_log_token", None)
+    if token is None:
+        return
+    try:
+        _log_target.reset(token)
+    except (ValueError, LookupError):
+        # Token was created in a different context — safe to ignore.
+        pass
+
 
 def generate_mock_transcript():
     """Return a static sample transcript."""
@@ -696,6 +781,32 @@ job_progress_lock = threading.Lock()
 _JOB_TTL = 7200  # keep finished entries for 2 hours
 
 
+# Sessions whose background worker has been asked to stop. The worker
+# checks this set between poll iterations and again before each file
+# download; the /cancel_session endpoint adds to it.
+_cancelled_sessions: set[str] = set()
+_cancelled_sessions_lock = threading.Lock()
+
+
+class _JobCancelled(Exception):
+    """Raised inside a background worker when its session is cancelled."""
+
+
+def _request_cancel(session_id: str) -> None:
+    with _cancelled_sessions_lock:
+        _cancelled_sessions.add(session_id)
+
+
+def _is_cancelled(session_id: str) -> bool:
+    with _cancelled_sessions_lock:
+        return session_id in _cancelled_sessions
+
+
+def _clear_cancel(session_id: str) -> None:
+    with _cancelled_sessions_lock:
+        _cancelled_sessions.discard(session_id)
+
+
 def _job_start(session_id: str, video_key: str | None, session_name: str | None):
     """Create a fresh job-progress entry for a session."""
     with job_progress_lock:
@@ -741,7 +852,13 @@ def _job_log(
         if stage is not None:
             entry["stage"] = stage
         if progress is not None:
-            entry["progress"] = float(progress)
+            new_prog = float(progress)
+            # Monotonic: never let the bar move backwards. The
+            # translation phase reports coverage of the video, and the
+            # download phase that follows reports its own smaller
+            # numbers — the bar should stay where it was.
+            if new_prog > entry.get("progress", 0.0):
+                entry["progress"] = new_prog
         entry["message"] = message
         entry["updated_at"] = time.time()
         # Bound memory: keep the last 500 events per session
@@ -779,6 +896,29 @@ def _job_finish(session_id: str, *, error: str | None = None):
                 "time": datetime.datetime.now().strftime("%H:%M:%S"),
                 "level": "error" if error else "info",
                 "message": error if error else "✅ Processing complete",
+            }
+        )
+
+
+def _job_cancel(session_id: str):
+    """Mark a session's progress entry as cancelled (a third state —
+    distinct from both 'complete' and 'error')."""
+    if not session_id:
+        return
+    with job_progress_lock:
+        entry = _job_progress_store.get(session_id)
+        if entry is None:
+            return
+        entry["done"] = True
+        entry["error"] = None
+        entry["stage"] = "cancelled"
+        entry["message"] = "Cancelled by user"
+        entry["updated_at"] = time.time()
+        entry["events"].append(
+            {
+                "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                "level": "warning",
+                "message": "🛑 Cancelled by user",
             }
         )
 
@@ -873,10 +1013,20 @@ def job_progress(session_id):
         if token:
             persisted["_recovery_started"] = True
             video_key = persisted.get("video_key")
-            logging.info("♻️ Restarting background worker for %s", _short_sid(session_id))
+            server_url = (
+                sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
+            )
+            expected_mt = sessions.get(session_id, {}).get("expected_mt")
+            logging.info(
+                "♻️ Restarting background worker for %s on %s "
+                "(waiting for translations: %s)",
+                _short_sid(session_id),
+                server_url,
+                expected_mt or "any",
+            )
             threading.Thread(
                 target=process_session_in_background,
-                args=(session_id, token, video_key),
+                args=(session_id, token, video_key, server_url),
                 daemon=True,
             ).start()
             return (
@@ -938,6 +1088,32 @@ def job_progress(session_id):
     )
 
 
+@app.route("/cancel_session/<path:session_id>", methods=["POST", "OPTIONS"])
+def cancel_session(session_id):
+    """Ask the background worker for this session to stop.
+
+    Sets a flag; the worker checks it in its wait loop and between file
+    downloads. This call does not block waiting for the worker to die —
+    the panel reflects the change on the next poll.
+    """
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    logging.info("🛑 Cancel requested for session %s", _short_sid(session_id))
+
+    _request_cancel(session_id)
+
+    # Update persisted state immediately so a page reload or a cold
+    # panel poll sees the cancelled status right away.
+    job = jobs.get(session_id)
+    if job and job.get("status") == "processing":
+        job["status"] = "cancelled"
+    _job_cancel(session_id)
+    save_state()
+
+    return jsonify({"success": True, "session_id": session_id}), 200
+
+
 def process_job(job_id):
     """Simulate background job processing with progress updates."""
     job = jobs.get(job_id)
@@ -976,9 +1152,7 @@ def process_job(job_id):
         original_video["segmentation_progress"] = 100
         original_video["segment_count"] = len(job["segments"])
         original_video["languages"] = ["en"]
-        logging.info(
-            "✅ Updated video %s with job results", original_video.get("name")
-        )
+        logging.info("✅ Updated video %s with job results", original_video.get("name"))
     else:
         logging.warning("⚠️ No original video found for job %s", job_id)
 
@@ -1227,47 +1401,56 @@ def extract_text_from_subtitle(content):
     return " ".join(text_lines) if text_lines else None
 
 
-def get_actual_file_url(session_id, filename, html_content=None):
+def get_actual_file_url(session_id, filename, server_url, html_content=None):
     """
     Determine the correct URL for a file based on its type.
+
+    `server_url` is the base URL of the internal server that owns the
+    session (e.g. "https://lecture-translator.kit.edu"). Every returned
+    URL is built against it, so a session that lives on a non-default
+    server is downloaded from the right host.
     """
+    server_url = (server_url or INTERNAL_SERVER_URL).rstrip("/")
+
     if html_content:
         if filename == "video.mp4":
             match = re.search(r'<source src="([^"]+)"', html_content)
             if match:
                 url = match.group(1)
                 if url.startswith("/"):
-                    url = f"{INTERNAL_SERVER_URL}{url}"
+                    url = f"{server_url}{url}"
                 return url
         if filename.startswith("subtitles_") and filename.endswith(".vtt"):
             label = filename.replace("subtitles_", "").replace(".vtt", "")
             match = re.search(
-                rf'<track label="{label}" kind="subtitles" src="([^"]+)"', html_content
+                rf'<track label="{label}" kind="subtitles" src="([^"]+)"',
+                html_content,
             )
             if match:
                 url = match.group(1)
                 if url.startswith("/"):
-                    url = f"{INTERNAL_SERVER_URL}{url}"
+                    url = f"{server_url}{url}"
                 return url
         if filename.endswith(".wav"):
             match = re.search(r'<source src="([^"]+)"[^>]*type="audio/', html_content)
             if match:
                 url = match.group(1)
                 if url.startswith("/"):
-                    url = f"{INTERNAL_SERVER_URL}{url}"
+                    url = f"{server_url}{url}"
                 return url
+
     if filename == "messages.json":
-        return f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/messages.json"
+        return f"{server_url}/archivemediafile/{session_id}/messages.json"
     if filename.endswith(".vtt"):
         label = filename.replace(".vtt", "")
-        return f"{INTERNAL_SERVER_URL}/archivemedia/{session_id}/vtt/{label}"
+        return f"{server_url}/archivemedia/{session_id}/vtt/{label}"
     if filename == "video.mp4":
-        return f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/video.mp4"
+        return f"{server_url}/archivemediafile/{session_id}/video.mp4"
     if filename.endswith(".wav"):
         encoded_name = filename.replace(" ", "%20")
-        return f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/{encoded_name}"
+        return f"{server_url}/archivemediafile/{session_id}/{encoded_name}"
     encoded_name = filename.replace(" ", "%20")
-    return f"{INTERNAL_SERVER_URL}/archivesession/{session_id}/{encoded_name}"
+    return f"{server_url}/archivesession/{session_id}/{encoded_name}"
 
 
 # pylint: disable=too-many-locals,too-many-branches,too-many-statements
@@ -1285,27 +1468,25 @@ def _get_session_download_lock(session_id: str) -> threading.Lock:
             _session_download_locks[session_id] = lock
         return lock
 
-def download_session_files(session_id, token):
-    """Download the media files and transcripts associated with a session.
 
-    Serialised per session_id: concurrent callers (the background worker
-    and /session_output) will queue up instead of racing each other.
-    """
+def download_session_files(session_id, token, server_url=None):
+    """Download the media files and transcripts associated with a session."""
+    if not server_url:
+        server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
+    server_url = server_url.rstrip("/")
+
     lock = _get_session_download_lock(session_id)
     if not lock.acquire(blocking=False):
-        # Another thread is already downloading this session. Wait for it
-        # to finish, then return — the files are already there.
         lock.acquire()
         lock.release()
         logging.info(
             "download_session_files: %s already downloaded by another "
-            "thread, skipping", _short_sid(session_id),
+            "thread, skipping",
+            _short_sid(session_id),
         )
         return True
 
     try:
-        # Re-check under the lock — the other thread may have already
-        # finished between _session_files_look_incomplete() and here.
         session_dir = os.path.join(SESSION_FOLDER, session_id)
         if not _session_files_look_incomplete(session_dir):
             logging.info(
@@ -1313,24 +1494,31 @@ def download_session_files(session_id, token):
                 _short_sid(session_id),
             )
             return True
-        return _download_session_files_locked(session_id, token)
+        return _download_session_files_locked(session_id, token, server_url)
     finally:
         lock.release()
 
 
-def _download_session_files_locked(session_id, token):
+def _download_session_files_locked(session_id, token, server_url):
     """Download the media files and transcripts associated with a session."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
     os.makedirs(session_dir, exist_ok=True)
 
+    server_url = (server_url or INTERNAL_SERVER_URL).rstrip("/")
+
+    if _is_cancelled(session_id):
+        raise _JobCancelled(
+            f"Session {_short_sid(session_id)} cancelled before download"
+        )
+
     logging.info("=" * 60)
-    logging.info("Downloading session %s", session_id)
+    logging.info("Downloading session %s from %s", session_id, server_url)
     _job_log(
         session_id, "Downloading session files…", stage="downloading", progress=0.35
     )
 
     html_path = os.path.join(session_dir, "index.html")
-    html_url = f"{INTERNAL_SERVER_URL}/archivesession/{session_id}"
+    html_url = f"{server_url}/archivesession/{session_id}"
 
     if curl_download(html_url, html_path, token):
         logging.info("Downloaded index.html")
@@ -1349,7 +1537,11 @@ def _download_session_files_locked(session_id, token):
         pass
 
     # Video
-    video_url = get_actual_file_url(session_id, "video.mp4", html_content)
+    if _is_cancelled(session_id):
+        raise _JobCancelled(
+            f"Session {_short_sid(session_id)} cancelled before video download"
+        )
+    video_url = get_actual_file_url(session_id, "video.mp4", server_url, html_content)
     video_path = os.path.join(session_dir, "video.mp4")
     if curl_download(video_url, video_path, token):
         logging.info("Downloaded video.mp4")
@@ -1364,6 +1556,10 @@ def _download_session_files_locked(session_id, token):
         _job_log(session_id, "Failed to download video.mp4", level="warning")
 
     # Subtitles
+    if _is_cancelled(session_id):
+        raise _JobCancelled(
+            f"Session {_short_sid(session_id)} cancelled before subtitle download"
+        )
     try:
         track_matches = re.findall(
             r'<track label="([^"]+)" kind="subtitles" src="([^"]+)"',
@@ -1371,7 +1567,7 @@ def _download_session_files_locked(session_id, token):
         )
         for label, src in track_matches:
             if src.startswith("/"):
-                src = f"{INTERNAL_SERVER_URL}{src}"
+                src = f"{server_url}{src}"
             file_name = f"subtitles_{label}.vtt"
             file_path = os.path.join(session_dir, file_name)
             if curl_download(src, file_path, token):
@@ -1385,12 +1581,16 @@ def _download_session_files_locked(session_id, token):
         logging.warning("Could not download subtitles: %s", e)
 
     # Audio (if present)
+    if _is_cancelled(session_id):
+        raise _JobCancelled(
+            f"Session {_short_sid(session_id)} cancelled before audio download"
+        )
     try:
         audio_match = re.search(r'<source src="([^"]+)"[^>]*type="audio/', html_content)
         if audio_match:
             audio_url = audio_match.group(1)
             if audio_url.startswith("/"):
-                audio_url = f"{INTERNAL_SERVER_URL}{audio_url}"
+                audio_url = f"{server_url}{audio_url}"
             audio_path = os.path.join(session_dir, "audio.wav")
             if curl_download(audio_url, audio_path, token):
                 logging.info("Downloaded audio.wav")
@@ -1400,7 +1600,11 @@ def _download_session_files_locked(session_id, token):
         logging.warning("Could not download audio: %s", e)
 
     # messages.json
-    messages_url = f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/messages.json"
+    if _is_cancelled(session_id):
+        raise _JobCancelled(
+            f"Session {_short_sid(session_id)} cancelled before messages.json download"
+        )
+    messages_url = f"{server_url}/archivemediafile/{session_id}/messages.json"
     messages_path = os.path.join(session_dir, "messages.json")
     if curl_download(messages_url, messages_path, token):
         logging.info(
@@ -1451,7 +1655,9 @@ def _download_session_files_locked(session_id, token):
     ]
 
     logging.info("=" * 60)
-    logging.info("Session %s: Downloaded %s files total", _short_sid(session_id), len(files))
+    logging.info(
+        "Session %s: Downloaded %s files total", _short_sid(session_id), len(files)
+    )
     for f in files:
         size = os.path.getsize(os.path.join(session_dir, f))
         logging.info("  - %s (%d bytes)", f, size)
@@ -1581,17 +1787,17 @@ def extract_transcripts_from_messages(messages_path):
                                 logging.warning(
                                     "extract: message with no text field "
                                     "(sender=%r, keys=%s)",
-                                    sender, sorted(msg_data.keys()),
+                                    sender,
+                                    sorted(msg_data.keys()),
                                 )
                             continue
 
                         if sender in language_map:
                             lang_name = language_map[sender]
                         else:
-                            lang_name = (
-                                numeric_language_map.get(lang_id)
-                                or get_language_name_from_sender(sender, lang_id)
-                        )
+                            lang_name = numeric_language_map.get(
+                                lang_id
+                            ) or get_language_name_from_sender(sender, lang_id)
 
                         existing = next(
                             (t for t in transcripts if t.get("language") == lang_name),
@@ -1654,6 +1860,7 @@ def extract_transcripts_from_messages(messages_path):
 
     return []
 
+
 def extract_language_from_sender(sender, lang_id, numeric_language_map):
     """Extract a full language name from a sender string."""
     if lang_id in numeric_language_map:
@@ -1687,6 +1894,7 @@ def extract_language_from_sender(sender, lang_id, numeric_language_map):
             return f"Transcript ({name})"
 
     return f"Transcript (Language {lang_id})"
+
 
 def get_language_name_from_sender(sender, lang_id):
     """Get a human-readable language name from a sender string (fallback)."""
@@ -1776,12 +1984,14 @@ def organize_transcripts(transcripts):
     result.sort(key=sort_key)
     return result
 
+
 def _is_original_asr_language(language: str) -> bool:
     """True for the ASR track that reflects what the speaker actually said."""
     if not language:
         return False
     lower = language.lower()
     return "original" in lower or "asr" in lower
+
 
 def generate_vtt_files_from_transcripts(session_dir):
     """Materialise per-language .vtt files from transcripts.json."""
@@ -1799,7 +2009,7 @@ def generate_vtt_files_from_transcripts(session_dir):
         return []
 
     written = []
-    default_path = None            # was: english_path
+    default_path = None  # was: english_path
 
     for transcript in transcripts:
         language = transcript.get("language", "")
@@ -1843,9 +2053,7 @@ def generate_vtt_files_from_transcripts(session_dir):
 
         if cue_index == 0:
             # Don't write a header-only VTT
-            logging.info(
-                "generate_vtt: no cues for language %r, skipping", language
-            )
+            logging.info("generate_vtt: no cues for language %r, skipping", language)
             continue
 
         with open(vtt_path, "w", encoding="utf-8") as f:
@@ -3357,9 +3565,7 @@ def session_transcript_save_vtt(session_id):
             transcripts.append(
                 {
                     "language": language,
-                    "text": " ".join(
-                        s.get("text", "") for s in filtered_segments
-                    ),
+                    "text": " ".join(s.get("text", "") for s in filtered_segments),
                     "segments": filtered_segments,
                     "sender": (
                         filtered_segments[0].get("sender", "")
@@ -3403,9 +3609,7 @@ def session_transcript_save_vtt(session_id):
                 vtt_filename = existing_vtt
             else:
                 clean_lang = (
-                    simple_name.replace(" ", "_")
-                    .replace("(", "")
-                    .replace(")", "")
+                    simple_name.replace(" ", "_").replace("(", "").replace(")", "")
                 )
                 vtt_filename = f"subtitles_{clean_lang}.vtt"
 
@@ -3423,8 +3627,7 @@ def session_transcript_save_vtt(session_id):
             cue_index += 1
             vtt_lines.append(str(cue_index))
             vtt_lines.append(
-                f"{_format_vtt_timestamp(start)} --> "
-                f"{_format_vtt_timestamp(end)}"
+                f"{_format_vtt_timestamp(start)} --> " f"{_format_vtt_timestamp(end)}"
             )
 
             speaker_name = seg.get("speakerName") or seg.get("speaker_name")
@@ -3464,9 +3667,7 @@ def session_transcript_save_vtt(session_id):
                             f"[{markup}] {text}\n"
                         )
                     else:
-                        f.write(
-                            f"[{start:.1f}s - {end:.1f}s] [{sender}] {text}\n"
-                        )
+                        f.write(f"[{start:.1f}s - {end:.1f}s] [{sender}] {text}\n")
                 f.write("\n")
 
         logging.info(
@@ -3561,6 +3762,7 @@ def _extract_simple_language_name(language):
 
     return clean or "Unknown"
 
+
 @app.route("/update_video_subtitles/<path:session_id>", methods=["POST"])
 def update_video_subtitles(session_id):
     """
@@ -3579,7 +3781,8 @@ def update_video_subtitles(session_id):
 
     if not os.path.exists(video_path):
         logging.warning(
-            "update_video_subtitles: video.mp4 missing for session %s", _short_sid(session_id)
+            "update_video_subtitles: video.mp4 missing for session %s",
+            _short_sid(session_id),
         )
         return jsonify({"error": "video.mp4 not found"}), 404
 
@@ -3957,13 +4160,31 @@ def _get_language_code(language_name):
 
     return None
 
+
 _ISO2_TO_ISO3 = {
-    "en": "eng", "de": "deu", "fr": "fra", "es": "spa", "it": "ita",
-    "pt": "por", "nl": "nld", "ru": "rus", "ja": "jpn", "ko": "kor",
-    "zh": "zho", "ar": "ara", "hi": "hin", "pl": "pol", "tr": "tur",
-    "uk": "ukr", "vi": "vie", "th": "tha", "id": "ind", "ms": "msa",
+    "en": "eng",
+    "de": "deu",
+    "fr": "fra",
+    "es": "spa",
+    "it": "ita",
+    "pt": "por",
+    "nl": "nld",
+    "ru": "rus",
+    "ja": "jpn",
+    "ko": "kor",
+    "zh": "zho",
+    "ar": "ara",
+    "hi": "hin",
+    "pl": "pol",
+    "tr": "tur",
+    "uk": "ukr",
+    "vi": "vie",
+    "th": "tha",
+    "id": "ind",
+    "ms": "msa",
     "fa": "fas",
 }
+
 
 def _get_language_code_iso3(language_name):
     """3-letter ISO-639-2/T code for ffmpeg / MP4 metadata."""
@@ -3984,14 +4205,8 @@ def _internal_cookies(token: str) -> dict:
     return {"_forward_auth": token}
 
 
-def _remote_size(url: str, token: str, timeout: int = 20) -> int:
-    """Return the total size of a remote file via a 1-byte Range GET.
-
-    Falls back to Content-Length if the server ignores Range.
-    Takes a token string, not a prebuilt headers dict — this prevents
-    the caller from accidentally passing the wrong type (which used to
-    raise 'object is not iterable' inside dict(headers)).
-    """
+def _remote_size(url: str, token: str, timeout: int = 20) -> tuple[int, int]:
+    """Return (size, status_code). size=0 on error."""
     headers = _internal_headers(token)
     headers["Range"] = "bytes=0-0"
 
@@ -4005,10 +4220,11 @@ def _remote_size(url: str, token: str, timeout: int = 20) -> int:
             stream=True,
             allow_redirects=True,
         ) as r:
-            cr = r.headers.get("Content-Range", "")  # "bytes 0-0/152217"
+            status = r.status_code
+            cr = r.headers.get("Content-Range", "")
             if "/" in cr:
                 try:
-                    return int(cr.rsplit("/", 1)[-1])
+                    return int(cr.rsplit("/", 1)[-1]), status
                 except ValueError:
                     pass
             cl = r.headers.get("Content-Length")
@@ -4016,28 +4232,38 @@ def _remote_size(url: str, token: str, timeout: int = 20) -> int:
                 try:
                     n = int(cl)
                     if n > 1:
-                        return n
+                        return n, status
                 except ValueError:
                     pass
+            return 0, status
     except requests.exceptions.RequestException as e:
         logging.warning("Range GET failed for %s: %s", url, e)
-    return 0
+    return 0, 0
 
 
 # ─── SESSION COMPLETENESS GATES ─────────────────────────────────────────
-MIN_MESSAGES_BYTES = 5_000    # tune to your smallest realistic session
+MIN_MESSAGES_BYTES = 5_000  # tune to your smallest realistic session
 _STABLE_NEEDED = 3
 
 
-def _fetch_messages_json_size(session_id: str, token: str) -> int:
-    """Cheap HEAD-style size probe against the internal messages.json."""
-    url = f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/messages.json"
+def _fetch_messages_json_size(session_id, token, server_url=None):
+    """Cheap HEAD-style size probe against the internal messages.json.
+
+    Returns (size, status_code). size=0 on error.
+    """
+    if not server_url:
+        server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
+    server_url = server_url.rstrip("/")
+    url = f"{server_url}/archivemediafile/{session_id}/messages.json"
     return _remote_size(url, token)
 
 
-def _fetch_messages_json_bytes(session_id: str, token: str) -> bytes:
+def _fetch_messages_json_bytes(session_id, token, server_url=None):
     """Download the full messages.json from the internal server."""
-    url = f"{INTERNAL_SERVER_URL}/archivemediafile/{session_id}/messages.json"
+    if not server_url:
+        server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
+    server_url = server_url.rstrip("/")
+    url = f"{server_url}/archivemediafile/{session_id}/messages.json"
     try:
         r = requests.get(
             url,
@@ -4049,15 +4275,103 @@ def _fetch_messages_json_bytes(session_id: str, token: str) -> bytes:
         )
         if r.status_code == 200:
             return r.content
-        logging.warning(
-            "fetch_messages_json: HTTP %s for %s", r.status_code, url
-        )
+        logging.warning("fetch_messages_json: HTTP %s for %s", r.status_code, url)
     except requests.exceptions.RequestException as e:
         logging.warning("fetch_messages_json failed: %s", e)
     return b""
 
-def _messages_look_done(raw: bytes) -> bool:
-    """Return True only when we have both ASR content AND translation content."""
+
+def _extract_translation_codes(raw: bytes) -> set[str]:
+    """Return the set of language codes for every `mt:`/`translation:` track.
+
+    A code is derived from the sender via `_get_language_code` (which
+    understands `"mt:de"`, `"mt:German"`, `"de"`, etc.). If no ISO code
+    can be resolved, the raw suffix is used instead so that distinct
+    opaque tracks (e.g. `mt:42`) are still distinguishable.
+    """
+    codes: set[str] = set()
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return codes
+    if not isinstance(data, list):
+        return codes
+
+    for item in data:
+        if not (isinstance(item, list) and len(item) >= 2):
+            continue
+        try:
+            m = json.loads(item[1]) if isinstance(item[1], str) else item[1]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(m, dict):
+            continue
+        if not m.get("seq", "").strip():
+            continue
+        sender = m.get("sender", "")
+        if not (sender.startswith("mt:") or sender.startswith("translation:")):
+            continue
+        code = _get_language_code(sender)
+        if code:
+            codes.add(code.lower())
+            continue
+        suffix = sender.split(":", 1)[1].strip() if ":" in sender else sender
+        codes.add(suffix.lower() or sender.lower())
+    return codes
+
+
+def _normalise_expected_codes(expected_langs) -> set[str]:
+    """Turn whatever the client sent (codes, names, mixes) into a set of
+    lowercase codes. Unknown entries are kept as-is so they still show up
+    in the log when we report what's missing.
+    """
+    result: set[str] = set()
+    if not expected_langs:
+        return result
+    if isinstance(expected_langs, str):
+        expected_langs = [expected_langs]
+    for lang in expected_langs:
+        if not lang:
+            continue
+        code = _get_language_code(lang)
+        result.add(code.lower() if code else str(lang).lower())
+    return result
+
+
+# How close a translation's last cue must be to the ASR track's last
+# cue before we consider the translation "complete". Two thresholds,
+# both accepted: an absolute slack (seconds) for short videos, and a
+# fraction of the total for long ones.
+_MT_COVERAGE_MIN_FRACTION = 0.95
+_MT_COVERAGE_SLACK_SECONDS = 20.0
+
+
+def _coverage_is_ok(mt_end: float, asr_end: float) -> bool:
+    """True when mt_end is 'close enough' to the end of the ASR track."""
+    if asr_end <= 0:
+        return True
+    if mt_end >= asr_end - _MT_COVERAGE_SLACK_SECONDS:
+        return True
+    return (mt_end / asr_end) >= _MT_COVERAGE_MIN_FRACTION
+
+
+def _messages_look_done(raw: bytes, expected_langs=None) -> bool:
+    """Return True once every MT track covers the ASR span.
+
+    Language-ID caveat:
+      In messages.json the internal server identifies translation tracks
+      by *numeric* IDs (`mt:0`, `mt:1`, …), not ISO codes. Those IDs are
+      only resolvable to language names via the outer `[lang_id, payload]`
+      pairing, which is not available here. So we do NOT try to match
+      `expected_langs` against individual tracks. Instead we require:
+
+        1. ASR content present (>=5 messages).
+        2. At least one MT track if the caller asked for any.
+        3. Every existing MT track ends close to the ASR end.
+
+      That catches the "translation stops at minute 3 of a 45-minute
+      video" problem without relying on a mapping we don't have.
+    """
     if not raw or len(raw) < MIN_MESSAGES_BYTES:
         return False
     try:
@@ -4068,26 +4382,125 @@ def _messages_look_done(raw: bytes) -> bool:
         return False
 
     asr_count = 0
-    mt_count = 0
+    asr_max_end = 0.0
+    # sender -> max end seen for that track
+    mt_tracks: dict[str, float] = {}
+
     for item in data:
         if not (isinstance(item, list) and len(item) >= 2):
             continue
         try:
             m = json.loads(item[1]) if isinstance(item[1], str) else item[1]
-        except Exception:
+        except (TypeError, ValueError, json.JSONDecodeError):
             continue
         if not isinstance(m, dict):
             continue
         if not m.get("seq", "").strip():
             continue
-        s = m.get("sender", "")
-        if s.startswith("asr:"):
-            asr_count += 1
-        elif s.startswith("mt:") or s.startswith("translation:"):
-            mt_count += 1
+        try:
+            end = float(m.get("end", 0) or 0)
+        except (ValueError, TypeError):
+            end = 0.0
+        sender = m.get("sender", "")
 
-    # Require at least a handful of ASR messages AND at least one translated message
-    return asr_count >= 5 and mt_count >= 1
+        if sender.startswith("asr:"):
+            asr_count += 1
+            if end > asr_max_end:
+                asr_max_end = end
+        elif sender.startswith("mt:") or sender.startswith("translation:"):
+            if end > mt_tracks.get(sender, 0.0):
+                mt_tracks[sender] = end
+
+    if asr_count < 5 or asr_max_end <= 0:
+        return False
+
+    if expected_langs and not mt_tracks:
+        logging.info("messages.json has ASR but no MT tracks yet")
+        return False
+
+    incomplete = []
+    for sender, mt_end in mt_tracks.items():
+        if not _coverage_is_ok(mt_end, asr_max_end):
+            incomplete.append(f"{sender} covers {mt_end:.0f}s of {asr_max_end:.0f}s")
+
+    if incomplete:
+        logging.info(
+            "messages.json stable but MT tracks still short: %s",
+            "; ".join(incomplete),
+        )
+        return False
+
+    if mt_tracks:
+        logging.info(
+            "messages.json: %d MT track(s), all covering up to %.0fs",
+            len(mt_tracks),
+            asr_max_end,
+        )
+    return True
+
+
+# How often to re-fetch messages.json purely to refresh the progress
+# bar. The stability check already fetches it occasionally; this adds
+# a periodic tick so the bar moves even while the file is growing.
+_PROGRESS_FETCH_INTERVAL = 30.0
+
+
+def _compute_translation_progress(raw: bytes) -> tuple[float, float]:
+    """Return (mt_max_end_seconds, asr_max_end_seconds).
+
+    Either value may be 0.0 when the corresponding track has not
+    produced any segment yet.
+    """
+    mt_max_end = 0.0
+    asr_max_end = 0.0
+    if not raw:
+        return mt_max_end, asr_max_end
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return mt_max_end, asr_max_end
+    if not isinstance(data, list):
+        return mt_max_end, asr_max_end
+
+    for item in data:
+        if not (isinstance(item, list) and len(item) >= 2):
+            continue
+        try:
+            m = json.loads(item[1]) if isinstance(item[1], str) else item[1]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(m, dict):
+            continue
+        if not m.get("seq", "").strip():
+            continue
+        try:
+            end = float(m.get("end", 0) or 0)
+        except (ValueError, TypeError):
+            end = 0.0
+        sender = m.get("sender", "")
+        if sender.startswith("asr:"):
+            if end > asr_max_end:
+                asr_max_end = end
+        elif sender.startswith("mt:") or sender.startswith("translation:"):
+            if end > mt_max_end:
+                mt_max_end = end
+    return mt_max_end, asr_max_end
+
+
+def _session_video_duration(session_id: str) -> float:
+    """Look up the source video duration for a session, in seconds."""
+    sess = sessions.get(session_id) or {}
+    video_key = sess.get("video_key")
+    if not video_key:
+        return 0.0
+    for v in videos:
+        if v.get("key") == video_key:
+            try:
+                return float(v.get("duration") or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
 
 def _count_messages(raw: bytes) -> int:
     """Best-effort count of messages inside a messages.json blob."""
@@ -4105,34 +4518,49 @@ def _count_messages(raw: bytes) -> int:
     return 0
 
 
-def wait_for_session_ready(session_id, token, timeout=1800):
-    """Block until the internal server finishes producing messages.json.
+def wait_for_session_ready(
+    session_id, token, server_url=None, expected_langs=None, timeout=1800
+):
+    """Block until the internal server finishes producing messages.json."""
+    if not server_url:
+        server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
+    server_url = server_url.rstrip("/")
 
-    Returns True once the file is stable (same size N polls in a row),
-    large enough to be a real transcript, and parses as valid JSON.
-    Raises TimeoutError if that never happens within `timeout` seconds.
-    """
     started = time.time()
     last_size = -1
     stable_count = 0
+    unauthorized_count = 0
+    last_progress_fetch = 0.0
 
     while True:
+        if _is_cancelled(session_id):
+            raise _JobCancelled(f"Session {_short_sid(session_id)} cancelled by user")
+
         elapsed = time.time() - started
         if elapsed > timeout:
             raise TimeoutError(
                 f"Session {_short_sid(session_id)} not ready after {timeout}s"
             )
 
-        # Warm-up: don't hammer the internal server while it's still
-        # assembling the session directory.
         if elapsed < 15:
             time.sleep(1)
             continue
 
-        size = _fetch_messages_json_size(session_id, token)
+        size, status = _fetch_messages_json_size(session_id, token, server_url)
 
-        # Reset the counter if the file is still a placeholder (0 bytes,
-        # a 1 KB error page, etc.) or if the size changed.
+        if status == 401:
+            unauthorized_count += 1
+            if unauthorized_count >= 5:
+                raise PermissionError(
+                    f"Token rejected by {server_url} (HTTP 401). "
+                    f"The token is either expired or was issued by a "
+                    f"different server."
+                )
+        else:
+            unauthorized_count = 0
+
+        size_changed = size != last_size
+
         plausible = size >= MIN_MESSAGES_BYTES
         if plausible and size == last_size:
             stable_count += 1
@@ -4140,18 +4568,61 @@ def wait_for_session_ready(session_id, token, timeout=1800):
             stable_count = 0
         last_size = size
 
-        logging.info(
-            "Session %s: messages.json size=%d (stable=%d/%d)",
-            _short_sid(session_id), size, stable_count, _STABLE_NEEDED,
-        )
+        # Only log when the size actually moved, or on the first and
+        # last poll of each stability window. Skips the "same size
+        # every 2 s" chatter that dominated the console.
+        if size_changed or stable_count in (1, _STABLE_NEEDED):
+            logging.info(
+                "Session %s: messages.json size=%d status=%d (stable=%d/%d)",
+                _short_sid(session_id),
+                size,
+                status,
+                stable_count,
+                _STABLE_NEEDED,
+            )
+
+        # ── Progress tick ────────────────────────────────────────────
+        # Every _PROGRESS_FETCH_INTERVAL seconds, fetch the file again,
+        # parse the ASR/MT end timestamps, and push a fraction of the
+        # video duration to the panel. This is separate from the
+        # stability check so the bar moves smoothly even while the
+        # file is still growing.
+        now = time.time()
+        if now - last_progress_fetch >= _PROGRESS_FETCH_INTERVAL:
+            last_progress_fetch = now
+            raw_for_progress = _fetch_messages_json_bytes(session_id, token, server_url)
+            mt_end, asr_end = _compute_translation_progress(raw_for_progress)
+            video_dur = _session_video_duration(session_id)
+
+            if video_dur > 0:
+                if mt_end > 0:
+                    prog = min(mt_end / video_dur, 0.99)
+                    _job_log(
+                        session_id,
+                        f"Translations cover {mt_end:.0f}s / "
+                        f"{video_dur:.0f}s ({prog * 100:.0f}%)",
+                        stage="translating",
+                        progress=prog,
+                    )
+                elif asr_end > 0:
+                    # ASR done, translations not started yet — show a
+                    # small sliver so the bar isn't stuck at zero.
+                    prog = min((asr_end / video_dur) * 0.05, 0.05)
+                    _job_log(
+                        session_id,
+                        f"Transcribing… {asr_end:.0f}s / " f"{video_dur:.0f}s",
+                        stage="transcribing",
+                        progress=prog,
+                    )
 
         if stable_count >= _STABLE_NEEDED:
-            # Final gate: actually download and parse it.
-            raw = _fetch_messages_json_bytes(session_id, token)
-            if _messages_look_done(raw):
+            raw = _fetch_messages_json_bytes(session_id, token, server_url)
+            if _messages_look_done(raw, expected_langs):
                 logging.info(
                     "✅ Session %s appears complete (%d bytes, %d msgs)",
-                    _short_sid(session_id), len(raw), _count_messages(raw),
+                    _short_sid(session_id),
+                    len(raw),
+                    _count_messages(raw),
                 )
                 return True
             logging.warning(
@@ -4163,18 +4634,44 @@ def wait_for_session_ready(session_id, token, timeout=1800):
 
         time.sleep(2)
 
-def process_session_in_background(session_id, token, video_key, expected_mt=None):
+
+def process_session_in_background(
+    session_id, token, video_key, server_url=None, expected_mt=None
+):
     """Wait for the internal server to finish, then download the session.
 
     Runs in a daemon thread, started right after a successful upload.
     Everything logged from this thread is auto-routed to this session's
     JobProgressPanel via the _log_target contextvar, so the Flutter UI
     sees the same stream as the terminal.
+
+    `expected_mt` is the list of translation target languages the client
+    asked for. The readiness gate will not fire until every one of them
+    has at least one message in messages.json.
     """
-    # 👇 everything logged from this thread now lands in this session's panel
+    if not server_url:
+        server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
+    server_url = server_url.rstrip("/")
+
+    # Fall back to what the upload endpoint recorded for this session.
+    if not expected_mt:
+        expected_mt = sessions.get(session_id, {}).get("expected_mt")
+    if isinstance(expected_mt, str):
+        expected_mt = [expected_mt]
+
+    # Clear any stale cancel flag so a rerun of the same session id
+    # doesn't get killed instantly.
+    _clear_cancel(session_id)
+
     token_cv = _log_target.set(("job", session_id))
     try:
-        logging.info("🟢 [BG] Starting background processing for %s", _short_sid(session_id))
+        logging.info(
+            "🟢 [BG] Starting background processing for %s on %s "
+            "(waiting for translations: %s)",
+            _short_sid(session_id),
+            server_url,
+            expected_mt or "any",
+        )
         session_name = sessions.get(session_id, {}).get("name", session_id)
         _job_start(session_id, video_key, session_name)
         _job_log(
@@ -4184,14 +4681,16 @@ def process_session_in_background(session_id, token, video_key, expected_mt=None
             progress=0.02,
         )
 
-        ready = wait_for_session_ready(session_id, token)
+        ready = wait_for_session_ready(
+            session_id, token, server_url, expected_langs=expected_mt
+        )
         if not ready:
             logging.warning(
                 "Session %s never stabilized; downloading what we have",
                 _short_sid(session_id),
             )
 
-        ok = download_session_files(session_id, token)
+        ok = download_session_files(session_id, token, server_url)
 
         job = jobs.get(session_id)
         if job:
@@ -4202,15 +4701,38 @@ def process_session_in_background(session_id, token, video_key, expected_mt=None
         _job_finish(session_id, error=None if ok else "Partial download")
         logging.info("✅ Background download finished for %s", _short_sid(session_id))
 
-    except (requests.exceptions.RequestException, OSError, subprocess.SubprocessError,
-            TimeoutError, ValueError, TypeError, KeyError, RuntimeError) as e:
+    except _JobCancelled as e:
+        logging.warning(
+            "🛑 Background processing cancelled for %s: %s",
+            _short_sid(session_id),
+            e,
+        )
+        job = jobs.get(session_id)
+        if job:
+            job["status"] = "cancelled"
+            job["progress"] = 0.0
+        _job_cancel(session_id)
+        save_state()
+    except (
+        requests.exceptions.RequestException,
+        OSError,
+        subprocess.SubprocessError,
+        TimeoutError,
+        ValueError,
+        TypeError,
+        KeyError,
+        RuntimeError,
+    ) as e:
         logging.error(
             "Background session processing failed for %s: %s",
-            _short_sid(session_id), e, exc_info=True,
+            _short_sid(session_id),
+            e,
+            exc_info=True,
         )
         _job_finish(session_id, error=f"{type(e).__name__}: {e}")
     finally:
         _log_target.reset(token_cv)
+
 
 @app.route("/extract_video_subtitles/<path:session_id>", methods=["GET"])
 def extract_video_subtitles(session_id):
@@ -4744,6 +5266,7 @@ def _is_meaningful_file(path: str) -> bool:
         return size > 20
     return size > 1000
 
+
 @app.route("/session_output/<path:session_id>", methods=["GET"])
 def get_session_output(session_id):
     """Get the session output as a JSON response with file URLs."""
@@ -4754,12 +5277,14 @@ def get_session_output(session_id):
         token = request.cookies.get("_forward_auth", "")
 
     # Only download if files don't exist or are very small
+    server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
     if token and _session_files_look_incomplete(session_dir):
         logging.info(
-            "Session %s looks incomplete — re-downloading from internal server",
+            "Session %s looks incomplete — re-downloading from %s",
             _short_sid(session_id),
+            server_url,
         )
-        download_session_files(session_id, token)
+        download_session_files(session_id, token, server_url)
 
     files = []
     if os.path.exists(session_dir):
@@ -5230,6 +5755,7 @@ def session_refresh(session_id):
 
 @app.route("/session_resync/<path:session_id>", methods=["POST"])
 def session_resync(session_id):
+    """Force a full re-download of a session from the internal server."""
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
         return jsonify({"error": "No token"}), 401
@@ -5253,18 +5779,21 @@ def _session_files_look_incomplete(session_dir):
     try:
         with open(transcripts, "r", encoding="utf-8") as f:
             ts = json.load(f)
-    except Exception:
+    except (json.JSONDecodeError, TypeError, ValueError):
         return True
 
     # How many languages did we actually extract text for?
     languages_with_text = [
-        t for t in ts
+        t
+        for t in ts
         if any(seg.get("text", "").strip() for seg in t.get("segments", []))
     ]
 
     vtt_files = [
-        f for f in os.listdir(session_dir)
-        if f.startswith("subtitles_") and f.endswith(".vtt")
+        f
+        for f in os.listdir(session_dir)
+        if f.startswith("subtitles_")
+        and f.endswith(".vtt")
         and os.path.getsize(os.path.join(session_dir, f)) > 20
     ]
 
@@ -5272,6 +5801,7 @@ def _session_files_look_incomplete(session_dir):
     if len(vtt_files) < len(languages_with_text):
         return True
     return False
+
 
 @app.route("/api/youtube-download-and-upload", methods=["POST", "OPTIONS"])
 def youtube_download_and_upload():
@@ -5913,7 +6443,12 @@ def upload_lecture():
     #     guarantees the handle is released before we re-open for reading.
     temp_multipart_path = None
     try:
-        logging.info("Uploading to internal server: %s", TARGET_URL)
+        # Resolve which internal server this upload should go to.
+        # Form value wins, but only if it is on the allow-list.
+        target_url = _resolve_target_url(request.form.get("targetServer"))
+        base_url = target_url.rsplit("/upload_lecture", 1)[0]
+
+        logging.info("Uploading to internal server: %s", target_url)
         logging.info("Data keys: %s", list(data.keys()))
         logging.info("File size: %d bytes", file_size)
 
@@ -5983,7 +6518,7 @@ def upload_lecture():
 
         with open(temp_multipart_path, "rb") as body_file:
             resp = requests.post(
-                TARGET_URL,
+                target_url,
                 data=body_file,
                 headers=headers_with_length,
                 cookies=cookies,
@@ -6013,25 +6548,53 @@ def upload_lecture():
             session_id = final_url.split("/session/")[-1].split("/")[0]
             logging.info("Extracted session ID from URL: %s", session_id)
 
-        if not session_id and session_name:
+        if not session_id and session_name and resp.status_code < 400:
             user_email = data.get("path", "/home/admin@example.com")
             user_email = user_email.strip("/").split("/")[-1]
             path = f"/home/{user_email}/{session_name}"
             session_id = base64.b64encode(path.encode()).decode()
-            logging.info("Generated session ID: %s", session_id)
+            logging.info("Generated fallback session ID: %s", session_id)
+
+        if not session_id:
+            logging.error(
+                "Upload to %s returned %s without a session id. Body: %s",
+                target_url,
+                resp.status_code,
+                resp.text[:500],
+            )
+            return (
+                jsonify(
+                    {
+                        "error": "Upload did not produce a session id",
+                        "status_code": resp.status_code,
+                        "response_preview": resp.text[:500],
+                    }
+                ),
+                502,
+            )
 
         content = resp.text
 
         # ─── 8. Register session + start background download ──────
         if session_id:
             project["session_id"] = session_id
-            project["session_url"] = f"{BASE_URL}/archivesession/{session_id}"
+            project["session_url"] = f"{base_url}/archivesession/{session_id}"
+
+            # Collect the requested target languages *before* recording
+            # the session, so both stay in sync.
+            expected_mt = request.form.getlist("mtLanguage") or ["de"]
+            logging.info("Expected translation languages: %s", expected_mt)
+
+            _clear_cancel(session_id)
+
             sessions[session_id] = {
                 "id": session_id,
                 "name": session_name,
                 "video_key": video_key,
                 "created_at": utc_now_iso(),
-                "url": f"{BASE_URL}/archivesession/{session_id}",
+                "url": f"{base_url}/archivesession/{session_id}",
+                "server": base_url,
+                "expected_mt": expected_mt,
             }
             logging.info("Session created: %s", session_id)
 
@@ -6053,7 +6616,7 @@ def upload_lecture():
 
             threading.Thread(
                 target=process_session_in_background,
-                args=(session_id, token, video_key, expected_mt),   
+                args=(session_id, token, video_key, base_url, expected_mt),
                 daemon=True,
             ).start()
             save_state()
@@ -6066,7 +6629,7 @@ def upload_lecture():
                     {
                         "session_id": session_id,
                         "video_key": video_key,
-                        "session_url": f"{BASE_URL}/archivesession/{session_id}",
+                        "session_url": f"{base_url}/archivesession/{session_id}",
                         "output_url": f"/session_output/{session_id}",
                         "download_url": f"/session_zip/{session_id}",
                     }
@@ -6080,7 +6643,7 @@ def upload_lecture():
                             "status": "success",
                             "session_id": session_id,
                             "video_key": video_key,
-                            "session_url": f"{BASE_URL}/archivesession/{session_id}",
+                            "session_url": f"{base_url}/archivesession/{session_id}",
                             "output_url": f"/session_output/{session_id}",
                             "download_url": f"/session_zip/{session_id}",
                             "message": "Upload successful!",
@@ -6219,6 +6782,13 @@ def forward_to_internal(video_key):
 
     temp_multipart_path = None
     try:
+        # Resolve which internal server this upload should go to.
+        # JSON body wins; fall back to a header; fall back to default.
+        target_url = _resolve_target_url(
+            data_in.get("targetServer") or request.headers.get("X-Target-Server")
+        )
+        base_url = target_url.rsplit("/upload_lecture", 1)[0]
+
         # ─── 4. Build the multipart body in a temp file ──────
         total_size = 0
         with tempfile.NamedTemporaryFile(delete=False) as temp_multipart:
@@ -6272,7 +6842,7 @@ def forward_to_internal(video_key):
             "forward_to_internal: uploading %s (%d bytes) to %s",
             file_name,
             file_size,
-            TARGET_URL,
+            target_url,
         )
 
         # ─── 5. POST to the internal server ───────────────────
@@ -6287,7 +6857,7 @@ def forward_to_internal(video_key):
 
         with open(temp_multipart_path, "rb") as body_file:
             resp = requests.post(
-                TARGET_URL,
+                target_url,
                 data=body_file,
                 headers=headers,
                 cookies=cookies,
@@ -6348,15 +6918,25 @@ def forward_to_internal(video_key):
             _job_progress_store.pop(session_id, None)
 
         # ─── 8. Register session + spawn background worker ────
+        # Normalise the requested translation targets before registering
+        # the session, so the recovery path can find them later.
+        expected_mt = data_in.get("mtLanguage") or data_in.get("mt_languages") or ["de"]
+        if isinstance(expected_mt, str):
+            expected_mt = [expected_mt]
+
+        _clear_cancel(session_id)
+
         project["session_id"] = session_id
-        project["session_url"] = f"{BASE_URL}/archivesession/{session_id}"
+        project["session_url"] = f"{base_url}/archivesession/{session_id}"
 
         sessions[session_id] = {
             "id": session_id,
             "name": session_name,
             "video_key": video_key,
             "created_at": utc_now_iso(),
-            "url": f"{BASE_URL}/archivesession/{session_id}",
+            "url": f"{base_url}/archivesession/{session_id}",
+            "server": base_url,
+            "expected_mt": expected_mt,
         }
 
         jobs[session_id] = {
@@ -6368,22 +6948,19 @@ def forward_to_internal(video_key):
             "segments": None,
             "created_at": utc_now_iso(),
             "config": {"source": "forward_to_internal"},
+            "expected_mt": expected_mt,
         }
 
         # forward_to_internal has no form fields, so fall back to the
         # defaults the Flutter client sends in /upload. If you ever add
         # mtLanguage to the JSON body, read it from data_in instead.
-        expected_mt = (
-            data_in.get("mtLanguage")
-            or data_in.get("mt_languages")
-            or ["de"]
-        )
+        expected_mt = data_in.get("mtLanguage") or data_in.get("mt_languages") or ["de"]
         if isinstance(expected_mt, str):
             expected_mt = [expected_mt]
 
         threading.Thread(
             target=process_session_in_background,
-            args=(session_id, token, video_key, expected_mt),
+            args=(session_id, token, video_key, base_url, expected_mt),
             daemon=True,
         ).start()
         save_state()
@@ -6399,9 +6976,9 @@ def forward_to_internal(video_key):
                     "success": True,
                     "session_id": session_id,
                     "video_key": video_key,
-                    "session_url": f"{BASE_URL}/archivesession/{session_id}",
-                    "output_url": f"/session_output/{session_id}",
-                    "download_url": f"/session_zip/{session_id}",
+                    "session_url": f"{base_url}/archivesession/{session_id}",
+                    "output_url": f"{base_url}/session_output/{session_id}",
+                    "download_url": f"{base_url}/session_zip/{session_id}",
                 }
             ),
             200,
@@ -6590,7 +7167,9 @@ if __name__ == "__main__":
             try:
                 os.remove(os.path.join(sess_dir, sess_filename))
                 logging.info(
-                    "🧹 Removed stale video %s in session %s", sess_filename, _short_sid(sess_id)
+                    "🧹 Removed stale video %s in session %s",
+                    sess_filename,
+                    _short_sid(sess_id),
                 )
             except OSError:
                 pass

@@ -1,25 +1,20 @@
-// lib/widgets/job_progress_panel.dart
+// job_progress_panel.dart
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:asr_live_translator/constants.dart';
-import 'package:asr_live_translator/models/job_progress.dart';
 
-/// Polls the server every [pollInterval] and shows live processing state
-/// for a session. Drop this anywhere you have a session_id.
+import 'package:asr_live_translator/constants.dart';
+import 'package:asr_live_translator/services/internal_auth_service.dart';
+
 class JobProgressPanel extends StatefulWidget {
   final String sessionId;
-  final Duration pollInterval;
   final VoidCallback? onComplete;
-  final bool compact;
 
   const JobProgressPanel({
     super.key,
     required this.sessionId,
-    this.pollInterval = const Duration(seconds: 1),
     this.onComplete,
-    this.compact = false,
   });
 
   @override
@@ -27,279 +22,294 @@ class JobProgressPanel extends StatefulWidget {
 }
 
 class _JobProgressPanelState extends State<JobProgressPanel> {
+  static const Duration _pollInterval = Duration(seconds: 2);
+
   Timer? _timer;
-  JobProgress _progress = JobProgress.empty;
-  final ScrollController _logScroll = ScrollController();
-  bool _completedNotified = false;
+  final ScrollController _scroll = ScrollController();
+
+  bool _loading = true;
+  String? _error;
+
+  double _progress = 0.0;
+  String _stage = '';
+  String _message = '';
+  bool _done = false;
+  List<Map<String, dynamic>> _events = [];
 
   @override
   void initState() {
     super.initState();
     _poll();
-    _timer = Timer.periodic(widget.pollInterval, (_) => _poll());
+    _timer = Timer.periodic(_pollInterval, (_) => _poll());
   }
 
   @override
   void dispose() {
     _timer?.cancel();
-    _logScroll.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
-  int _pollCount = 0;
-
   Future<void> _poll() async {
     if (!mounted) return;
-    _pollCount++;
-
-    // Hard cap: ~5 minutes at 1s interval, then give up.
-    if (_pollCount > 300) {
-      _timer?.cancel();
-      if (!_completedNotified) {
-        _completedNotified = true;
-        widget.onComplete?.call();
-      }
-      return;
-    }
     try {
-      final encoded = Uri.encodeComponent(widget.sessionId);
+      final token = await InternalAuthService.getToken();
+      if (token == null || token.isEmpty) return;
+      final url = '$flaskServerUrl/job_progress/${widget.sessionId}';
       final resp = await http.get(
-        Uri.parse('$flaskServerUrl/job_progress/$encoded'),
+        Uri.parse(url),
+        headers: {'Authorization': 'Bearer $token'},
       );
-      if (resp.statusCode != 200 || !mounted) return;
-
+      if (!mounted) return;
+      if (resp.statusCode != 200) {
+        setState(() {
+          _error = 'HTTP ${resp.statusCode}';
+          _loading = false;
+        });
+        return;
+      }
       final data = jsonDecode(resp.body) as Map<String, dynamic>;
-      final next = JobProgress.fromJson(data);
+      final events = (data['events'] as List?)
+              ?.cast<Map<String, dynamic>>() ??
+          const [];
 
-      setState(() => _progress = next);
+      final wasDone = _done;
+      setState(() {
+        _error = null;
+        _loading = false;
+        _progress = (data['progress'] as num?)?.toDouble() ?? 0.0;
+        _stage = data['stage'] as String? ?? '';
+        _message = data['message'] as String? ?? '';
+        _done = data['done'] == true;
+        _events = events;
+      });
 
-      // Auto-scroll the log
+      // Auto-scroll to the newest event.
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_logScroll.hasClients) {
-          _logScroll.jumpTo(_logScroll.position.maxScrollExtent);
+        if (_scroll.hasClients) {
+          _scroll.jumpTo(_scroll.position.maxScrollExtent);
         }
       });
 
-      if (next.done && !_completedNotified) {
-        _completedNotified = true;
-        _timer?.cancel();
+      if (!wasDone && _done) {
         widget.onComplete?.call();
       }
-    } catch (_) {
-      // transient — keep polling
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = '$e';
+        _loading = false;
+      });
+    }
+  }
+
+  Color _levelColour(String level) {
+    switch (level) {
+      case 'error':
+        return Colors.red.shade700;
+      case 'warning':
+        return Colors.orange.shade800;
+      default:
+        return Colors.grey.shade800;
+    }
+  }
+
+  IconData _levelIcon(String level) {
+    switch (level) {
+      case 'error':
+        return Icons.error_outline;
+      case 'warning':
+        return Icons.warning_amber_outlined;
+      default:
+        return Icons.chevron_right;
+    }
+  }
+
+  String _stageLabel(String stage) {
+    switch (stage) {
+      case 'starting':
+        return 'Starting';
+      case 'transcribing':
+        return 'Transcribing';
+      case 'translating':
+        return 'Translating';
+      case 'downloading':
+        return 'Downloading';
+      case 'extracting':
+        return 'Extracting';
+      case 'ready':
+        return 'Ready';
+      case 'cancelled':
+        return 'Cancelled';
+      case 'error':
+        return 'Error';
+      case 'complete':
+        return 'Complete';
+      default:
+        return stage.isEmpty ? 'Processing' : stage;
+    }
+  }
+
+  Color _stageColour(String stage) {
+    switch (stage) {
+      case 'translating':
+        return Colors.indigo;
+      case 'transcribing':
+        return Colors.deepPurple;
+      case 'downloading':
+        return Colors.blue;
+      case 'ready':
+      case 'complete':
+        return Colors.green;
+      case 'cancelled':
+        return Colors.orange;
+      case 'error':
+        return Colors.red;
+      default:
+        return Colors.blueGrey;
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final p = _progress;
-
     return Card(
-      elevation: 1,
-      margin: EdgeInsets.zero,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Header
+            // Header row: stage badge + percentage
             Row(
               children: [
-                _stageIcon(p),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    _stageLabel(p),
-                    style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 14,
-                    ),
+                Chip(
+                  avatar: Icon(
+                    _done ? Icons.check_circle : Icons.sync,
+                    size: 16,
+                    color: Colors.white,
                   ),
+                  label: Text(
+                    _stageLabel(_stage),
+                    style: const TextStyle(color: Colors.white, fontSize: 12),
+                  ),
+                  backgroundColor: _stageColour(_stage),
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  visualDensity: VisualDensity.compact,
                 ),
-                if (p.done && p.error == null)
-                  const Chip(
-                    label: Text('Ready', style: TextStyle(fontSize: 11)),
-                    backgroundColor: Color(0xFFD7F5D9),
-                    visualDensity: VisualDensity.compact,
-                  )
-                else if (p.error != null)
-                  Chip(
-                    label: const Text('Failed',
-                        style: TextStyle(fontSize: 11)),
-                    backgroundColor: Colors.red.shade100,
-                    visualDensity: VisualDensity.compact,
-                  ),
-              ],
-            ),
-            const SizedBox(height: 8),
-
-            // Progress bar
-            LinearProgressIndicator(
-              value: p.progress.clamp(0.0, 1.0),
-              minHeight: 6,
-            ),
-            const SizedBox(height: 4),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Expanded(
-                  child: Text(
-                    p.message,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.grey[700],
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
+                const Spacer(),
                 Text(
-                  '${(p.progress * 100).toStringAsFixed(0)}%',
+                  '${(_progress * 100).toStringAsFixed(0)}%',
                   style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 12),
 
-            // File counter
-            Row(
-              children: [
-                Icon(Icons.folder_open,
-                    size: 14, color: Colors.grey[600]),
-                const SizedBox(width: 4),
-                Text(
-                  '${p.files.length} files downloaded',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey[700],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-
-            // Log console
-            Container(
-              height: widget.compact ? 140 : 220,
-              decoration: BoxDecoration(
-                color: const Color(0xFF1E1E1E),
-                borderRadius: BorderRadius.circular(6),
+            // Progress bar
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: _progress.clamp(0.0, 1.0),
+                minHeight: 8,
+                backgroundColor: Colors.grey.shade200,
+                valueColor: AlwaysStoppedAnimation(_stageColour(_stage)),
               ),
-              padding: const EdgeInsets.all(8),
-              child: p.events.isEmpty
-                  ? const Center(
-                      child: Text(
-                        'Waiting for server…',
-                        style: TextStyle(
-                          color: Colors.grey,
-                          fontSize: 12,
-                        ),
+            ),
+
+            if (_message.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                _message,
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+              ),
+            ],
+
+            if (_loading) ...[
+              const SizedBox(height: 12),
+              const Center(child: CircularProgressIndicator()),
+            ],
+
+            if (_error != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                'Polling error: $_error',
+                style: TextStyle(color: Colors.red.shade700, fontSize: 12),
+              ),
+            ],
+
+            // Event log
+            if (_events.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              const Divider(height: 1),
+              const SizedBox(height: 8),
+              const Text(
+                'Live log',
+                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+              ),
+              const SizedBox(height: 6),
+              Container(
+                constraints: const BoxConstraints(maxHeight: 260),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade50,
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: Colors.grey.shade200),
+                ),
+                child: ListView.builder(
+                  controller: _scroll,
+                  shrinkWrap: true,
+                  itemCount: _events.length,
+                  itemBuilder: (ctx, i) {
+                    final ev = _events[i];
+                    final t = (ev['time'] as String?) ?? '';
+                    final lvl = (ev['level'] as String?) ?? 'info';
+                    final msg = (ev['message'] as String?) ?? '';
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 3,
                       ),
-                    )
-                  : ListView.builder(
-                      controller: _logScroll,
-                      itemCount: p.events.length,
-                      itemBuilder: (ctx, i) {
-                        final ev = p.events[i];
-                        return Padding(
-                          padding:
-                              const EdgeInsets.symmetric(vertical: 1),
-                          child: Text.rich(
-                            TextSpan(
-                              style: const TextStyle(
-                                fontFamily: 'monospace',
-                                fontSize: 11.5,
-                                height: 1.35,
-                              ),
-                              children: [
-                                TextSpan(
-                                  text: '${ev.time}  ',
-                                  style: const TextStyle(
-                                    color: Colors.grey,
-                                  ),
-                                ),
-                                TextSpan(
-                                  text: _iconFor(ev.level),
-                                  style: TextStyle(
-                                    color: _colorFor(ev.level),
-                                  ),
-                                ),
-                                const TextSpan(text: ' '),
-                                TextSpan(
-                                  text: ev.message,
-                                  style: TextStyle(
-                                    color: _colorFor(ev.level),
-                                  ),
-                                ),
-                              ],
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            t,
+                            style: TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 11,
+                              color: Colors.grey.shade500,
                             ),
                           ),
-                        );
-                      },
-                    ),
-            ),
+                          const SizedBox(width: 8),
+                          Icon(
+                            _levelIcon(lvl),
+                            size: 14,
+                            color: _levelColour(lvl),
+                          ),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: Text(
+                              msg,
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: _levelColour(lvl),
+                                height: 1.3,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
           ],
         ),
       ),
     );
-  }
-
-  Widget _stageIcon(JobProgress p) {
-    if (p.error != null) {
-      return const Icon(Icons.error_outline, color: Colors.red);
-    }
-    if (p.done) {
-      return const Icon(Icons.check_circle, color: Colors.green);
-    }
-    return const SizedBox(
-      width: 20,
-      height: 20,
-      child: CircularProgressIndicator(strokeWidth: 2),
-    );
-  }
-
-  String _stageLabel(JobProgress p) {
-    if (p.error != null) return 'Processing failed';
-    if (p.done) return 'Processing complete';
-    switch (p.stage) {
-      case 'starting':
-        return 'Preparing…';
-      case 'waiting':
-        return 'Waiting for the server';
-      case 'downloading':
-        return 'Downloading session files';
-      case 'extracting':
-        return 'Extracting transcripts';
-      case 'ready':
-        return 'Finalising';
-      default:
-        return 'Processing';
-    }
-  }
-
-  String _iconFor(String level) {
-    switch (level) {
-      case 'error':
-        return '✗';
-      case 'warning':
-        return '⚠';
-      default:
-        return '›';
-    }
-  }
-
-  Color _colorFor(String level) {
-    switch (level) {
-      case 'error':
-        return const Color(0xFFFF6B6B);
-      case 'warning':
-        return const Color(0xFFFFC107);
-      default:
-        return const Color(0xFFB0BEC5);
-    }
   }
 }
