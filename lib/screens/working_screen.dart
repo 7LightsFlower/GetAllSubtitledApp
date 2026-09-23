@@ -769,7 +769,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
       builder: (ctx) => _UploadDialog(
         bytes: bytes,
         fileName: fileName,
-        mode: UploadMode.forward, 
+        mode: UploadMode.chunked, 
         onUploadComplete: _fetchProjects,
       ),
     );

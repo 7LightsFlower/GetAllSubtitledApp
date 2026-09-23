@@ -4,6 +4,7 @@
 import base64
 import contextvars
 import datetime
+from email.utils import quote
 import importlib
 import hashlib
 import io
@@ -20,6 +21,7 @@ import threading
 import time
 import uuid
 import zipfile
+from urllib.parse import quote
 
 import requests
 import yt_dlp
@@ -470,15 +472,88 @@ def utc_now_iso():
 def _public_base_url() -> str:
     """Base URL the browser should use, honouring the proxy chain.
 
-    Prefers X-Forwarded-Host / X-Forwarded-Proto when nginx (or any
-    upstream proxy) sets them. Falls back to request.host_url otherwise,
-    which is what Flask sees from the Host header.
+    nginx fronts this container over plain HTTP and sets
+    ``X-Forwarded-Proto: $scheme`` (= "http") unconditionally, so that
+    header carries no information here. What *is* reliable is the host:
+    if the browser reached us through a real hostname, the outer proxy
+    terminated TLS, so the URL we hand back must be https. If the host
+    is localhost / 127.0.0.1 we're in local development and http is right.
     """
     fwd_host = request.headers.get("X-Forwarded-Host")
     if fwd_host:
-        proto = request.headers.get("X-Forwarded-Proto", "http")
+        bare = fwd_host.split(":", 1)[0]
+        proto = "http" if bare in ("localhost", "127.0.0.1") else "https"
         return f"{proto}://{fwd_host}".rstrip("/")
     return request.host_url.rstrip("/")
+
+def _extract_session_id(resp: requests.Response) -> str | None:
+    """Find the session id the internal server assigned to an upload.
+
+    Looks, in order, at:
+      1. the final redirect URL,
+      2. a JSON body (top level, then under "data"),
+      3. a session_url / url / link field in the JSON,
+      4. an HTML body containing a /archivesession/<id> link.
+
+    Returns None if nothing usable is found.
+    """
+    # 1. Redirect URL
+    final_url = resp.url or ""
+    for marker in ("/archivesession/", "/session/"):
+        if marker in final_url:
+            sid = final_url.split(marker, 1)[-1].split("/")[0].strip()
+            if sid:
+                return sid
+
+    # 2./3. JSON body
+    try:
+        payload = resp.json()
+    except (ValueError, TypeError):
+        payload = None
+
+    def _from_dict(d: dict) -> str | None:
+        for key in ("session_id", "sessionId", "session", "id"):
+            v = d.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        for key in ("session_url", "url", "link"):
+            v = d.get(key)
+            if isinstance(v, str) and "/archivesession/" in v:
+                return v.split("/archivesession/", 1)[-1].split("/")[0]
+        return None
+
+    if isinstance(payload, dict):
+        sid = _from_dict(payload)
+        if sid:
+            return sid
+        nested = payload.get("data")
+        if isinstance(nested, dict):
+            sid = _from_dict(nested)
+            if sid:
+                return sid
+
+    # 4. HTML body
+    body = resp.text or ""
+    m = re.search(r"/archivesession/([^\"'<>\s/]+)", body)
+    if m:
+        return m.group(1).strip()
+
+    return None
+
+
+def _thumbnail_absolute_url(video: dict) -> str | None:
+    """Build a browser-usable, percent-encoded thumbnail URL.
+
+    Stored `thumbnail_url` values are relative ("/thumbnails/x.jpg")
+    and may contain spaces / non-ASCII characters from the original
+    video title. Concatenating them onto the base URL verbatim
+    produces an invalid URL that Image.network silently rejects.
+    """
+    thumb = video.get("thumbnail_url")
+    if not thumb or not thumb.startswith("/thumbnails/"):
+        return thumb
+    filename = thumb[len("/thumbnails/"):]
+    return f"{_public_base_url()}/thumbnails/{quote(filename, safe='')}"
 
 
 def _short_sid(session_id: str | None, keep: int = 8) -> str:
@@ -491,6 +566,39 @@ def _short_sid(session_id: str | None, keep: int = 8) -> str:
     if not session_id:
         return "<none>"
     return session_id[:keep] + "…"
+
+
+def _note_404(session_id: str, url: str) -> int:
+    """Bump and return the consecutive-404 counter for a session.
+
+    Logs the first and fifth occurrence, then silences the rest so a
+    stale session id doesn't fill the log with one line every poll.
+    Returns the new count so the caller can decide whether to give up.
+    """
+    with _consecutive_404s_lock:
+        n = _consecutive_404s.get(session_id, 0) + 1
+        _consecutive_404s[session_id] = n
+
+    if n == 1:
+        logging.warning(
+            "messages.json 404 for session %s (%s)",
+            _short_sid(session_id),
+            url,
+        )
+    elif n == 5:
+        logging.warning(
+            "messages.json still 404 for session %s after %d attempts; "
+            "further 404s for this session will be silenced",
+            _short_sid(session_id),
+            n,
+        )
+    return n
+
+
+def _clear_404(session_id: str) -> None:
+    """Forget the 404 counter for a session once it starts responding."""
+    with _consecutive_404s_lock:
+        _consecutive_404s.pop(session_id, None)
 
 
 # Which panel entry (if any) this thread's log lines should be routed to.
@@ -786,6 +894,15 @@ _JOB_TTL = 7200  # keep finished entries for 2 hours
 # download; the /cancel_session endpoint adds to it.
 _cancelled_sessions: set[str] = set()
 _cancelled_sessions_lock = threading.Lock()
+
+
+# ─── ADD THIS ──────────────────────────────────────────────────────────
+# Consecutive HTTP 404s per session. Used to keep a wrong or stale
+# session id from spamming the log and the progress panel while the
+# background worker spins. Reset as soon as the session responds.
+_consecutive_404s: dict[str, int] = {}
+_consecutive_404s_lock = threading.Lock()
+# ───────────────────────────────────────────────────────────────────────
 
 
 class _JobCancelled(Exception):
@@ -1522,10 +1639,8 @@ def _download_session_files_locked(session_id, token, server_url):
 
     if curl_download(html_url, html_path, token):
         logging.info("Downloaded index.html")
-        _job_log(session_id, "Downloaded index.html")
         _job_add_file(session_id, "index.html", os.path.getsize(html_path))
     else:
-        logging.warning("Failed to download index.html")
         _job_log(session_id, "Failed to download index.html", level="warning")
         return False
 
@@ -1552,7 +1667,6 @@ def _download_session_files_locked(session_id, token, server_url):
         )
         _job_add_file(session_id, "video.mp4", os.path.getsize(video_path))
     else:
-        logging.warning("Failed to download video.mp4")
         _job_log(session_id, "Failed to download video.mp4", level="warning")
 
     # Subtitles
@@ -1594,7 +1708,6 @@ def _download_session_files_locked(session_id, token, server_url):
             audio_path = os.path.join(session_dir, "audio.wav")
             if curl_download(audio_url, audio_path, token):
                 logging.info("Downloaded audio.wav")
-                _job_log(session_id, "Downloaded audio.wav")
                 _job_add_file(session_id, "audio.wav", os.path.getsize(audio_path))
     except (OSError, re.error) as e:
         logging.warning("Could not download audio: %s", e)
@@ -1618,7 +1731,6 @@ def _download_session_files_locked(session_id, token, server_url):
         _job_add_file(session_id, "messages.json", os.path.getsize(messages_path))
     else:
         logging.warning("Failed to download messages.json")
-        _job_log(session_id, "Failed to download messages.json", level="warning")
 
     # Transcripts
     _job_log(session_id, "Extracting transcripts…", stage="extracting", progress=0.9)
@@ -1626,7 +1738,6 @@ def _download_session_files_locked(session_id, token, server_url):
     if transcripts:
         save_transcripts_to_files(session_dir, transcripts)
         logging.info("Extracted %d transcripts from messages.json", len(transcripts))
-        _job_log(session_id, f"Extracted {len(transcripts)} transcripts")
         _job_add_file(
             session_id,
             "transcripts.json",
@@ -1644,7 +1755,6 @@ def _download_session_files_locked(session_id, token, server_url):
             _job_add_file(session_id, vtt_name, os.path.getsize(vtt_path))
             _job_log(session_id, f"Generated {vtt_name}")
     else:
-        logging.warning("No transcripts extracted from messages.json")
         _job_log(session_id, "No transcripts extracted", level="warning")
 
     files = [
@@ -4255,7 +4365,15 @@ def _fetch_messages_json_size(session_id, token, server_url=None):
         server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
     server_url = server_url.rstrip("/")
     url = f"{server_url}/archivemediafile/{session_id}/messages.json"
-    return _remote_size(url, token)
+
+    size, status = _remote_size(url, token)
+
+    if status == 404:
+        _note_404(session_id, url)
+    elif status == 200:
+        _clear_404(session_id)
+
+    return size, status
 
 
 def _fetch_messages_json_bytes(session_id, token, server_url=None):
@@ -4264,6 +4382,7 @@ def _fetch_messages_json_bytes(session_id, token, server_url=None):
         server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
     server_url = server_url.rstrip("/")
     url = f"{server_url}/archivemediafile/{session_id}/messages.json"
+
     try:
         r = requests.get(
             url,
@@ -4274,8 +4393,16 @@ def _fetch_messages_json_bytes(session_id, token, server_url=None):
             allow_redirects=True,
         )
         if r.status_code == 200:
+            _clear_404(session_id)
             return r.content
-        logging.warning("fetch_messages_json: HTTP %s for %s", r.status_code, url)
+        if r.status_code == 404:
+            # Route through the shared counter so a wrong id doesn't
+            # re-log here after the size probe already complained.
+            _note_404(session_id, url)
+        else:
+            logging.warning(
+                "fetch_messages_json: HTTP %s for %s", r.status_code, url
+            )
     except requests.exceptions.RequestException as e:
         logging.warning("fetch_messages_json failed: %s", e)
     return b""
@@ -4355,7 +4482,7 @@ def _coverage_is_ok(mt_end: float, asr_end: float) -> bool:
     return (mt_end / asr_end) >= _MT_COVERAGE_MIN_FRACTION
 
 
-def _messages_look_done(raw: bytes, expected_langs=None) -> bool:
+def _messages_look_done(raw: bytes, expected_langs=None, log: bool = True) -> bool:
     """Return True once every MT track covers the ASR span.
 
     Language-ID caveat:
@@ -4372,6 +4499,27 @@ def _messages_look_done(raw: bytes, expected_langs=None) -> bool:
       That catches the "translation stops at minute 3 of a 45-minute
       video" problem without relying on a mapping we don't have.
     """
+
+    ...
+    if expected_langs and not mt_tracks:
+        if log:
+            logging.info("messages.json has ASR but no MT tracks yet")
+        return False
+
+        incomplete = []
+    for sender, mt_end in mt_tracks.items():
+        if not _coverage_is_ok(mt_end, asr_max_end):
+            incomplete.append(f"{sender} covers {mt_end:.0f}s of {asr_max_end:.0f}s")
+
+    if incomplete:
+        if log:
+            logging.info(
+                "messages.json stable but MT tracks still short: %s",
+                "; ".join(incomplete),
+            )
+        return False
+    ...
+
     if not raw or len(raw) < MIN_MESSAGES_BYTES:
         return False
     try:
@@ -4415,7 +4563,8 @@ def _messages_look_done(raw: bytes, expected_langs=None) -> bool:
         return False
 
     if expected_langs and not mt_tracks:
-        logging.info("messages.json has ASR but no MT tracks yet")
+        if log:
+            logging.info("messages.json has ASR but no MT tracks yet")
         return False
 
     incomplete = []
@@ -4517,11 +4666,27 @@ def _count_messages(raw: bytes) -> int:
         return len(data)
     return 0
 
+# How often to re-fetch messages.json purely to refresh the progress
+# bar. The stability check already fetches it occasionally; this adds
+# a periodic tick so the bar moves even while the file is growing.
+_PROGRESS_FETCH_INTERVAL = 60.0  # was 30.0
+
+# If neither the file size nor the ASR/MT second counts have moved for
+# this long, emit one short heartbeat line so the panel doesn't look
+# frozen. Rare enough that it doesn't spam.
+_PROGRESS_HEARTBEAT_SECONDS = 180.0
 
 def wait_for_session_ready(
     session_id, token, server_url=None, expected_langs=None, timeout=1800
 ):
-    """Block until the internal server finishes producing messages.json."""
+    """Block until the internal server finishes producing messages.json.
+
+    Emits panel progress only when the observed second value actually
+    advances. An idle translation track — or a stall in ASR before any
+    translation has started — will not repeatedly re-print the same
+    line. A slow heartbeat is emitted every _PROGRESS_HEARTBEAT_SECONDS
+    while waiting, so the user can tell the job is still alive.
+    """
     if not server_url:
         server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
     server_url = server_url.rstrip("/")
@@ -4530,8 +4695,19 @@ def wait_for_session_ready(
     last_size = -1
     stable_count = 0
     unauthorized_count = 0
-    last_progress_fetch = 0.0
 
+    # Progress-tick bookkeeping. The "reported" values are the ones the
+    # panel has already seen; we only emit a new event when they move.
+    last_progress_fetch = 0.0
+    last_reported_mt_end = 0.0
+    last_reported_asr_end = 0.0
+    last_heartbeat = started
+
+    # Only surface "has ASR but no MT yet" once per session.
+    reported_no_mt = False
+
+    # Cooldown between two events of the same kind. Complements the
+    # value-advance check below.
     while True:
         if _is_cancelled(session_id):
             raise _JobCancelled(f"Session {_short_sid(session_id)} cancelled by user")
@@ -4542,6 +4718,8 @@ def wait_for_session_ready(
                 f"Session {_short_sid(session_id)} not ready after {timeout}s"
             )
 
+        # Give the internal server a moment to accept the upload before
+        # we start hammering it.
         if elapsed < 15:
             time.sleep(1)
             continue
@@ -4568,34 +4746,57 @@ def wait_for_session_ready(
             stable_count = 0
         last_size = size
 
-        # Only log when the size actually moved, or on the first and
-        # last poll of each stability window. Skips the "same size
-        # every 2 s" chatter that dominated the console.
-        if size_changed or stable_count in (1, _STABLE_NEEDED):
+        # ── Console-only chatter ────────────────────────────────────
+        # Only log when something meaningful changes. On a healthy
+        # session that means the size moved, or we just entered or
+        # finished a stability window. On a 404 the size never moves,
+        # so the line is emitted once and never again.
+        if status == 200:
+            if size_changed or stable_count in (1, _STABLE_NEEDED):
+                logging.info(
+                    "Session %s: messages.json size=%d (stable=%d/%d)",
+                    _short_sid(session_id),
+                    size,
+                    stable_count,
+                    _STABLE_NEEDED,
+                )
+        elif status != 200 and size_changed:
             logging.info(
-                "Session %s: messages.json size=%d status=%d (stable=%d/%d)",
+                "Session %s: messages.json status=%d "
+                "(waiting for the internal server to publish the session)",
                 _short_sid(session_id),
-                size,
                 status,
-                stable_count,
-                _STABLE_NEEDED,
+            )
+
+        # A long run of 404s almost always means the session id is
+        # wrong (e.g. the upload succeeded but the response didn't
+        # contain the real id, and a fallback was used). Fail early
+        # instead of polling until the 30-minute timeout.
+        with _consecutive_404s_lock:
+            n404 = _consecutive_404s.get(session_id, 0)
+        if n404 >= 30:
+            raise RuntimeError(
+                f"Session {_short_sid(session_id)} returned HTTP 404 on "
+                f"{n404} consecutive polls to {server_url}. The session "
+                f"id is almost certainly wrong — check the upload "
+                f"response in the backend log."
             )
 
         # ── Progress tick ────────────────────────────────────────────
-        # Every _PROGRESS_FETCH_INTERVAL seconds, fetch the file again,
-        # parse the ASR/MT end timestamps, and push a fraction of the
-        # video duration to the panel. This is separate from the
-        # stability check so the bar moves smoothly even while the
-        # file is still growing.
+        # Fetch the file and push a fraction of the video duration to
+        # the panel, but only when the observed value has advanced.
         now = time.time()
         if now - last_progress_fetch >= _PROGRESS_FETCH_INTERVAL:
             last_progress_fetch = now
-            raw_for_progress = _fetch_messages_json_bytes(session_id, token, server_url)
+            raw_for_progress = _fetch_messages_json_bytes(
+                session_id, token, server_url
+            )
             mt_end, asr_end = _compute_translation_progress(raw_for_progress)
             video_dur = _session_video_duration(session_id)
 
             if video_dur > 0:
-                if mt_end > 0:
+                if mt_end > last_reported_mt_end:
+                    last_reported_mt_end = mt_end
                     prog = min(mt_end / video_dur, 0.99)
                     _job_log(
                         session_id,
@@ -4604,32 +4805,77 @@ def wait_for_session_ready(
                         stage="translating",
                         progress=prog,
                     )
-                elif asr_end > 0:
-                    # ASR done, translations not started yet — show a
-                    # small sliver so the bar isn't stuck at zero.
+                elif (
+                    mt_end <= 0
+                    and asr_end > last_reported_asr_end
+                ):
+                    last_reported_asr_end = asr_end
                     prog = min((asr_end / video_dur) * 0.05, 0.05)
                     _job_log(
                         session_id,
-                        f"Transcribing… {asr_end:.0f}s / " f"{video_dur:.0f}s",
+                        f"Transcribing… {asr_end:.0f}s / {video_dur:.0f}s",
                         stage="transcribing",
                         progress=prog,
                     )
 
+        # ── Heartbeat ────────────────────────────────────────────────
+        # If nothing has been reported for a while — neither the size
+        # nor the ASR/MT values are moving — emit one short line so the
+        # user knows we are still polling and not wedged.
+        if now - last_heartbeat >= _PROGRESS_HEARTBEAT_SECONDS:
+            last_heartbeat = now
+            if last_reported_mt_end > 0:
+                _job_log(
+                    session_id,
+                    f"Waiting — translation still at {last_reported_mt_end:.0f}s",
+                    stage="translating",
+                )
+            elif last_reported_asr_end > 0:
+                _job_log(
+                    session_id,
+                    f"Waiting — transcription still at {last_reported_asr_end:.0f}s",
+                    stage="transcribing",
+                )
+            else:
+                _job_log(
+                    session_id,
+                    "Waiting for the internal server…",
+                    stage="starting",
+                )
+
+        # ── Readiness gate ───────────────────────────────────────────
         if stable_count >= _STABLE_NEEDED:
             raw = _fetch_messages_json_bytes(session_id, token, server_url)
             if _messages_look_done(raw, expected_langs):
+                # Confirm once more after a short pause. A single
+                # passing check can be a lucky moment during a
+                # mid-stream stall; two in a row five seconds apart is
+                # a much stronger signal that the server is really done.
+                time.sleep(5)
+                raw2 = _fetch_messages_json_bytes(session_id, token, server_url)
+                if _messages_look_done(raw2, expected_langs):
+                    logging.info(
+                        "✅ Session %s appears complete (%d bytes, %d msgs)",
+                        _short_sid(session_id),
+                        len(raw2),
+                        _count_messages(raw2),
+                    )
+                    return True
                 logging.info(
-                    "✅ Session %s appears complete (%d bytes, %d msgs)",
+                    "Session %s: first ready check passed but the "
+                    "second did not — still growing, continuing to wait",
                     _short_sid(session_id),
-                    len(raw),
-                    _count_messages(raw),
                 )
-                return True
-            logging.warning(
-                "Session %s: size stable but content invalid, "
-                "resetting stability counter",
-                _short_sid(session_id),
-            )
+            else:
+                logging.warning(
+                    "Session %s: size stable but content invalid, "
+                    "resetting stability counter",
+                    _short_sid(session_id),
+                )
+
+            # _messages_look_done logged why it failed, at most once.
+            # Remember that we've heard it and reset the stability gate.
+            reported_no_mt = True
             stable_count = 0
 
         time.sleep(2)
@@ -4732,6 +4978,9 @@ def process_session_in_background(
         _job_finish(session_id, error=f"{type(e).__name__}: {e}")
     finally:
         _log_target.reset(token_cv)
+        # Don't leak the 404 counter after the job finishes either way.
+        with _consecutive_404s_lock:
+            _consecutive_404s.pop(session_id, None)
 
 
 @app.route("/extract_video_subtitles/<path:session_id>", methods=["GET"])
@@ -4972,13 +5221,10 @@ def get_videos():
     # Build absolute thumbnail URLs from the incoming request so they work
     # behind any host/proxy (localhost, Nginx, public domain, ...).
     # Do NOT mutate the stored dicts: their thumbnail_url stays relative.
-    base = _public_base_url()
     unique_videos_serialized = []
     for video in unique_videos:
         v = dict(video)  # shallow copy
-        thumb = v.get("thumbnail_url")
-        if thumb and thumb.startswith("/thumbnails/"):
-            v["thumbnail_url"] = f"{base}{thumb}"
+        v["thumbnail_url"] = _thumbnail_absolute_url(video)
         unique_videos_serialized.append(v)
     unique_videos = unique_videos_serialized
 
@@ -5001,6 +5247,7 @@ def video_detail(video_key):
     for project in videos:
         if project["key"] == video_key:
             detail = project.copy()
+            detail["thumbnail_url"] = _thumbnail_absolute_url(project)
             detail["segments"] = detail.get("segments", [])
             detail["video_url"] = None
             return jsonify(detail), 200
@@ -5054,16 +5301,21 @@ def upload_chunk():
 def finish_upload():
     """Complete a chunked upload and persist the file to disk."""
     data = request.get_json()
-    filename = data.get("filename")
+    original_filename = data.get("filename")
     auto_segmentation = data.get("auto_segmentation", False)
-    if not filename:
+    if not original_filename:
         return jsonify({"message": "Missing filename"}), 400
-    chunks = chunk_storage.get(filename)
+
+    # chunk_storage is keyed by whatever name /upload-chunk was called
+    # with — look it up under that name, not the normalised one.
+    chunks = chunk_storage.get(original_filename)
     if not chunks or any(chunk is None for chunk in chunks):
         return jsonify({"message": "Incomplete upload"}), 400
     combined = b"".join(chunks)
 
     # ============ FIX: Ensure .mp4 extension ============
+    # Only used for the on-disk filename; the storage key stays as-is.
+    filename = original_filename
     if not filename.lower().endswith(".mp4"):
         base_name = os.path.splitext(filename)[0]
         filename = f"{base_name}.mp4"
@@ -5103,7 +5355,12 @@ def finish_upload():
         "segmentation_progress": 100 if auto_segmentation else 0,
     }
     videos.append(project)
-    del chunk_storage[filename]
+
+    # Remove the chunk buffer under the key the client actually used.
+    # pop() instead of del so a duplicate /finish-upload call can't crash
+    # the second time around.
+    chunk_storage.pop(original_filename, None)
+
     save_state()
     return jsonify({"message": "Upload finished", "project": project}), 200
 
@@ -5800,7 +6057,72 @@ def _session_files_look_incomplete(session_dir):
     # If we have more languages with text than VTTs, we're behind.
     if len(vtt_files) < len(languages_with_text):
         return True
+
+    # If the local messages.json still shows short MT tracks, we're behind.
+    if not _local_transcripts_cover_full_span(session_dir):
+        logging.info(
+            "_session_files_look_incomplete: %s — local MT coverage "
+            "is short, will re-download",
+            _short_sid(os.path.basename(session_dir)),
+        )
+        return True
+
     return False
+
+
+def _local_transcripts_cover_full_span(session_dir) -> bool:
+    """True if the local messages.json shows every MT track ending close
+    to the ASR end. Used to decide whether a re-download is warranted.
+
+    This is the local counterpart of _messages_look_done: same coverage
+    rule, but reading from disk instead of from the internal server.
+    """
+    messages_path = os.path.join(session_dir, "messages.json")
+    if not os.path.exists(messages_path):
+        return False
+    try:
+        with open(messages_path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return False
+    if not raw or len(raw) < MIN_MESSAGES_BYTES:
+        return False
+
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return False
+    if not isinstance(data, list):
+        return False
+
+    asr_max_end = 0.0
+    mt_tracks: dict[str, float] = {}
+    for item in data:
+        if not (isinstance(item, list) and len(item) >= 2):
+            continue
+        try:
+            m = json.loads(item[1]) if isinstance(item[1], str) else item[1]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(m, dict):
+            continue
+        if not m.get("seq", "").strip():
+            continue
+        try:
+            end = float(m.get("end", 0) or 0)
+        except (ValueError, TypeError):
+            end = 0.0
+        sender = m.get("sender", "")
+        if sender.startswith("asr:"):
+            if end > asr_max_end:
+                asr_max_end = end
+        elif sender.startswith("mt:") or sender.startswith("translation:"):
+            if end > mt_tracks.get(sender, 0.0):
+                mt_tracks[sender] = end
+
+    if not mt_tracks or asr_max_end <= 0:
+        return False
+    return all(_coverage_is_ok(mt_end, asr_max_end) for mt_end in mt_tracks.values())
 
 
 @app.route("/api/youtube-download-and-upload", methods=["POST", "OPTIONS"])
@@ -5853,7 +6175,8 @@ def youtube_download_and_upload():
                 title = info.get("title", "youtube_video")
                 duration = info.get("duration", 0)
 
-            clean_title = re.sub(r'[\\/*?:"<>|]', "_", title)
+            clean_title = re.sub(r'[\\/*?:"<>|]+', "_", title).strip()
+            clean_title = re.sub(r"\s+", "_", clean_title)   # spaces → _
             filename = f"{clean_title}.mp4"
             if len(filename) > 200:
                 name, ext = os.path.splitext(filename)
@@ -6538,34 +6861,26 @@ def upload_lecture():
             )
 
         # ─── 7. Extract session id ─────────────────────────────────
-        final_url = resp.url
-        session_id = None
-
-        if "/archivesession/" in final_url:
-            session_id = final_url.split("/archivesession/")[-1].split("/")[0]
-            logging.info("Extracted session ID from URL: %s", session_id)
-        elif "/session/" in final_url:
-            session_id = final_url.split("/session/")[-1].split("/")[0]
-            logging.info("Extracted session ID from URL: %s", session_id)
-
-        if not session_id and session_name and resp.status_code < 400:
-            user_email = data.get("path", "/home/admin@example.com")
-            user_email = user_email.strip("/").split("/")[-1]
-            path = f"/home/{user_email}/{session_name}"
-            session_id = base64.b64encode(path.encode()).decode()
-            logging.info("Generated fallback session ID: %s", session_id)
+        session_id = _extract_session_id(resp)
+        if session_id:
+            logging.info("Extracted session ID from response: %s", session_id)
 
         if not session_id:
             logging.error(
-                "Upload to %s returned %s without a session id. Body: %s",
+                "Upload to %s returned %s without a usable session id. "
+                "Body: %s",
                 target_url,
                 resp.status_code,
-                resp.text[:500],
+                resp.text[:1000],
             )
             return (
                 jsonify(
                     {
-                        "error": "Upload did not produce a session id",
+                        "error": (
+                            "Internal server accepted the upload but did "
+                            "not return a session id. See the backend log "
+                            "for the response body."
+                        ),
                         "status_code": resp.status_code,
                         "response_preview": resp.text[:500],
                     }
@@ -6887,20 +7202,26 @@ def forward_to_internal(video_key):
             )
 
         # ─── 6. Extract the session id ────────────────────────
-        final_url = resp.url
-        session_id = None
-
-        if "/archivesession/" in final_url:
-            session_id = final_url.split("/archivesession/")[-1].split("/")[0]
-        elif "/session/" in final_url:
-            session_id = final_url.split("/session/")[-1].split("/")[0]
-
-        if not session_id and session_name:
-            path = f"/home/{user_email}/{session_name}"
-            session_id = base64.b64encode(path.encode()).decode()
+        session_id = _extract_session_id(resp)
+        if session_id:
+            logging.info(
+                "forward_to_internal: session id from response: %s", session_id
+            )
 
         if not session_id:
-            return jsonify({"error": "No session id from internal server"}), 502
+            logging.error(
+                "forward_to_internal: no session id in response. Body: %s",
+                resp.text[:1000],
+            )
+            return (
+                jsonify(
+                    {
+                        "error": "Internal server did not return a session id",
+                        "response_preview": resp.text[:500],
+                    }
+                ),
+                502,
+            )
 
         # ─── 7. Clear stale local state for this session ──────
         session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -7087,7 +7408,7 @@ def debug_videos():
         v = dict(video)
         thumb = v.get("thumbnail_url")
         if thumb and thumb.startswith("/thumbnails/"):
-            v["thumbnail_url"] = f"{base}{thumb}"
+            v["thumbnail_url"] = _thumbnail_absolute_url(video)
         serialized.append(v)
     return jsonify({"count": len(videos), "projects": serialized}), 200
 
