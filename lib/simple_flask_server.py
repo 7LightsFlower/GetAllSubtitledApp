@@ -4,6 +4,7 @@
 import base64
 import contextvars
 import datetime
+from email.utils import quote
 import importlib
 import hashlib
 import io
@@ -20,6 +21,7 @@ import threading
 import time
 import uuid
 import zipfile
+from urllib.parse import quote
 
 import requests
 import yt_dlp
@@ -479,6 +481,32 @@ def _public_base_url() -> str:
         proto = request.headers.get("X-Forwarded-Proto", "http")
         return f"{proto}://{fwd_host}".rstrip("/")
     return request.host_url.rstrip("/")
+
+
+def _public_base_url() -> str:
+    """Base URL the browser should use, honouring the proxy chain.
+    ...
+    """
+    fwd_host = request.headers.get("X-Forwarded-Host")
+    if fwd_host:
+        proto = request.headers.get("X-Forwarded-Proto", "http")
+        return f"{proto}://{fwd_host}".rstrip("/")
+    return request.host_url.rstrip("/")
+
+
+def _thumbnail_absolute_url(video: dict) -> str | None:
+    """Build a browser-usable, percent-encoded thumbnail URL.
+
+    Stored `thumbnail_url` values are relative ("/thumbnails/x.jpg")
+    and may contain spaces / non-ASCII characters from the original
+    video title. Concatenating them onto the base URL verbatim
+    produces an invalid URL that Image.network silently rejects.
+    """
+    thumb = video.get("thumbnail_url")
+    if not thumb or not thumb.startswith("/thumbnails/"):
+        return thumb
+    filename = thumb[len("/thumbnails/"):]
+    return f"{_public_base_url()}/thumbnails/{quote(filename, safe='')}"
 
 
 def _short_sid(session_id: str | None, keep: int = 8) -> str:
@@ -4972,13 +5000,10 @@ def get_videos():
     # Build absolute thumbnail URLs from the incoming request so they work
     # behind any host/proxy (localhost, Nginx, public domain, ...).
     # Do NOT mutate the stored dicts: their thumbnail_url stays relative.
-    base = _public_base_url()
     unique_videos_serialized = []
     for video in unique_videos:
         v = dict(video)  # shallow copy
-        thumb = v.get("thumbnail_url")
-        if thumb and thumb.startswith("/thumbnails/"):
-            v["thumbnail_url"] = f"{base}{thumb}"
+        v["thumbnail_url"] = _thumbnail_absolute_url(video)
         unique_videos_serialized.append(v)
     unique_videos = unique_videos_serialized
 
@@ -5001,6 +5026,7 @@ def video_detail(video_key):
     for project in videos:
         if project["key"] == video_key:
             detail = project.copy()
+            detail["thumbnail_url"] = _thumbnail_absolute_url(project)
             detail["segments"] = detail.get("segments", [])
             detail["video_url"] = None
             return jsonify(detail), 200
@@ -5853,7 +5879,8 @@ def youtube_download_and_upload():
                 title = info.get("title", "youtube_video")
                 duration = info.get("duration", 0)
 
-            clean_title = re.sub(r'[\\/*?:"<>|]', "_", title)
+            clean_title = re.sub(r'[\\/*?:"<>|]+', "_", title).strip()
+            clean_title = re.sub(r"\s+", "_", clean_title)   # spaces → _
             filename = f"{clean_title}.mp4"
             if len(filename) > 200:
                 name, ext = os.path.splitext(filename)
@@ -7087,7 +7114,7 @@ def debug_videos():
         v = dict(video)
         thumb = v.get("thumbnail_url")
         if thumb and thumb.startswith("/thumbnails/"):
-            v["thumbnail_url"] = f"{base}{thumb}"
+            v["thumbnail_url"] = _thumbnail_absolute_url(video)
         serialized.append(v)
     return jsonify({"count": len(videos), "projects": serialized}), 200
 
