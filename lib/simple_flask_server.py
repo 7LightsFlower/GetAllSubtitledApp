@@ -1550,10 +1550,8 @@ def _download_session_files_locked(session_id, token, server_url):
 
     if curl_download(html_url, html_path, token):
         logging.info("Downloaded index.html")
-        _job_log(session_id, "Downloaded index.html")
         _job_add_file(session_id, "index.html", os.path.getsize(html_path))
     else:
-        logging.warning("Failed to download index.html")
         _job_log(session_id, "Failed to download index.html", level="warning")
         return False
 
@@ -1580,7 +1578,6 @@ def _download_session_files_locked(session_id, token, server_url):
         )
         _job_add_file(session_id, "video.mp4", os.path.getsize(video_path))
     else:
-        logging.warning("Failed to download video.mp4")
         _job_log(session_id, "Failed to download video.mp4", level="warning")
 
     # Subtitles
@@ -1622,7 +1619,6 @@ def _download_session_files_locked(session_id, token, server_url):
             audio_path = os.path.join(session_dir, "audio.wav")
             if curl_download(audio_url, audio_path, token):
                 logging.info("Downloaded audio.wav")
-                _job_log(session_id, "Downloaded audio.wav")
                 _job_add_file(session_id, "audio.wav", os.path.getsize(audio_path))
     except (OSError, re.error) as e:
         logging.warning("Could not download audio: %s", e)
@@ -1646,7 +1642,6 @@ def _download_session_files_locked(session_id, token, server_url):
         _job_add_file(session_id, "messages.json", os.path.getsize(messages_path))
     else:
         logging.warning("Failed to download messages.json")
-        _job_log(session_id, "Failed to download messages.json", level="warning")
 
     # Transcripts
     _job_log(session_id, "Extracting transcripts…", stage="extracting", progress=0.9)
@@ -1654,7 +1649,6 @@ def _download_session_files_locked(session_id, token, server_url):
     if transcripts:
         save_transcripts_to_files(session_dir, transcripts)
         logging.info("Extracted %d transcripts from messages.json", len(transcripts))
-        _job_log(session_id, f"Extracted {len(transcripts)} transcripts")
         _job_add_file(
             session_id,
             "transcripts.json",
@@ -1672,7 +1666,6 @@ def _download_session_files_locked(session_id, token, server_url):
             _job_add_file(session_id, vtt_name, os.path.getsize(vtt_path))
             _job_log(session_id, f"Generated {vtt_name}")
     else:
-        logging.warning("No transcripts extracted from messages.json")
         _job_log(session_id, "No transcripts extracted", level="warning")
 
     files = [
