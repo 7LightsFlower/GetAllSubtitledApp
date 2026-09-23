@@ -472,24 +472,17 @@ def utc_now_iso():
 def _public_base_url() -> str:
     """Base URL the browser should use, honouring the proxy chain.
 
-    Prefers X-Forwarded-Host / X-Forwarded-Proto when nginx (or any
-    upstream proxy) sets them. Falls back to request.host_url otherwise,
-    which is what Flask sees from the Host header.
+    nginx fronts this container over plain HTTP and sets
+    ``X-Forwarded-Proto: $scheme`` (= "http") unconditionally, so that
+    header carries no information here. What *is* reliable is the host:
+    if the browser reached us through a real hostname, the outer proxy
+    terminated TLS, so the URL we hand back must be https. If the host
+    is localhost / 127.0.0.1 we're in local development and http is right.
     """
     fwd_host = request.headers.get("X-Forwarded-Host")
     if fwd_host:
-        proto = request.headers.get("X-Forwarded-Proto", "http")
-        return f"{proto}://{fwd_host}".rstrip("/")
-    return request.host_url.rstrip("/")
-
-
-def _public_base_url() -> str:
-    """Base URL the browser should use, honouring the proxy chain.
-    ...
-    """
-    fwd_host = request.headers.get("X-Forwarded-Host")
-    if fwd_host:
-        proto = request.headers.get("X-Forwarded-Proto", "http")
+        bare = fwd_host.split(":", 1)[0]
+        proto = "http" if bare in ("localhost", "127.0.0.1") else "https"
         return f"{proto}://{fwd_host}".rstrip("/")
     return request.host_url.rstrip("/")
 
