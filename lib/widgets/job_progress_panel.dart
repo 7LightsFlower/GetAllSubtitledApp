@@ -55,7 +55,7 @@ class _JobProgressPanelState extends State<JobProgressPanel> {
     try {
       final token = await InternalAuthService.getToken();
       if (token == null || token.isEmpty) return;
-      final url = '$flaskServerUrl/job_progress/${widget.sessionId}';
+      final url = '$flaskServerUrl/job-progress/${widget.sessionId}';
       final resp = await http.get(
         Uri.parse(url),
         headers: {'Authorization': 'Bearer $token'},

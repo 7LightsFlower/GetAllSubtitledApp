@@ -293,7 +293,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       final prefs = await SharedPreferences.getInstance();
       final token = prefs.getString('auth_token') ?? '';
       final response = await http.get(
-        Uri.parse('$authBaseUrl/video_detail/${widget.videoKey}'),
+        Uri.parse('$authBaseUrl/video-detail/${widget.videoKey}'),
         headers: {'Authorization': 'Bearer $token'},
       );
       if (response.statusCode == 200) {
@@ -790,7 +790,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
     try {
       final token = await _getToken();
-      final url = '$flaskServerUrl/session_output/$_savedSessionId';
+      final url = '$flaskServerUrl/session-output/$_savedSessionId';
 
       final response = await http.get(
         Uri.parse(url),
@@ -949,7 +949,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
     try {
       final token = await _getToken();
-      final url = '$flaskServerUrl/session_output/$sessionId';
+      final url = '$flaskServerUrl/session-output/$sessionId';
 
       final response = await http.get(
         Uri.parse(url),

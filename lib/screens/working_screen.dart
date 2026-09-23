@@ -658,7 +658,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
 
     try {
       final response = await http.post(
-        Uri.parse('$authBaseUrl/delete_video/$videoKey'),
+        Uri.parse('$authBaseUrl/delete-video/$videoKey'),
         headers: {'Content-Type': 'application/json'},
       );
       if (!mounted) return;
@@ -727,7 +727,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
     if (newName != null && newName.isNotEmpty) {
       try {
         final response = await http.post(
-          Uri.parse('$authBaseUrl/update_project_name/${project.key}'),
+          Uri.parse('$authBaseUrl/update-project-name/${project.key}'),
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode({'project_name': newName}),
         );
@@ -1712,7 +1712,7 @@ class _UploadDialogState extends State<_UploadDialog> {
     try {
       final token = await InternalAuthService.getToken();
       final resp = await http.post(
-        Uri.parse('$flaskServerUrl/forward_to_internal/$_videoKey'),
+        Uri.parse('$flaskServerUrl/forward-to-internal/$_videoKey'),
         headers: {
           'Content-Type': 'application/json',
           if (token != null) 'Authorization': 'Bearer $token',

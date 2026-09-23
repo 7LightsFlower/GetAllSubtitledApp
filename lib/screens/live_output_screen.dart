@@ -53,7 +53,7 @@ class _LiveOutputScreenState extends State<LiveOutputScreen> {
       }
 
       final response = await http.get(
-        Uri.parse('$internalServerUrl/job_status/${widget.jobId}'),
+        Uri.parse('$internalServerUrl/job-status/${widget.jobId}'),
         headers: {'Cookie': '_forward_auth=$token'},
       );
 

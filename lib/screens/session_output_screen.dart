@@ -392,7 +392,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     
     try {
       final token = await InternalAuthService.getToken();
-      final url = '$flaskServerUrl/update_video_subtitles/${widget.sessionId}';
+      final url = '$flaskServerUrl/update-video-subtitles/${widget.sessionId}';
       
       final response = await http.post(
         Uri.parse(url),
@@ -454,7 +454,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     try {
       final token = await InternalAuthService.getToken();
       
-      final outputUrl = '$flaskServerUrl/session_output/${widget.sessionId}';
+      final outputUrl = '$flaskServerUrl/session-output/${widget.sessionId}';
       final outputResponse = await http.get(
         Uri.parse(outputUrl),
         headers: {
@@ -482,7 +482,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         return b.modified!.compareTo(a.modified!);
       });
 
-      final transcriptUrl = '$flaskServerUrl/session_transcript_json/${widget.sessionId}';
+      final transcriptUrl = '$flaskServerUrl/session-transcript-json/${widget.sessionId}';
       final transcriptResponse = await http.get(
         Uri.parse(transcriptUrl),
         headers: {
@@ -513,7 +513,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       );
 
       if (videoFile.name.isNotEmpty) {
-        _videoUrl = '$flaskServerUrl/session_file/${widget.sessionId}/${videoFile.name}';
+        _videoUrl = '$flaskServerUrl/session-file/${widget.sessionId}/${videoFile.name}';
         _initializeVideoPlayer();
       }
 
@@ -695,7 +695,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   void _downloadFile(SessionFile file) async {
     try {
       final token = await InternalAuthService.getToken();
-      final downloadUrl = '$flaskServerUrl/session_file/${widget.sessionId}/${file.name}';
+      final downloadUrl = '$flaskServerUrl/session-file/${widget.sessionId}/${file.name}';
       
       final response = await http.get(
         Uri.parse(downloadUrl),
@@ -758,7 +758,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
       // IMPORTANT: encode the session id so '/', '+', '=' don't break the URL
       final encodedId = Uri.encodeComponent(widget.sessionId);
-      final downloadUrl = '$flaskServerUrl/session_zip/$encodedId';
+      final downloadUrl = '$flaskServerUrl/session-zip/$encodedId';
 
       final response = await http.get(
         Uri.parse(downloadUrl),
@@ -902,7 +902,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         vttFilename = 'subtitles_$cleanLanguage.vtt';
       }
 
-      final saveUrl = '$flaskServerUrl/session_transcript_save_vtt/${widget.sessionId}';
+      final saveUrl = '$flaskServerUrl/session-transcript-save-vtt/${widget.sessionId}';
       
       final requestBody = jsonEncode({
         'language': editedTranscript.language,
@@ -928,7 +928,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           _files = filesData.map((f) => SessionFile.fromJson(f)).toList();
         } else {
           // Reload files if not in response
-          final outputUrl = '$flaskServerUrl/session_output/${widget.sessionId}';
+          final outputUrl = '$flaskServerUrl/session-output/${widget.sessionId}';
           final outputResponse = await http.get(
             Uri.parse(outputUrl),
             headers: {

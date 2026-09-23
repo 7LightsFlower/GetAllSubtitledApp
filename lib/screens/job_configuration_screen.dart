@@ -335,7 +335,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
       if (token == null || token.isEmpty) return;
 
       final response = await http.get(
-        Uri.parse('$authBaseUrl/video_detail/${widget.videoKey}'),
+        Uri.parse('$authBaseUrl/video-detail/${widget.videoKey}'),
         headers: {'Authorization': 'Bearer $token'},
       );
 
@@ -550,7 +550,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
 
     try {
       final token = await _getToken();
-      final url = '$flaskServerUrl/session_output/$_savedSessionId';
+      final url = '$flaskServerUrl/session-output/$_savedSessionId';
 
       final response = await http.get(
         Uri.parse(url),
@@ -1374,7 +1374,7 @@ class _JobConfigurationScreenState extends State<JobConfigurationScreen> {
 
     try {
       final token = await _getToken();
-      final url = '$flaskServerUrl/session_output/$sessionId';
+      final url = '$flaskServerUrl/session-output/$sessionId';
 
       final response = await http.get(
         Uri.parse(url),

@@ -54,15 +54,15 @@ class _ExportDialogState extends State<ExportDialog> {
       // Use the correct endpoints from the Flask server
       String exportUrl;
       if (_selectedFormat == 'docx') {
-        exportUrl = '$flaskServerUrl/session_export_docx/${widget.sessionId}';
+        exportUrl = '$flaskServerUrl/session-export-docx/${widget.sessionId}';
       } else if (_selectedFormat == 'txt') {
-        exportUrl = '$flaskServerUrl/session_export_txt/${widget.sessionId}';
+        exportUrl = '$flaskServerUrl/session-export-txt/${widget.sessionId}';
       } else if (_selectedFormat == 'rtf') {
-        exportUrl = '$flaskServerUrl/session_export_rtf/${widget.sessionId}';
+        exportUrl = '$flaskServerUrl/session-export-rtf/${widget.sessionId}';
       } else if (_selectedFormat == 'json') {
-        exportUrl = '$flaskServerUrl/session_export_structured_json/${widget.sessionId}';
+        exportUrl = '$flaskServerUrl/session-export-structured-json/${widget.sessionId}';
       } else {
-        exportUrl = '$flaskServerUrl/session_export_txt/${widget.sessionId}';
+        exportUrl = '$flaskServerUrl/session-export-txt/${widget.sessionId}';
       }
 
       // Add language parameter

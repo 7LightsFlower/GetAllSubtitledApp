@@ -8,12 +8,12 @@ const String appTitle = 'Subtitles in many languages';
 // ─── Environment mode ─────────────────────────────────────────
 // true  → local `flutter run -d chrome`
 // false → production (Docker / Nginx)
-const bool isDevelopment = true;
+const bool isDevelopment = false;
 
 // ─── Server addresses ─────────────────────────────────────────
 /// Public URL where the web app is hosted (frontend, i.e. the browser origin).
 /// Used only for display / OAuth redirects, NOT as an API base.
-const String publicServerUrl = 'https://getallsubtitledapp.isl.iar.kit.edu';
+const String publicServerUrl = 'https://get-all-subtitled.isl.iar.kit.edu';
 
 /// Internal backend server (video processing + Dex OAuth; separate service).
 /// No trailing slash.

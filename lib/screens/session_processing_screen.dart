@@ -57,7 +57,7 @@ class _SessionProcessingScreenState extends State<SessionProcessingScreen> {
 
     try {
       final token = await InternalAuthService.getToken();
-      final url = '$flaskServerUrl/session_output/${widget.sessionId}';
+      final url = '$flaskServerUrl/session-output/${widget.sessionId}';
       
       final response = await http.get(
         Uri.parse(url),
