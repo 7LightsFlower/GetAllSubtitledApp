@@ -13,7 +13,7 @@ const bool isDevelopment = true;
 // ─── Server addresses ─────────────────────────────────────────
 /// Public URL where the web app is hosted (frontend, i.e. the browser origin).
 /// Used only for display / OAuth redirects, NOT as an API base.
-const String publicServerUrl = 'https://getallsubtitledapp.isl.iar.kit.edu';
+const String publicServerUrl = 'https://get-all-subtitled.isl.iar.kit.edu';
 
 /// Internal backend server (video processing + Dex OAuth; separate service).
 /// No trailing slash.
