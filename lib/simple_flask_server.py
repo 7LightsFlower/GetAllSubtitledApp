@@ -4369,7 +4369,7 @@ def _coverage_is_ok(mt_end: float, asr_end: float) -> bool:
     return (mt_end / asr_end) >= _MT_COVERAGE_MIN_FRACTION
 
 
-def _messages_look_done(raw: bytes, expected_langs=None) -> bool:
+def _messages_look_done(raw: bytes, expected_langs=None, log: bool = True) -> bool:
     """Return True once every MT track covers the ASR span.
 
     Language-ID caveat:
@@ -4386,6 +4386,27 @@ def _messages_look_done(raw: bytes, expected_langs=None) -> bool:
       That catches the "translation stops at minute 3 of a 45-minute
       video" problem without relying on a mapping we don't have.
     """
+
+    ...
+    if expected_langs and not mt_tracks:
+        if log:
+            logging.info("messages.json has ASR but no MT tracks yet")
+        return False
+
+        incomplete = []
+    for sender, mt_end in mt_tracks.items():
+        if not _coverage_is_ok(mt_end, asr_max_end):
+            incomplete.append(f"{sender} covers {mt_end:.0f}s of {asr_max_end:.0f}s")
+
+    if incomplete:
+        if log:
+            logging.info(
+                "messages.json stable but MT tracks still short: %s",
+                "; ".join(incomplete),
+            )
+        return False
+    ...
+    
     if not raw or len(raw) < MIN_MESSAGES_BYTES:
         return False
     try:
@@ -4429,7 +4450,8 @@ def _messages_look_done(raw: bytes, expected_langs=None) -> bool:
         return False
 
     if expected_langs and not mt_tracks:
-        logging.info("messages.json has ASR but no MT tracks yet")
+        if log:
+            logging.info("messages.json has ASR but no MT tracks yet")
         return False
 
     incomplete = []
@@ -4531,11 +4553,27 @@ def _count_messages(raw: bytes) -> int:
         return len(data)
     return 0
 
+# How often to re-fetch messages.json purely to refresh the progress
+# bar. The stability check already fetches it occasionally; this adds
+# a periodic tick so the bar moves even while the file is growing.
+_PROGRESS_FETCH_INTERVAL = 60.0  # was 30.0
+
+# If neither the file size nor the ASR/MT second counts have moved for
+# this long, emit one short heartbeat line so the panel doesn't look
+# frozen. Rare enough that it doesn't spam.
+_PROGRESS_HEARTBEAT_SECONDS = 180.0
 
 def wait_for_session_ready(
     session_id, token, server_url=None, expected_langs=None, timeout=1800
 ):
-    """Block until the internal server finishes producing messages.json."""
+    """Block until the internal server finishes producing messages.json.
+
+    Emits panel progress only when the observed second value actually
+    advances. An idle translation track — or a stall in ASR before any
+    translation has started — will not repeatedly re-print the same
+    line. A slow heartbeat is emitted every _PROGRESS_HEARTBEAT_SECONDS
+    while waiting, so the user can tell the job is still alive.
+    """
     if not server_url:
         server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
     server_url = server_url.rstrip("/")
@@ -4544,8 +4582,19 @@ def wait_for_session_ready(
     last_size = -1
     stable_count = 0
     unauthorized_count = 0
-    last_progress_fetch = 0.0
 
+    # Progress-tick bookkeeping. The "reported" values are the ones the
+    # panel has already seen; we only emit a new event when they move.
+    last_progress_fetch = 0.0
+    last_reported_mt_end = 0.0
+    last_reported_asr_end = 0.0
+    last_heartbeat = started
+
+    # Only surface "has ASR but no MT yet" once per session.
+    reported_no_mt = False
+
+    # Cooldown between two events of the same kind. Complements the
+    # value-advance check below.
     while True:
         if _is_cancelled(session_id):
             raise _JobCancelled(f"Session {_short_sid(session_id)} cancelled by user")
@@ -4556,6 +4605,8 @@ def wait_for_session_ready(
                 f"Session {_short_sid(session_id)} not ready after {timeout}s"
             )
 
+        # Give the internal server a moment to accept the upload before
+        # we start hammering it.
         if elapsed < 15:
             time.sleep(1)
             continue
@@ -4582,9 +4633,10 @@ def wait_for_session_ready(
             stable_count = 0
         last_size = size
 
-        # Only log when the size actually moved, or on the first and
-        # last poll of each stability window. Skips the "same size
-        # every 2 s" chatter that dominated the console.
+        # ── Console-only chatter ────────────────────────────────────
+        # Only log size changes, or the first/last poll of a stability
+        # window. The panel filters these out via
+        # _CONSOLE_ONLY_SUBSTRINGS; they stay here for debugging.
         if size_changed or stable_count in (1, _STABLE_NEEDED):
             logging.info(
                 "Session %s: messages.json size=%d status=%d (stable=%d/%d)",
@@ -4596,20 +4648,20 @@ def wait_for_session_ready(
             )
 
         # ── Progress tick ────────────────────────────────────────────
-        # Every _PROGRESS_FETCH_INTERVAL seconds, fetch the file again,
-        # parse the ASR/MT end timestamps, and push a fraction of the
-        # video duration to the panel. This is separate from the
-        # stability check so the bar moves smoothly even while the
-        # file is still growing.
+        # Fetch the file and push a fraction of the video duration to
+        # the panel, but only when the observed value has advanced.
         now = time.time()
         if now - last_progress_fetch >= _PROGRESS_FETCH_INTERVAL:
             last_progress_fetch = now
-            raw_for_progress = _fetch_messages_json_bytes(session_id, token, server_url)
+            raw_for_progress = _fetch_messages_json_bytes(
+                session_id, token, server_url
+            )
             mt_end, asr_end = _compute_translation_progress(raw_for_progress)
             video_dur = _session_video_duration(session_id)
 
             if video_dur > 0:
-                if mt_end > 0:
+                if mt_end > last_reported_mt_end:
+                    last_reported_mt_end = mt_end
                     prog = min(mt_end / video_dur, 0.99)
                     _job_log(
                         session_id,
@@ -4618,20 +4670,51 @@ def wait_for_session_ready(
                         stage="translating",
                         progress=prog,
                     )
-                elif asr_end > 0:
-                    # ASR done, translations not started yet — show a
-                    # small sliver so the bar isn't stuck at zero.
+                elif (
+                    mt_end <= 0
+                    and asr_end > last_reported_asr_end
+                ):
+                    last_reported_asr_end = asr_end
                     prog = min((asr_end / video_dur) * 0.05, 0.05)
                     _job_log(
                         session_id,
-                        f"Transcribing… {asr_end:.0f}s / " f"{video_dur:.0f}s",
+                        f"Transcribing… {asr_end:.0f}s / {video_dur:.0f}s",
                         stage="transcribing",
                         progress=prog,
                     )
 
+        # ── Heartbeat ────────────────────────────────────────────────
+        # If nothing has been reported for a while — neither the size
+        # nor the ASR/MT values are moving — emit one short line so the
+        # user knows we are still polling and not wedged.
+        if now - last_heartbeat >= _PROGRESS_HEARTBEAT_SECONDS:
+            last_heartbeat = now
+            if last_reported_mt_end > 0:
+                _job_log(
+                    session_id,
+                    f"Waiting — translation still at {last_reported_mt_end:.0f}s",
+                    stage="translating",
+                )
+            elif last_reported_asr_end > 0:
+                _job_log(
+                    session_id,
+                    f"Waiting — transcription still at {last_reported_asr_end:.0f}s",
+                    stage="transcribing",
+                )
+            else:
+                _job_log(
+                    session_id,
+                    "Waiting for the internal server…",
+                    stage="starting",
+                )
+
+        # ── Readiness gate ───────────────────────────────────────────
         if stable_count >= _STABLE_NEEDED:
             raw = _fetch_messages_json_bytes(session_id, token, server_url)
-            if _messages_look_done(raw, expected_langs):
+            done = _messages_look_done(
+                raw, expected_langs, log=not reported_no_mt
+            )
+            if done:
                 logging.info(
                     "✅ Session %s appears complete (%d bytes, %d msgs)",
                     _short_sid(session_id),
@@ -4639,11 +4722,10 @@ def wait_for_session_ready(
                     _count_messages(raw),
                 )
                 return True
-            logging.warning(
-                "Session %s: size stable but content invalid, "
-                "resetting stability counter",
-                _short_sid(session_id),
-            )
+
+            # _messages_look_done logged why it failed, at most once.
+            # Remember that we've heard it and reset the stability gate.
+            reported_no_mt = True
             stable_count = 0
 
         time.sleep(2)
