@@ -1,11 +1,11 @@
 {
-    "name": "GetAllSubtitledApp",
-    "short_name": "GetAllSubtitledApp",
+    "name": "Subtitles in many languages",
+    "short_name": "Subtitles",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#4F46E5",
     "theme_color": "#4F46E5",
-    "description": "A new Flutter project.",
+    "description": "Subtitles in many languages — upload a lecture, get translated transcripts and subtitles in 20+ languages.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
