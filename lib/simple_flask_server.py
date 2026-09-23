@@ -4406,7 +4406,7 @@ def _messages_look_done(raw: bytes, expected_langs=None, log: bool = True) -> bo
             )
         return False
     ...
-    
+
     if not raw or len(raw) < MIN_MESSAGES_BYTES:
         return False
     try:
@@ -4711,17 +4711,32 @@ def wait_for_session_ready(
         # ── Readiness gate ───────────────────────────────────────────
         if stable_count >= _STABLE_NEEDED:
             raw = _fetch_messages_json_bytes(session_id, token, server_url)
-            done = _messages_look_done(
-                raw, expected_langs, log=not reported_no_mt
-            )
-            if done:
+            if _messages_look_done(raw, expected_langs):
+                # Confirm once more after a short pause. A single
+                # passing check can be a lucky moment during a
+                # mid-stream stall; two in a row five seconds apart is
+                # a much stronger signal that the server is really done.
+                time.sleep(5)
+                raw2 = _fetch_messages_json_bytes(session_id, token, server_url)
+                if _messages_look_done(raw2, expected_langs):
+                    logging.info(
+                        "✅ Session %s appears complete (%d bytes, %d msgs)",
+                        _short_sid(session_id),
+                        len(raw2),
+                        _count_messages(raw2),
+                    )
+                    return True
                 logging.info(
-                    "✅ Session %s appears complete (%d bytes, %d msgs)",
+                    "Session %s: first ready check passed but the "
+                    "second did not — still growing, continuing to wait",
                     _short_sid(session_id),
-                    len(raw),
-                    _count_messages(raw),
                 )
-                return True
+            else:
+                logging.warning(
+                    "Session %s: size stable but content invalid, "
+                    "resetting stability counter",
+                    _short_sid(session_id),
+                )
 
             # _messages_look_done logged why it failed, at most once.
             # Remember that we've heard it and reset the stability gate.
@@ -5904,7 +5919,72 @@ def _session_files_look_incomplete(session_dir):
     # If we have more languages with text than VTTs, we're behind.
     if len(vtt_files) < len(languages_with_text):
         return True
+
+    # If the local messages.json still shows short MT tracks, we're behind.
+    if not _local_transcripts_cover_full_span(session_dir):
+        logging.info(
+            "_session_files_look_incomplete: %s — local MT coverage "
+            "is short, will re-download",
+            _short_sid(os.path.basename(session_dir)),
+        )
+        return True
+
     return False
+
+
+def _local_transcripts_cover_full_span(session_dir) -> bool:
+    """True if the local messages.json shows every MT track ending close
+    to the ASR end. Used to decide whether a re-download is warranted.
+
+    This is the local counterpart of _messages_look_done: same coverage
+    rule, but reading from disk instead of from the internal server.
+    """
+    messages_path = os.path.join(session_dir, "messages.json")
+    if not os.path.exists(messages_path):
+        return False
+    try:
+        with open(messages_path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return False
+    if not raw or len(raw) < MIN_MESSAGES_BYTES:
+        return False
+
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return False
+    if not isinstance(data, list):
+        return False
+
+    asr_max_end = 0.0
+    mt_tracks: dict[str, float] = {}
+    for item in data:
+        if not (isinstance(item, list) and len(item) >= 2):
+            continue
+        try:
+            m = json.loads(item[1]) if isinstance(item[1], str) else item[1]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(m, dict):
+            continue
+        if not m.get("seq", "").strip():
+            continue
+        try:
+            end = float(m.get("end", 0) or 0)
+        except (ValueError, TypeError):
+            end = 0.0
+        sender = m.get("sender", "")
+        if sender.startswith("asr:"):
+            if end > asr_max_end:
+                asr_max_end = end
+        elif sender.startswith("mt:") or sender.startswith("translation:"):
+            if end > mt_tracks.get(sender, 0.0):
+                mt_tracks[sender] = end
+
+    if not mt_tracks or asr_max_end <= 0:
+        return False
+    return all(_coverage_is_ok(mt_end, asr_max_end) for mt_end in mt_tracks.values())
 
 
 @app.route("/api/youtube-download-and-upload", methods=["POST", "OPTIONS"])
