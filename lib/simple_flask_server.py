@@ -486,6 +486,60 @@ def _public_base_url() -> str:
         return f"{proto}://{fwd_host}".rstrip("/")
     return request.host_url.rstrip("/")
 
+def _extract_session_id(resp: requests.Response) -> str | None:
+    """Find the session id the internal server assigned to an upload.
+
+    Looks, in order, at:
+      1. the final redirect URL,
+      2. a JSON body (top level, then under "data"),
+      3. a session_url / url / link field in the JSON,
+      4. an HTML body containing a /archivesession/<id> link.
+
+    Returns None if nothing usable is found.
+    """
+    # 1. Redirect URL
+    final_url = resp.url or ""
+    for marker in ("/archivesession/", "/session/"):
+        if marker in final_url:
+            sid = final_url.split(marker, 1)[-1].split("/")[0].strip()
+            if sid:
+                return sid
+
+    # 2./3. JSON body
+    try:
+        payload = resp.json()
+    except (ValueError, TypeError):
+        payload = None
+
+    def _from_dict(d: dict) -> str | None:
+        for key in ("session_id", "sessionId", "session", "id"):
+            v = d.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        for key in ("session_url", "url", "link"):
+            v = d.get(key)
+            if isinstance(v, str) and "/archivesession/" in v:
+                return v.split("/archivesession/", 1)[-1].split("/")[0]
+        return None
+
+    if isinstance(payload, dict):
+        sid = _from_dict(payload)
+        if sid:
+            return sid
+        nested = payload.get("data")
+        if isinstance(nested, dict):
+            sid = _from_dict(nested)
+            if sid:
+                return sid
+
+    # 4. HTML body
+    body = resp.text or ""
+    m = re.search(r"/archivesession/([^\"'<>\s/]+)", body)
+    if m:
+        return m.group(1).strip()
+
+    return None
+
 
 def _thumbnail_absolute_url(video: dict) -> str | None:
     """Build a browser-usable, percent-encoded thumbnail URL.
@@ -512,6 +566,39 @@ def _short_sid(session_id: str | None, keep: int = 8) -> str:
     if not session_id:
         return "<none>"
     return session_id[:keep] + "…"
+
+
+def _note_404(session_id: str, url: str) -> int:
+    """Bump and return the consecutive-404 counter for a session.
+
+    Logs the first and fifth occurrence, then silences the rest so a
+    stale session id doesn't fill the log with one line every poll.
+    Returns the new count so the caller can decide whether to give up.
+    """
+    with _consecutive_404s_lock:
+        n = _consecutive_404s.get(session_id, 0) + 1
+        _consecutive_404s[session_id] = n
+
+    if n == 1:
+        logging.warning(
+            "messages.json 404 for session %s (%s)",
+            _short_sid(session_id),
+            url,
+        )
+    elif n == 5:
+        logging.warning(
+            "messages.json still 404 for session %s after %d attempts; "
+            "further 404s for this session will be silenced",
+            _short_sid(session_id),
+            n,
+        )
+    return n
+
+
+def _clear_404(session_id: str) -> None:
+    """Forget the 404 counter for a session once it starts responding."""
+    with _consecutive_404s_lock:
+        _consecutive_404s.pop(session_id, None)
 
 
 # Which panel entry (if any) this thread's log lines should be routed to.
@@ -807,6 +894,15 @@ _JOB_TTL = 7200  # keep finished entries for 2 hours
 # download; the /cancel_session endpoint adds to it.
 _cancelled_sessions: set[str] = set()
 _cancelled_sessions_lock = threading.Lock()
+
+
+# ─── ADD THIS ──────────────────────────────────────────────────────────
+# Consecutive HTTP 404s per session. Used to keep a wrong or stale
+# session id from spamming the log and the progress panel while the
+# background worker spins. Reset as soon as the session responds.
+_consecutive_404s: dict[str, int] = {}
+_consecutive_404s_lock = threading.Lock()
+# ───────────────────────────────────────────────────────────────────────
 
 
 class _JobCancelled(Exception):
@@ -4269,7 +4365,15 @@ def _fetch_messages_json_size(session_id, token, server_url=None):
         server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
     server_url = server_url.rstrip("/")
     url = f"{server_url}/archivemediafile/{session_id}/messages.json"
-    return _remote_size(url, token)
+
+    size, status = _remote_size(url, token)
+
+    if status == 404:
+        _note_404(session_id, url)
+    elif status == 200:
+        _clear_404(session_id)
+
+    return size, status
 
 
 def _fetch_messages_json_bytes(session_id, token, server_url=None):
@@ -4278,6 +4382,7 @@ def _fetch_messages_json_bytes(session_id, token, server_url=None):
         server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
     server_url = server_url.rstrip("/")
     url = f"{server_url}/archivemediafile/{session_id}/messages.json"
+
     try:
         r = requests.get(
             url,
@@ -4288,8 +4393,16 @@ def _fetch_messages_json_bytes(session_id, token, server_url=None):
             allow_redirects=True,
         )
         if r.status_code == 200:
+            _clear_404(session_id)
             return r.content
-        logging.warning("fetch_messages_json: HTTP %s for %s", r.status_code, url)
+        if r.status_code == 404:
+            # Route through the shared counter so a wrong id doesn't
+            # re-log here after the size probe already complained.
+            _note_404(session_id, url)
+        else:
+            logging.warning(
+                "fetch_messages_json: HTTP %s for %s", r.status_code, url
+            )
     except requests.exceptions.RequestException as e:
         logging.warning("fetch_messages_json failed: %s", e)
     return b""
@@ -4634,17 +4747,39 @@ def wait_for_session_ready(
         last_size = size
 
         # ── Console-only chatter ────────────────────────────────────
-        # Only log size changes, or the first/last poll of a stability
-        # window. The panel filters these out via
-        # _CONSOLE_ONLY_SUBSTRINGS; they stay here for debugging.
-        if size_changed or stable_count in (1, _STABLE_NEEDED):
+        # Only log when something meaningful changes. On a healthy
+        # session that means the size moved, or we just entered or
+        # finished a stability window. On a 404 the size never moves,
+        # so the line is emitted once and never again.
+        if status == 200:
+            if size_changed or stable_count in (1, _STABLE_NEEDED):
+                logging.info(
+                    "Session %s: messages.json size=%d (stable=%d/%d)",
+                    _short_sid(session_id),
+                    size,
+                    stable_count,
+                    _STABLE_NEEDED,
+                )
+        elif status != 200 and size_changed:
             logging.info(
-                "Session %s: messages.json size=%d status=%d (stable=%d/%d)",
+                "Session %s: messages.json status=%d "
+                "(waiting for the internal server to publish the session)",
                 _short_sid(session_id),
-                size,
                 status,
-                stable_count,
-                _STABLE_NEEDED,
+            )
+
+        # A long run of 404s almost always means the session id is
+        # wrong (e.g. the upload succeeded but the response didn't
+        # contain the real id, and a fallback was used). Fail early
+        # instead of polling until the 30-minute timeout.
+        with _consecutive_404s_lock:
+            n404 = _consecutive_404s.get(session_id, 0)
+        if n404 >= 30:
+            raise RuntimeError(
+                f"Session {_short_sid(session_id)} returned HTTP 404 on "
+                f"{n404} consecutive polls to {server_url}. The session "
+                f"id is almost certainly wrong — check the upload "
+                f"response in the backend log."
             )
 
         # ── Progress tick ────────────────────────────────────────────
@@ -4843,6 +4978,9 @@ def process_session_in_background(
         _job_finish(session_id, error=f"{type(e).__name__}: {e}")
     finally:
         _log_target.reset(token_cv)
+        # Don't leak the 404 counter after the job finishes either way.
+        with _consecutive_404s_lock:
+            _consecutive_404s.pop(session_id, None)
 
 
 @app.route("/extract_video_subtitles/<path:session_id>", methods=["GET"])
@@ -6723,34 +6861,26 @@ def upload_lecture():
             )
 
         # ─── 7. Extract session id ─────────────────────────────────
-        final_url = resp.url
-        session_id = None
-
-        if "/archivesession/" in final_url:
-            session_id = final_url.split("/archivesession/")[-1].split("/")[0]
-            logging.info("Extracted session ID from URL: %s", session_id)
-        elif "/session/" in final_url:
-            session_id = final_url.split("/session/")[-1].split("/")[0]
-            logging.info("Extracted session ID from URL: %s", session_id)
-
-        if not session_id and session_name and resp.status_code < 400:
-            user_email = data.get("path", "/home/admin@example.com")
-            user_email = user_email.strip("/").split("/")[-1]
-            path = f"/home/{user_email}/{session_name}"
-            session_id = base64.b64encode(path.encode()).decode()
-            logging.info("Generated fallback session ID: %s", session_id)
+        session_id = _extract_session_id(resp)
+        if session_id:
+            logging.info("Extracted session ID from response: %s", session_id)
 
         if not session_id:
             logging.error(
-                "Upload to %s returned %s without a session id. Body: %s",
+                "Upload to %s returned %s without a usable session id. "
+                "Body: %s",
                 target_url,
                 resp.status_code,
-                resp.text[:500],
+                resp.text[:1000],
             )
             return (
                 jsonify(
                     {
-                        "error": "Upload did not produce a session id",
+                        "error": (
+                            "Internal server accepted the upload but did "
+                            "not return a session id. See the backend log "
+                            "for the response body."
+                        ),
                         "status_code": resp.status_code,
                         "response_preview": resp.text[:500],
                     }
@@ -7072,20 +7202,26 @@ def forward_to_internal(video_key):
             )
 
         # ─── 6. Extract the session id ────────────────────────
-        final_url = resp.url
-        session_id = None
-
-        if "/archivesession/" in final_url:
-            session_id = final_url.split("/archivesession/")[-1].split("/")[0]
-        elif "/session/" in final_url:
-            session_id = final_url.split("/session/")[-1].split("/")[0]
-
-        if not session_id and session_name:
-            path = f"/home/{user_email}/{session_name}"
-            session_id = base64.b64encode(path.encode()).decode()
+        session_id = _extract_session_id(resp)
+        if session_id:
+            logging.info(
+                "forward_to_internal: session id from response: %s", session_id
+            )
 
         if not session_id:
-            return jsonify({"error": "No session id from internal server"}), 502
+            logging.error(
+                "forward_to_internal: no session id in response. Body: %s",
+                resp.text[:1000],
+            )
+            return (
+                jsonify(
+                    {
+                        "error": "Internal server did not return a session id",
+                        "response_preview": resp.text[:500],
+                    }
+                ),
+                502,
+            )
 
         # ─── 7. Clear stale local state for this session ──────
         session_dir = os.path.join(SESSION_FOLDER, session_id)
