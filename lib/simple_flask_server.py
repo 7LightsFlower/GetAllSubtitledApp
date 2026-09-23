@@ -5066,16 +5066,21 @@ def upload_chunk():
 def finish_upload():
     """Complete a chunked upload and persist the file to disk."""
     data = request.get_json()
-    filename = data.get("filename")
+    original_filename = data.get("filename")
     auto_segmentation = data.get("auto_segmentation", False)
-    if not filename:
+    if not original_filename:
         return jsonify({"message": "Missing filename"}), 400
-    chunks = chunk_storage.get(filename)
+
+    # chunk_storage is keyed by whatever name /upload-chunk was called
+    # with — look it up under that name, not the normalised one.
+    chunks = chunk_storage.get(original_filename)
     if not chunks or any(chunk is None for chunk in chunks):
         return jsonify({"message": "Incomplete upload"}), 400
     combined = b"".join(chunks)
 
     # ============ FIX: Ensure .mp4 extension ============
+    # Only used for the on-disk filename; the storage key stays as-is.
+    filename = original_filename
     if not filename.lower().endswith(".mp4"):
         base_name = os.path.splitext(filename)[0]
         filename = f"{base_name}.mp4"
@@ -5115,7 +5120,12 @@ def finish_upload():
         "segmentation_progress": 100 if auto_segmentation else 0,
     }
     videos.append(project)
-    del chunk_storage[filename]
+
+    # Remove the chunk buffer under the key the client actually used.
+    # pop() instead of del so a duplicate /finish-upload call can't crash
+    # the second time around.
+    chunk_storage.pop(original_filename, None)
+
     save_state()
     return jsonify({"message": "Upload finished", "project": project}), 200
 
