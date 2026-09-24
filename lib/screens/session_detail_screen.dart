@@ -142,9 +142,9 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   String _date = '';
 
   // Language lists using ISO 639-1 codes from LanguageConfig
-  final List<String> _inputLanguages = ['en'];
-  final List<String> _outputLanguages = ['de'];
-  final List<String> _audioLanguages = ['de'];
+  final List<String> _inputLanguages = ['en','de'];
+  final List<String> _outputLanguages = ['en','de'];
+  final List<String> _audioLanguages = <String>[];
 
   String _availability = 'private';
   bool _profanityFilter = true;
@@ -280,7 +280,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           ..addAll((data['output_languages'] as List?)?.cast<String>() ?? ['de']);
         _audioLanguages
           ..clear()
-          ..addAll((data['audio_languages'] as List?)?.cast<String>() ?? ['de']);
+          ..addAll((data['audio_languages'] as List?)?.cast<String>() ?? const []);
 
         _availability       = data['availability']       as String? ?? _availability;
         _format             = data['format']             as String? ?? _format;
@@ -1163,6 +1163,25 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     if (!_formKey.currentState!.validate()) return;
     _formKey.currentState!.save();
 
+    if (_inputLanguages.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please pick at least one input language.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+    if (_outputLanguages.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please pick at least one output language.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
     setState(() => _isSubmitting = true);
 
     try {
@@ -1865,6 +1884,67 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     );
   }
 
+    Widget _buildLanguageBlock({
+    required String title,
+    required List<String> availableCodes,
+    required List<String> selected,
+    required String Function(String code) nameFor,
+    required void Function(String code) onToggle,
+    required void Function(List<String>) onReplaceAll,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                title,
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+            TextButton(
+              onPressed: selected.length == availableCodes.length
+                  ? null
+                  : () => onReplaceAll([...availableCodes]),
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                minimumSize: const Size(0, 32),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: const Text('All'),
+            ),
+            const SizedBox(width: 4),
+            TextButton(
+              onPressed: selected.isEmpty
+                  ? null
+                  : () => onReplaceAll(const []),
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                minimumSize: const Size(0, 32),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: const Text('None'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          children: availableCodes.map((code) {
+            final displayName = nameFor(code);
+            return FilterChip(
+              label: Text('$displayName ($code)'),
+              selected: selected.contains(code),
+              onSelected: (_) => onToggle(code),
+            );
+          }).toList(),
+        ),
+      ],
+    );
+  }
+
   Widget _buildSettingsPanel() {
     final inputLangCodes = LanguageConfig.getSortedInputLanguages();
     final outputLangCodes = LanguageConfig.getSortedOutputLanguages();
@@ -1924,57 +2004,45 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         ),
         const SizedBox(height: 16),
 
-        // Input Languages
-        const Text('Input Languages',
-            style: TextStyle(fontWeight: FontWeight.bold)),
-        const SizedBox(height: 8),
-        Wrap(
-          spacing: 8,
-          runSpacing: 4,
-          children: inputLangCodes.map((code) {
-            final displayName = LanguageConfig.getInputLanguageName(code);
-            return FilterChip(
-              label: Text('$displayName ($code)'),
-              selected: _inputLanguages.contains(code),
-              onSelected: (selected) => _toggleInputLanguage(code),
-            );
-          }).toList(),
+        _buildLanguageBlock(
+          title: 'Input Languages',
+          availableCodes: inputLangCodes,
+          selected: _inputLanguages,
+          nameFor: LanguageConfig.getInputLanguageName,
+          onToggle: _toggleInputLanguage,
+          onReplaceAll: (newList) => _updateSetting(() {
+            _inputLanguages
+              ..clear()
+              ..addAll(newList);
+          }),
         ),
         const SizedBox(height: 16),
 
-        // Output Languages
-        const Text('Output Languages (Translation)',
-            style: TextStyle(fontWeight: FontWeight.bold)),
-        const SizedBox(height: 8),
-        Wrap(
-          spacing: 8,
-          runSpacing: 4,
-          children: outputLangCodes.map((code) {
-            final displayName = LanguageConfig.getOutputLanguageName(code);
-            return FilterChip(
-              label: Text('$displayName ($code)'),
-              selected: _outputLanguages.contains(code),
-              onSelected: (selected) => _toggleOutputLanguage(code),
-            );
-          }).toList(),
+        _buildLanguageBlock(
+          title: 'Output Languages (Translation)',
+          availableCodes: outputLangCodes,
+          selected: _outputLanguages,
+          nameFor: LanguageConfig.getOutputLanguageName,
+          onToggle: _toggleOutputLanguage,
+          onReplaceAll: (newList) => _updateSetting(() {
+            _outputLanguages
+              ..clear()
+              ..addAll(newList);
+          }),
         ),
         const SizedBox(height: 16),
 
-        // Audio Languages
-        const Text('Generated Audio Languages',
-            style: TextStyle(fontWeight: FontWeight.bold)),
-        const SizedBox(height: 8),
-        Wrap(
-          spacing: 8,
-          runSpacing: 4,
-          children: audioLangCodes.map((code) {
-            final displayName = LanguageConfig.getAudioLanguageName(code);
-            return FilterChip(
-              label: Text('$displayName ($code)'),
-              selected: _audioLanguages.contains(code),
-              onSelected: (selected) => _toggleAudioLanguage(code),
-            );
-          }).toList(),
+        _buildLanguageBlock(
+          title: 'Generated Audio Languages',
+          availableCodes: audioLangCodes,
+          selected: _audioLanguages,
+          nameFor: LanguageConfig.getAudioLanguageName,
+          onToggle: _toggleAudioLanguage,
+          onReplaceAll: (newList) => _updateSetting(() {
+            _audioLanguages
+              ..clear()
+              ..addAll(newList);
+          }),
         ),
         const SizedBox(height: 16),
 
@@ -3152,7 +3220,9 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                             borderRadius: BorderRadius.circular(12),
                           ),
                           child: Text(
-                            '${_inputLanguages.length} in · ${_outputLanguages.length} out',
+                            '${_inputLanguages.length} in · '
+                            '${_outputLanguages.length} out · '
+                            '${_audioLanguages.length} audio',
                             style: TextStyle(
                               fontSize: 10,
                               color: Colors.blue.shade700,
