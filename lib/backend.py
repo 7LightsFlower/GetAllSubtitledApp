@@ -6924,13 +6924,21 @@ def upload_lecture():
         if session_id:
             logging.info("Extracted session ID from response: %s", session_id)
 
+        # Fallback: KIT returns a generic "Success" page with no id.
+        # Reconstruct from the path convention base64("/home/<user>/<name>").
+        if not session_id and session_name:
+            user_email = data.get("path", "/home/admin@example.com")
+            user_email = user_email.strip("/").split("/")[-1]
+            path = f"/home/{user_email}/{session_name}"
+            session_id = base64.b64encode(path.encode()).decode()
+            logging.info("Generated session ID: %s", session_id)
+
         if not session_id:
             logging.error(
-                "Upload to %s returned %s without a usable session id. "
-                "Body: %s",
+                "Upload to %s returned %s without a usable session id. Body:\n%s",
                 target_url,
                 resp.status_code,
-                resp.text,
+                resp.text,           # full body — fires at most once per upload
             )
             return (
                 jsonify(
@@ -7259,8 +7267,17 @@ def forward_to_internal(video_key):
         # ─── 6. Extract the session id ────────────────────────
         session_id = _extract_session_id(resp)
         if session_id:
+            logging.info("forward_to_internal: session id from response: %s", session_id)
+
+        # Fallback: KIT's upload endpoint returns a generic "Success"
+        # page with no id. Its session ids follow a fixed convention —
+        # base64("/home/<user>/<session_name>") — so reconstruct it.
+        if not session_id and session_name:
+            user_email = "admin@example.com"
+            path = f"/home/{user_email}/{session_name}"
+            session_id = base64.b64encode(path.encode()).decode()
             logging.info(
-                "forward_to_internal: session id from response: %s", session_id
+                "forward_to_internal: generated session ID: %s", session_id
             )
 
         if not session_id:
@@ -7272,12 +7289,12 @@ def forward_to_internal(video_key):
                 jsonify(
                     {
                         "error": "Internal server did not return a session id",
-                       
+                        "status_code": resp.status_code,
+                        "response_preview": resp.text[:500],
                     }
                 ),
                 502,
             )
-
         # ─── 7. Clear stale local state for this session ──────
         session_dir = os.path.join(SESSION_FOLDER, session_id)
         if os.path.exists(session_dir):
