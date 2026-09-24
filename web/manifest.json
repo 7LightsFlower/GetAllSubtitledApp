@@ -5,7 +5,7 @@
     "display": "standalone",
     "background_color": "#4F46E5",
     "theme_color": "#4F46E5",
-    "description": "Subtitles in many languages — upload a lecture, get translated transcripts and subtitles in 20+ languages.",
+    "description": "Subtitles in many languages — upload a video, get translated transcripts and subtitles in 20+ languages.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
