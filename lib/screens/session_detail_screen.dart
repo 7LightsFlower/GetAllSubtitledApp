@@ -3110,11 +3110,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
             onPressed: _refresh,
             tooltip: 'Refresh',
           ),
-          IconButton(
-            icon: Icon(_isConnected ? Icons.link : Icons.link_off),
-            onPressed: _isConnecting ? null : _connectToInternal,
-            tooltip: _isConnected ? 'Reconnect' : 'Connect',
-          ),
         ],
       ),
       body: Form(
@@ -3187,10 +3182,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
               ),
               const SizedBox(height: 16),
 
-              // ─── Server picker ───
-              _buildServerPicker(),
-              const SizedBox(height: 16),
-
               // ─── Job Settings (expandable) ───
               Card(
                 elevation: 2,
@@ -3247,6 +3238,10 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                   ),
                 ),
               ),
+              const SizedBox(height: 16),
+
+              // ─── Server picker ───
+              _buildServerPicker(),
               const SizedBox(height: 16),
 
               // ─── Connect / Token section ───
@@ -3306,26 +3301,24 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                               ),
                             ),
                             const SizedBox(width: 4),
-                            ElevatedButton(
+                            IconButton(
                               onPressed: _isConnecting
                                   ? null
                                   : _connectToInternal,
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: _isConnected
-                                    ? Colors.grey
-                                    : Colors.blue,
-                                foregroundColor: Colors.white,
-                              ),
-                              child: _isConnecting
+                              tooltip: _isConnected ? 'Reconnect' : 'Connect',
+                              icon: _isConnecting
                                   ? const SizedBox(
                                       width: 20,
                                       height: 20,
                                       child: CircularProgressIndicator(
-                                          strokeWidth: 2),
+                                        strokeWidth: 2,
+                                      ),
                                     )
-                                  : Text(_isConnected
-                                      ? 'Reconnect'
-                                      : 'Connect'),
+                                  : Icon(
+                                      _isConnected
+                                          ? Icons.link
+                                          : Icons.link_off,
+                                    ),
                             ),
                           ],
                         ),
