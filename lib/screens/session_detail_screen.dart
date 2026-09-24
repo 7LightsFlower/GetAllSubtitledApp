@@ -2291,6 +2291,99 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   }
 
   // ═══════════════════════════════════════════════════════════════════
+  //  WIDGET BUILDERS – SERVER PICKER
+  // ═══════════════════════════════════════════════════════════════════
+
+  Widget _buildServerPicker() {
+    final currentLabel = internalServerLabels[internalServerUrl] ?? internalServerUrl;
+    return Card(
+      elevation: 1,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Row(
+          children: [
+            const Icon(Icons.dns_outlined, size: 20, color: Colors.blueGrey),
+            const SizedBox(width: 10),
+            const Text(
+              'Internal server',
+              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    currentLabel,
+                    style: const TextStyle(fontSize: 13),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  Text(
+                    internalServerUrl,
+                    style: TextStyle(fontSize: 10, color: Colors.grey[600]),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            PopupMenuButton<String>(
+              tooltip: 'Switch server',
+              icon: const Icon(Icons.swap_horiz, size: 20),
+              onSelected: _changeServer,
+              itemBuilder: (context) => internalServerOptions.map((url) {
+                final isSelected = url == internalServerUrl;
+                final label = internalServerLabels[url] ?? url;
+                return PopupMenuItem<String>(
+                  value: url,
+                  child: Row(
+                    children: [
+                      Icon(
+                        isSelected
+                            ? Icons.radio_button_checked
+                            : Icons.radio_button_unchecked,
+                        size: 18,
+                        color: isSelected ? Colors.blue : Colors.grey,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              label,
+                              style: TextStyle(
+                                fontWeight: isSelected
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
+                              ),
+                            ),
+                            Text(
+                              url,
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: Colors.grey[600],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
   //  WIDGET BUILDERS – OUTPUT CHECK
   // ═══════════════════════════════════════════════════════════════════
 
@@ -2965,16 +3058,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
               );
             }).toList(),
           ),
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _refresh,
-            tooltip: 'Refresh',
-          ),
-          IconButton(
-            icon: Icon(_isConnected ? Icons.link : Icons.link_off),
-            onPressed: _isConnecting ? null : _connectToInternal,
-            tooltip: _isConnected ? 'Reconnect' : 'Connect',
-          ),
         ],
       ),
       body: Form(
@@ -2986,32 +3069,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
             children: [
               // ─── Session detail header (thumbnail, title, meta) ───
               _buildDetailHeader(),
-              const SizedBox(height: 24),
-              // ─── Active server indicator ───
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                margin: const EdgeInsets.only(bottom: 12),
-                decoration: BoxDecoration(
-                  color: Colors.blueGrey[50],
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: Colors.blueGrey[100]!),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.dns_outlined, size: 16, color: Colors.blueGrey),
-                    const SizedBox(width: 8),
-                    const Text('Server: ', style: TextStyle(fontWeight: FontWeight.w500)),
-                    Expanded(
-                      child: Text(
-                        internalServerUrl,
-                        style: const TextStyle(fontSize: 12),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+              const SizedBox(height: 16),
               // ─── Job History card ───
               Card(
                 elevation: 2,
@@ -3070,6 +3128,10 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                   ),
                 ),
               ),
+              const SizedBox(height: 16),
+
+              // ─── Server picker ───
+              _buildServerPicker(),
               const SizedBox(height: 16),
 
               // ─── Job Settings (expandable) ───
@@ -3145,20 +3207,15 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                         Row(
                           children: [
                             Icon(
-                              _isConnected
-                                  ? Icons.check_circle
-                                  : Icons.error,
-                              color:
-                                  _isConnected ? Colors.green : Colors.red,
+                              _isConnected ? Icons.check_circle : Icons.info_outline,
+                              color: _isConnected ? Colors.green : Colors.grey,
                             ),
                             const SizedBox(width: 8),
                             Text(
-                              _isConnected ? 'Connected' : 'Not connected',
+                              _isConnected ? 'Connected' : 'Not connected — required for processing',
                               style: TextStyle(
                                 fontWeight: FontWeight.w500,
-                                color: _isConnected
-                                    ? Colors.green
-                                    : Colors.red,
+                                color: _isConnected ? Colors.green : Colors.grey.shade700,
                               ),
                             ),
                           ],
