@@ -296,25 +296,29 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         Uri.parse('$authBaseUrl/video-detail/${widget.videoKey}'),
         headers: {'Authorization': 'Bearer $token'},
       );
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
-        final detail = SessionDetail.fromJson(data);
-        if (!mounted) return;
-        setState(() {
-          _detail = detail;
-          _isLoadingDetail = false;
-          // Populate the session name controller once detail is available
-          if (_sessionNameController.text.isEmpty) {
-            _sessionNameController.text = _getDefaultSessionName();
-            _topicNameController.text = _sessionNameController.text;
-          }
-        });
-        // Start the video now that we know the detail object.
-        _initializeVideoPlayer(detail);
-      } else {
-        throw Exception('Failed to load detail (HTTP ${response.statusCode})');
-      }
-    } catch (e) {
+if (response.statusCode == 200) {
+  final data = jsonDecode(response.body) as Map<String, dynamic>;
+  final detail = SessionDetail.fromJson(data);
+  ...
+} else {
+  final body = response.body;
+  String detail;
+  try {
+    final parsed = jsonDecode(body);
+    detail = (parsed is Map && parsed['error'] != null)
+        ? parsed['error'].toString()
+        : body;
+  } catch (_) {
+    final text = body
+        .replaceAll(RegExp(r'<[^>]*>'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    detail = text.length > 200 ? '${text.substring(0, 200)}…' : text;
+  }
+  throw Exception(
+    'Failed to load detail (HTTP ${response.statusCode}): $detail',
+  );
+} catch (e) {
       if (!mounted) return;
       setState(() {
         _detailError = e.toString();

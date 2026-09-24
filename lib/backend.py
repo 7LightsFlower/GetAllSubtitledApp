@@ -5256,7 +5256,6 @@ def video_detail(video_key):
 
 @app.route("/media/<video_key>")
 def serve_video(video_key):
-    """Serve the video file for the given video key."""
     project = next((p for p in videos if p["key"] == video_key), None)
     if not project:
         return jsonify({"error": "Video not found"}), 404
@@ -5266,7 +5265,13 @@ def serve_video(video_key):
     file_path = os.path.join(UPLOAD_FOLDER, file_name)
     if not os.path.exists(file_path):
         return jsonify({"error": f'File "{file_name}" not found on disk'}), 404
-    return send_file(file_path, as_attachment=False)
+
+    return send_file(
+        file_path,
+        as_attachment=False,
+        mimetype="video/mp4",
+        conditional=True,
+    )
 
 
 @app.route("/thumbnails/<filename>")
