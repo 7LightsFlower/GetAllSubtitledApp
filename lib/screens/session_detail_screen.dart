@@ -125,6 +125,9 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   VideoPlayerController? _videoController;
   bool _isVideoReady = false;
 
+  // ─── Persistence keys for Job Settings ──────────────────────────
+  static const _kSettingsKey = 'job_settings_defaults_v1';
+
   // ─── Job configuration state ─────────────────────────────────────
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _sessionNameController;
@@ -243,7 +246,8 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     final now = DateTime.now();
     _date =
         '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
-    _initServerConfig();    
+    _initServerConfig(); 
+    _loadJobSettings();   
     _checkConnection();
     _loadJobHistory();
     _loadSavedSessionId();
@@ -255,11 +259,98 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     if (mounted) setState(() {});
   }
 
+    // ═══════════════════════════════════════════════════════════════════
+  //  JOB SETTINGS PERSISTENCE
+  // ═══════════════════════════════════════════════════════════════════
+
+  Future<void> _loadJobSettings() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kSettingsKey);
+      if (raw == null || raw.isEmpty) return;
+      final data = jsonDecode(raw) as Map<String, dynamic>;
+
+      if (!mounted) return;
+      setState(() {
+        _inputLanguages
+          ..clear()
+          ..addAll((data['input_languages'] as List?)?.cast<String>() ?? ['en']);
+        _outputLanguages
+          ..clear()
+          ..addAll((data['output_languages'] as List?)?.cast<String>() ?? ['de']);
+        _audioLanguages
+          ..clear()
+          ..addAll((data['audio_languages'] as List?)?.cast<String>() ?? ['de']);
+
+        _availability       = data['availability']       as String? ?? _availability;
+        _format             = data['format']             as String? ?? _format;
+        _smartChaptering    = data['smart_chaptering']   as String? ?? _smartChaptering;
+        _ttsQualityMode     = data['tts_quality_mode']   as String? ?? _ttsQualityMode;
+        _errorCorrection    = data['error_correction']   as String? ?? _errorCorrection;
+
+        _profanityFilter    = data['profanity_filter']   as bool? ?? _profanityFilter;
+        _filterMusic        = data['filter_music']       as bool? ?? _filterMusic;
+        _enableSummarization= data['summarization']      as bool? ?? _enableSummarization;
+        _enableLiveNotes    = data['live_notes']         as bool? ?? _enableLiveNotes;
+        _enableDiarization  = data['diarization']        as bool? ?? _enableDiarization;
+        _enableAIAssistant  = data['ai_assistant']       as bool? ?? _enableAIAssistant;
+        _saveSession        = data['save_session']       as bool? ?? _saveSession;
+        _distinguishUnknownSpeakers =
+            data['distinguish_unknown_speakers'] as bool? ?? _distinguishUnknownSpeakers;
+
+        _postproduction
+          ..clear()
+          ..addAll((data['postproduction'] as List?)?.cast<String>() ?? const []);
+
+        _muteController.text  = data['mute']  as String? ?? _muteController.text;
+        _pauseController.text = data['pause'] as String? ?? _pauseController.text;
+      });
+    } catch (e) {
+      if (kDebugMode) print('Error loading job settings: $e');
+    }
+  }
+
+  Future<void> _saveJobSettings() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final data = <String, dynamic>{
+        'input_languages':  _inputLanguages,
+        'output_languages': _outputLanguages,
+        'audio_languages':  _audioLanguages,
+        'availability':     _availability,
+        'format':           _format,
+        'smart_chaptering': _smartChaptering,
+        'tts_quality_mode': _ttsQualityMode,
+        'error_correction': _errorCorrection,
+        'profanity_filter': _profanityFilter,
+        'filter_music':     _filterMusic,
+        'summarization':    _enableSummarization,
+        'live_notes':       _enableLiveNotes,
+        'diarization':      _enableDiarization,
+        'ai_assistant':     _enableAIAssistant,
+        'save_session':     _saveSession,
+        'distinguish_unknown_speakers': _distinguishUnknownSpeakers,
+        'postproduction':   _postproduction,
+        'mute':             _muteController.text,
+        'pause':            _pauseController.text,
+      };
+      await prefs.setString(_kSettingsKey, jsonEncode(data));
+    } catch (e) {
+      if (kDebugMode) print('Error saving job settings: $e');
+    }
+  }
+
+  /// Update a setting and persist the whole Job Settings block.
+  void _updateSetting(VoidCallback change) {
+    setState(change);
+    _saveJobSettings();
+  }  
+
   @override
   void dispose() {
+    _saveJobSettings();
     _videoController?.removeListener(_onVideoProgress);
     _videoController?.dispose();
-    _sessionNameController.dispose();
     _sessionNameController.dispose();
     _topicNameController.dispose();
     _speakerNameController.dispose();
@@ -1035,7 +1126,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   // ═══════════════════════════════════════════════════════════════════
 
   void _toggleInputLanguage(String lang) {
-    setState(() {
+    _updateSetting(() {
       if (_inputLanguages.contains(lang)) {
         _inputLanguages.remove(lang);
       } else {
@@ -1045,7 +1136,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   }
 
   void _toggleOutputLanguage(String lang) {
-    setState(() {
+    _updateSetting(() {
       if (_outputLanguages.contains(lang)) {
         _outputLanguages.remove(lang);
       } else {
@@ -1055,7 +1146,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   }
 
   void _toggleAudioLanguage(String lang) {
-    setState(() {
+    _updateSetting(() {
       if (_audioLanguages.contains(lang)) {
         _audioLanguages.remove(lang);
       } else {
@@ -1891,7 +1982,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           label: 'Availability',
           value: _availability,
           options: _availabilityOptions,
-          onChanged: (val) => setState(() => _availability = val!),
+          onChanged: (val) => _updateSetting(() => _availability = val!),
         ),
         const SizedBox(height: 16),
 
@@ -1899,7 +1990,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           label: 'Presentation Format',
           value: _format,
           options: _formatOptions,
-          onChanged: (val) => setState(() => _format = val!),
+          onChanged: (val) => _updateSetting(() => _format = val!),
         ),
         const SizedBox(height: 16),
 
@@ -1907,7 +1998,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           label: 'Smart Chaptering',
           value: _smartChaptering,
           options: _chapteringOptions,
-          onChanged: (val) => setState(() => _smartChaptering = val!),
+          onChanged: (val) => _updateSetting(() => _smartChaptering = val!),
         ),
         const SizedBox(height: 16),
 
@@ -1915,7 +2006,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           label: 'TTS Quality Mode',
           value: _ttsQualityMode,
           options: _ttsQualityOptions,
-          onChanged: (val) => setState(() => _ttsQualityMode = val!),
+          onChanged: (val) => _updateSetting(() => _ttsQualityMode = val!),
         ),
         const SizedBox(height: 16),
 
@@ -1923,7 +2014,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           label: 'Error Correction',
           value: _errorCorrection,
           options: _errorCorrectionOptions,
-          onChanged: (val) => setState(() => _errorCorrection = val!),
+          onChanged: (val) => _updateSetting(() => _errorCorrection = val!),
         ),
         const SizedBox(height: 16),
 
@@ -1932,7 +2023,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           selected: _postproduction,
           allOptions: _postproductionOptions,
           onChanged: (newList) =>
-              setState(() => _postproduction..clear()..addAll(newList)),
+              _updateSetting(() => _postproduction..clear()..addAll(newList)),
         ),
         const SizedBox(height: 16),
 
@@ -1964,6 +2055,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                   border: OutlineInputBorder(),
                 ),
                 keyboardType: TextInputType.number,
+                onChanged: (_) => _saveJobSettings(),
                 validator: (val) {
                   if (val == null || val.isEmpty) return null;
                   if (int.tryParse(val) == null) return 'Enter a number';
@@ -1980,6 +2072,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                   border: OutlineInputBorder(),
                 ),
                 keyboardType: TextInputType.number,
+                onChanged: (_) => _saveJobSettings(),
                 validator: (val) {
                   if (val == null || val.isEmpty) return null;
                   if (double.tryParse(val) == null) return 'Enter a number';
@@ -2632,33 +2725,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
             ),
           ),
 
-          if (_savedSessionId.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: Colors.blue[50],
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.info_outline, size: 16, color: Colors.blue),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Session ID: $_savedSessionId',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.blue[700],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-
-          const SizedBox(height: 12),
+          const SizedBox(height: 8),
 
           if (_sessionUrl.isNotEmpty) ...[
             Container(
@@ -2707,46 +2774,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                       ),
                     ),
                   ),
-                  if (_sessionId.isNotEmpty) ...[
-                    const SizedBox(height: 8),
-                    Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: Colors.grey[100],
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.fingerprint,
-                              size: 14, color: Colors.grey),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  'Session ID:',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 11,
-                                    color: Colors.grey,
-                                  ),
-                                ),
-                                Text(
-                                  _sessionId,
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: Colors.grey[700],
-                                  ),
-                                  softWrap: true,
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
                 ],
               ),
             ),
@@ -3010,53 +3037,15 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         backgroundColor: Colors.blue.shade700,
         foregroundColor: Colors.white,
         actions: [
-          // ── Server picker ─────────────────────────────────────────
-          PopupMenuButton<String>(
-            tooltip: 'Choose internal server',
-            icon: const Icon(Icons.dns_outlined),
-            onSelected: _changeServer,
-            itemBuilder: (context) => internalServerOptions.map((url) {
-              final isSelected = url == internalServerUrl;
-              final label = internalServerLabels[url] ?? url;
-              return PopupMenuItem<String>(
-                value: url,
-                child: Row(
-                  children: [
-                    Icon(
-                      isSelected
-                          ? Icons.radio_button_checked
-                          : Icons.radio_button_unchecked,
-                      size: 18,
-                      color: isSelected ? Colors.blue : Colors.grey,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            label,
-                            style: TextStyle(
-                              fontWeight: isSelected
-                                  ? FontWeight.bold
-                                  : FontWeight.normal,
-                            ),
-                          ),
-                          Text(
-                            url,
-                            style: TextStyle(
-                              fontSize: 10,
-                              color: Colors.grey[600],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }).toList(),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _refresh,
+            tooltip: 'Refresh',
+          ),
+          IconButton(
+            icon: Icon(_isConnected ? Icons.link : Icons.link_off),
+            onPressed: _isConnecting ? null : _connectToInternal,
+            tooltip: _isConnected ? 'Reconnect' : 'Connect',
           ),
         ],
       ),
