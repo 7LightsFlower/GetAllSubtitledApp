@@ -6984,10 +6984,6 @@ def upload_lecture():
             }
             jobs[session_id] = job
 
-            # collect the requested target languages for the readiness gate
-            expected_mt = request.form.getlist("mtLanguage") or ["de"]
-            logging.info("Expected translation languages: %s", expected_mt)
-
             threading.Thread(
                 target=process_session_in_background,
                 args=(session_id, token, video_key, base_url, expected_mt),
@@ -7330,13 +7326,6 @@ def forward_to_internal(video_key):
             "config": {"source": "forward_to_internal"},
             "expected_mt": expected_mt,
         }
-
-        # forward_to_internal has no form fields, so fall back to the
-        # defaults the Flutter client sends in /upload. If you ever add
-        # mtLanguage to the JSON body, read it from data_in instead.
-        expected_mt = data_in.get("mtLanguage") or data_in.get("mt_languages") or ["de"]
-        if isinstance(expected_mt, str):
-            expected_mt = [expected_mt]
 
         threading.Thread(
             target=process_session_in_background,
