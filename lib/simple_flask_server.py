@@ -486,62 +486,24 @@ def _public_base_url() -> str:
         return f"{proto}://{fwd_host}".rstrip("/")
     return request.host_url.rstrip("/")
 
-_SESSION_ID_PATTERNS = [
-    # <a href="/archivesession/XYZ">…</a>   (and /session/)
-    re.compile(r"/archivesession/([A-Za-z0-9_\-=]+)"),
-    re.compile(r"/session/([A-Za-z0-9_\-=]+)"),
-    # <meta http-equiv="refresh" content="0; url=/archivesession/XYZ">
-    re.compile(r'content=["\'][^"\']*url=([^"\']+)["\']', re.IGNORECASE),
-    # window.location = "/archivesession/XYZ"  (or .href = …)
-    re.compile(
-        r'(?:window\.location(?:\.href)?|location\.assign\(|location\.replace\()\s*[=("]\s*["\']([^"\']+)["\']'
-    ),
-    # <form action="/something">  → we'll resolve this to a session id later
-    re.compile(r'<form[^>]*action=["\']([^"\']+)["\']', re.IGNORECASE),
-    # data-session-id="XYZ", data-session="XYZ", data-id="XYZ"
-    re.compile(
-        r'data-(?:session[-_]?id|session|id)=["\']([^"\']+)["\']',
-        re.IGNORECASE,
-    ),
-    # Bare "session_id":"XYZ" inside <script>…</script>
-    re.compile(r'["\']session(?:_?id)?["\']\s*:\s*["\']([^"\']+)["\']'),
-]
-
-# Query-string form:  /archivesession?id=XYZ  or  ?session=XYZ
-_QS_PARAM_RE = re.compile(
-    r'[?&](?:session(?:_?id)?|id)=([^&"\'\s<>]+)', re.IGNORECASE
-)
-
-
-def _session_id_from_any_url(url: str) -> str | None:
-    """Pull a session id out of any URL, path or query string."""
-    if not url:
-        return None
-    for marker in ("/archivesession/", "/session/"):
-        if marker in url:
-            sid = url.split(marker, 1)[-1].split("/")[0].split("?")[0].strip()
-            if sid:
-                return sid
-    m = _QS_PARAM_RE.search(url)
-    if m:
-        return m.group(1)
-    return None
-
-
 def _extract_session_id(resp: requests.Response) -> str | None:
     """Find the session id the internal server assigned to an upload.
 
-    Tries, in order:
+    Looks, in order, at:
       1. the final redirect URL,
-      2. JSON body fields (top level, then under "data"),
-      3. any URL or link in the JSON that contains /archivesession/,
-      4. several HTML patterns (see _SESSION_ID_PATTERNS),
-      5. a session id in a <script>…</script> JSON blob.
+      2. a JSON body (top level, then under "data"),
+      3. a session_url / url / link field in the JSON,
+      4. an HTML body containing a /archivesession/<id> link.
+
+    Returns None if nothing usable is found.
     """
     # 1. Redirect URL
-    sid = _session_id_from_any_url(resp.url or "")
-    if sid:
-        return sid
+    final_url = resp.url or ""
+    for marker in ("/archivesession/", "/session/"):
+        if marker in final_url:
+            sid = final_url.split(marker, 1)[-1].split("/")[0].strip()
+            if sid:
+                return sid
 
     # 2./3. JSON body
     try:
@@ -556,10 +518,8 @@ def _extract_session_id(resp: requests.Response) -> str | None:
                 return v.strip()
         for key in ("session_url", "url", "link"):
             v = d.get(key)
-            if isinstance(v, str):
-                found = _session_id_from_any_url(v)
-                if found:
-                    return found
+            if isinstance(v, str) and "/archivesession/" in v:
+                return v.split("/archivesession/", 1)[-1].split("/")[0]
         return None
 
     if isinstance(payload, dict):
@@ -572,28 +532,14 @@ def _extract_session_id(resp: requests.Response) -> str | None:
             if sid:
                 return sid
 
-    # 4. HTML body patterns
+    # 4. HTML body
     body = resp.text or ""
-    for pattern in _SESSION_ID_PATTERNS:
-        m = pattern.search(body)
-        if not m:
-            continue
-        candidate = m.group(1).strip()
-        # The pattern might have captured a URL rather than a bare id.
-        resolved = _session_id_from_any_url(candidate)
-        if resolved:
-            return resolved
-        # Or it might already be a bare id (data-attr / JS-object cases).
-        # Reject obviously non-id-looking matches (paths, long strings).
-        if candidate and len(candidate) <= 200 and " " not in candidate:
-            return candidate
-
-    # 5. Anything anywhere in the body that looks like a session link
-    sid = _session_id_from_any_url(body)
-    if sid:
-        return sid
+    m = re.search(r"/archivesession/([^\"'<>\s/]+)", body)
+    if m:
+        return m.group(1).strip()
 
     return None
+
 
 def _thumbnail_absolute_url(video: dict) -> str | None:
     """Build a browser-usable, percent-encoded thumbnail URL.
@@ -1106,7 +1052,7 @@ def _job_cleanup():
             _job_progress_store.pop(k, None)
 
 
-@app.route("/job-progress/<path:session_id>", methods=["GET", "OPTIONS"])
+@app.route("/job_progress/<path:session_id>", methods=["GET", "OPTIONS"])
 def job_progress(session_id):
     """Progress endpoint polled by JobProgressPanel."""
     if request.method == "OPTIONS":
@@ -3272,7 +3218,7 @@ def _resolve_export_language_name(session_dir, language):
     return first_lang if first_lang else "transcript"
 
 
-@app.route("/session-export-txt/<path:session_id>", methods=["GET"])
+@app.route("/session_export_txt/<path:session_id>", methods=["GET"])
 def session_export_txt(session_id):
     """Export all session data as structured plain text matching the window view."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -3302,7 +3248,7 @@ def session_export_txt(session_id):
     )
 
 
-@app.route("/session-export-docx/<path:session_id>", methods=["GET"])
+@app.route("/session_export_docx/<path:session_id>", methods=["GET"])
 def session_export_docx(session_id):
     """Export session as a structured DOCX file matching the window view."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -3354,7 +3300,7 @@ def session_export_docx(session_id):
     )
 
 
-@app.route("/session-export-rtf/<path:session_id>", methods=["GET"])
+@app.route("/session_export_rtf/<path:session_id>", methods=["GET"])
 def session_export_rtf(session_id):
     """Export all session data as a structured RTF document."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -3401,7 +3347,7 @@ def get_available_languages(session_dir):
 # ─── EXPORT ROUTES ─────────────────────────────────────────────────────
 
 
-@app.route("/session-export/<path:session_id>", methods=["GET"])
+@app.route("/session_export/<path:session_id>", methods=["GET"])
 def session_export(session_id):
     """Export all session data as a formatted DOCX document."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -3437,7 +3383,7 @@ def session_export(session_id):
     )
 
 
-@app.route("/session-export-structured-json/<path:session_id>", methods=["GET"])
+@app.route("/session_export_structured_json/<path:session_id>", methods=["GET"])
 def session_export_structured_json(session_id):
     """Export session as structured JSON with all metadata."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -3491,7 +3437,7 @@ def session_export_structured_json(session_id):
     )
 
 
-@app.route("/session-export-all-languages/<path:session_id>", methods=["GET"])
+@app.route("/session_export_all_languages/<path:session_id>", methods=["GET"])
 def session_export_all_languages(session_id):
     """Export all languages as separate files in a ZIP archive."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -3557,7 +3503,7 @@ def session_export_all_languages(session_id):
     )
 
 
-@app.route("/session-languages/<path:session_id>", methods=["GET"])
+@app.route("/session_languages/<path:session_id>", methods=["GET"])
 def session_languages(session_id):
     """Get list of available languages for a session."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -3568,7 +3514,7 @@ def session_languages(session_id):
     return jsonify({"languages": languages}), 200
 
 
-@app.route("/session-transcript-json/<path:session_id>", methods=["GET"])
+@app.route("/session_transcript_json/<path:session_id>", methods=["GET"])
 def session_transcript_json(session_id):
     """Export session transcripts as JSON."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -3584,7 +3530,7 @@ def session_transcript_json(session_id):
     return jsonify({"error": "No transcript data found"}), 404
 
 
-@app.route("/session-messages-json/<path:session_id>", methods=["GET"])
+@app.route("/session_messages_json/<path:session_id>", methods=["GET"])
 def session_messages_json(session_id):
     """Download the raw messages.json file from the session."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -3615,7 +3561,7 @@ def session_messages_json(session_id):
     return jsonify({"error": "messages.json not found"}), 404
 
 
-@app.route("/session-zip/<path:session_id>", methods=["GET"])
+@app.route("/session_zip/<path:session_id>", methods=["GET"])
 def download_session_zip(session_id):
     """Download all files from a session as a ZIP archive."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -3665,7 +3611,7 @@ def download_session_zip(session_id):
             pass
 
 
-@app.route("/session-transcript-save-vtt/<path:session_id>", methods=["POST"])
+@app.route("/session_transcript_save_vtt/<path:session_id>", methods=["POST"])
 def session_transcript_save_vtt(session_id):
     """Save edited transcript segments and rewrite the corresponding VTT file.
 
@@ -3927,7 +3873,7 @@ def _extract_simple_language_name(language):
     return clean or "Unknown"
 
 
-@app.route("/update-video-subtitles/<path:session_id>", methods=["POST"])
+@app.route("/update_video_subtitles/<path:session_id>", methods=["POST"])
 def update_video_subtitles(session_id):
     """
     Update the embedded subtitles in video.mp4 with the edited VTT files.
@@ -5037,7 +4983,7 @@ def process_session_in_background(
             _consecutive_404s.pop(session_id, None)
 
 
-@app.route("/extract-video-subtitles/<path:session_id>", methods=["GET"])
+@app.route("/extract_video_subtitles/<path:session_id>", methods=["GET"])
 def extract_video_subtitles(session_id):
     """Extract embedded subtitles from video.mp4 to VTT files."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -5295,7 +5241,7 @@ def get_videos():
     )
 
 
-@app.route("/video-detail/<video_key>", methods=["GET"])
+@app.route("/video_detail/<video_key>", methods=["GET"])
 def video_detail(video_key):
     """Return details for a specific video by its key."""
     for project in videos:
@@ -5310,6 +5256,7 @@ def video_detail(video_key):
 
 @app.route("/media/<video_key>")
 def serve_video(video_key):
+    """Serve the video file for the given video key."""
     project = next((p for p in videos if p["key"] == video_key), None)
     if not project:
         return jsonify({"error": "Video not found"}), 404
@@ -5319,13 +5266,7 @@ def serve_video(video_key):
     file_path = os.path.join(UPLOAD_FOLDER, file_name)
     if not os.path.exists(file_path):
         return jsonify({"error": f'File "{file_name}" not found on disk'}), 404
-
-    return send_file(
-        file_path,
-        as_attachment=False,
-        mimetype="video/mp4",
-        conditional=True,
-    )
+    return send_file(file_path, as_attachment=False)
 
 
 @app.route("/thumbnails/<filename>")
@@ -5427,7 +5368,7 @@ def finish_upload():
 # ─── PROJECT MANAGEMENT (no auth) ──────────────────────────────────────
 
 
-@app.route("/delete-video/<video_key>", methods=["POST", "DELETE", "OPTIONS"])
+@app.route("/delete_video/<video_key>", methods=["POST", "DELETE", "OPTIONS"])
 def delete_video(video_key):
     """Delete a single project: file, thumbnail, sessions and jobs."""
     if request.method == "OPTIONS":
@@ -5488,7 +5429,7 @@ def delete_video(video_key):
     return jsonify({"success": True, "deleted_key": video_key}), 200
 
 
-@app.route("/update-project-name/<video_key>", methods=["POST", "OPTIONS"])
+@app.route("/update_project_name/<video_key>", methods=["POST", "OPTIONS"])
 def update_project_name(video_key):
     """Rename a project in place (no auth)."""
     if request.method == "OPTIONS":
@@ -5508,7 +5449,7 @@ def update_project_name(video_key):
     return jsonify({"success": True, "project": target}), 200
 
 
-@app.route("/stop-segmentation/<video_key>", methods=["POST", "OPTIONS"])
+@app.route("/stop_segmentation/<video_key>", methods=["POST", "OPTIONS"])
 def stop_segmentation(video_key):
     """Mark any running segmentation jobs for this video as stopped."""
     if request.method == "OPTIONS":
@@ -5529,7 +5470,7 @@ def stop_segmentation(video_key):
 # ─── JOB ENDPOINTS ──────────────────────────────────────────────────────
 
 
-@app.route("/start-job/<video_key>", methods=["POST"])
+@app.route("/start_job/<video_key>", methods=["POST"])
 def start_job(video_key):
     """Start a background transcription job for the given video."""
     data = request.get_json()
@@ -5550,7 +5491,7 @@ def start_job(video_key):
     return jsonify({"job_id": job_id, "status": "processing"}), 200
 
 
-@app.route("/job-status/<job_id>", methods=["GET"])
+@app.route("/job_status/<job_id>", methods=["GET"])
 def job_status(job_id):
     """Return the current status of a transcription job."""
     job = jobs.get(job_id)
@@ -5583,7 +5524,7 @@ def _is_meaningful_file(path: str) -> bool:
     return size > 1000
 
 
-@app.route("/session-output/<path:session_id>", methods=["GET"])
+@app.route("/session_output/<path:session_id>", methods=["GET"])
 def get_session_output(session_id):
     """Get the session output as a JSON response with file URLs."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -5644,7 +5585,7 @@ def get_session_output(session_id):
     )
 
 
-@app.route("/session-file/<path:session_id>/<filename>", methods=["GET"])
+@app.route("/session_file/<path:session_id>/<filename>", methods=["GET"])
 def get_session_file(session_id, filename):
     """Download a specific file from the session."""
     session_dir = os.path.join(SESSION_FOLDER, session_id)
@@ -6051,7 +5992,7 @@ def convert_video_to_browser_compatible(input_path, output_path):
         return False
 
 
-@app.route("/session-refresh/<path:session_id>", methods=["POST"])
+@app.route("/session_refresh/<path:session_id>", methods=["POST"])
 def session_refresh(session_id):
     """Force a re-download of a session from the internal server."""
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
@@ -6930,7 +6871,7 @@ def upload_lecture():
                 "Body: %s",
                 target_url,
                 resp.status_code,
-                resp.text,
+                resp.text[:1000],
             )
             return (
                 jsonify(
@@ -7004,8 +6945,8 @@ def upload_lecture():
                         "session_id": session_id,
                         "video_key": video_key,
                         "session_url": f"{base_url}/archivesession/{session_id}",
-                        "output_url": f"/session-output/{session_id}",
-                        "download_url": f"/session-zip/{session_id}",
+                        "output_url": f"/session_output/{session_id}",
+                        "download_url": f"/session_zip/{session_id}",
                     }
                 )
             return jsonify(response_data), resp.status_code
@@ -7072,7 +7013,7 @@ def upload_lecture():
 
 
 # ─── PROXY ENDPOINTS ────────────────────────────────────────────────────
-@app.route("/forward-to-internal/<video_key>", methods=["POST", "OPTIONS"])
+@app.route("/forward_to_internal/<video_key>", methods=["POST", "OPTIONS"])
 def forward_to_internal(video_key):
     """Forward a locally-stored video to the internal KIT server.
 
@@ -7270,13 +7211,13 @@ def forward_to_internal(video_key):
         if not session_id:
             logging.error(
                 "forward_to_internal: no session id in response. Body: %s",
-                resp.text[:1000],
+                resp.text,
             )
             return (
                 jsonify(
                     {
                         "error": "Internal server did not return a session id",
-                       
+                        "response_preview": resp.text[:500],
                     }
                 ),
                 502,
