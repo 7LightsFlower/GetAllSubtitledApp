@@ -66,7 +66,7 @@ RUN rm -rf /app/web
 
 # Single worker: users/videos/jobs/chunk_storage live in process memory,
 # so multiple workers would see different state.
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "8", "lib.simple_flask_server:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "8", "lib.backend:app"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 3: Nginx serving the built frontend, proxying API requests to Flask
