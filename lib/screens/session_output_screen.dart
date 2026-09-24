@@ -53,14 +53,20 @@ class VTTCue {
   }
 }
 
+enum SessionView {
+  transcript,
+  split,
+  files,
+}
+
 class _SessionOutputScreenState extends State<SessionOutputScreen> {
   VideoPlayerController? _videoController;
   List<TranscriptData> _transcripts = [];
   final List<ChapterData> _chapters = [];
   List<SessionFile> _files = [];
   bool _isLoading = true;
-  bool _isSplitView = false;
-  bool _showFileList = false;
+  SessionView _view = SessionView.transcript;
+  SessionView _lastNonFilesView = SessionView.transcript;
   bool _isEditingMode = false;
   bool _isSaving = false;
   String _selectedLanguage = '';
@@ -640,15 +646,12 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     }
   }
 
-  void _toggleSplitView() {
+  void _setView(SessionView view) {
     setState(() {
-      _isSplitView = !_isSplitView;
-    });
-  }
-
-  void _toggleFileList() {
-    setState(() {
-      _showFileList = !_showFileList;
+      if (view != SessionView.files) {
+        _lastNonFilesView = view;
+      }
+      _view = view;
     });
   }
 
@@ -1129,25 +1132,19 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         foregroundColor: Colors.white,
         actions: [
           IconButton(
-            icon: Icon(_isEditingMode ? Icons.check : Icons.edit),
-            onPressed: currentTranscript.segments.isNotEmpty && !_isSaving ? _toggleEditingMode : null,
-            tooltip: _isEditingMode ? 'Save Changes' : 'Edit Transcript',
-            color: _isEditingMode ? Colors.green : Colors.white,
-          ),
-          IconButton(
-            icon: Icon(_showFileList ? Icons.description : Icons.folder),
-            onPressed: _toggleFileList,
-            tooltip: _showFileList ? 'Show Transcript' : 'Show Files',
-          ),
-          IconButton(
-            icon: Icon(_isSplitView ? Icons.view_column : Icons.view_column_outlined),
-            onPressed: _toggleSplitView,
-            tooltip: 'Toggle Split View',
-          ),
-          IconButton(
-            icon: const Icon(Icons.download),
-            onPressed: _showExportDialog,
-            tooltip: 'Export Transcript',
+            icon: Icon(
+              _view == SessionView.files
+                  ? Icons.description
+                  : Icons.folder,
+            ),
+            onPressed: () => _setView(
+              _view == SessionView.files
+                  ? _lastNonFilesView
+                  : SessionView.files,
+            ),
+            tooltip: _view == SessionView.files
+                ? 'Show Transcript'
+                : 'Show Files',
           ),
           IconButton(
             icon: _isDownloadingAll
@@ -1169,26 +1166,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
             icon: const Icon(Icons.refresh),
             onPressed: _loadSessionData,
             tooltip: 'Refresh',
-          ),
-          IconButton(
-            icon: const Icon(Icons.subtitles_off),
-            onPressed: () async {
-              // Force reload subtitle tracks
-              await _loadSubtitleTracks();
-              if (!context.mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('🔄 Subtitles reloaded'),
-                  duration: Duration(seconds: 1),
-                ),
-              );
-            },
-            tooltip: 'Reload Subtitles',
-          ),
-          IconButton(
-            icon: const Icon(Icons.video_settings),
-            onPressed: _updateVideoSubtitles,
-            tooltip: 'Update Video Subtitles',
           ),
         ],
       ),
@@ -1320,10 +1297,10 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           ),
         ),
 
-
+        
         // ─── File list OR transcript panel ───────────────────────────
         Expanded(
-          child: _showFileList
+          child: _view == SessionView.files
               ? _buildFileList()
               : Column(
                   children: [
@@ -1333,8 +1310,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                           BoxConstraints(maxWidth: screenWidth * 0.9),
                       padding: const EdgeInsets.symmetric(
                           horizontal: 4, vertical: 4),
-                      child: _isSplitView
-                          // ── Split view: one selector pinned to each side
+                      child: _view == SessionView.split
                           ? Row(
                               children: [
                                 Expanded(
@@ -1365,8 +1341,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                                 ),
                               ],
                             )
-                          // ── Single view: one selector on the left,
-                          //    EDITING badge / spinner on the right
                           : Row(
                               children: [
                                 LanguageSelector(
@@ -1411,7 +1385,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
                     // Transcript view
                     Expanded(
-                      child: _isSplitView
+                      child: _view == SessionView.split
                           ? _buildSplitTranscriptView()
                           : _buildEditableTranscriptView(
                               currentTranscript,
@@ -1421,6 +1395,9 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                   ],
                 ),
         ),
+        // ─── Toolbar (moved out of the AppBar) ───────────────────────
+        _buildToolbar(currentTranscript),
+        
       ],
     );
   }
@@ -1827,5 +1804,89 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
     }
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+  }
+
+  Widget _buildToolbar(TranscriptData currentTranscript) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        border: Border(
+          bottom: BorderSide(color: Colors.grey.shade300),
+        ),
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            SegmentedButton<SessionView>(
+              segments: const [
+                ButtonSegment<SessionView>(
+                  value: SessionView.transcript,
+                  icon: Icon(Icons.description, size: 18),
+                  label: Text('Transcript'),
+                ),
+                ButtonSegment<SessionView>(
+                  value: SessionView.split,
+                  icon: Icon(Icons.view_column, size: 18),
+                  label: Text('Split'),
+                ),
+              ],
+              selected: {_view == SessionView.files
+                  ? SessionView.transcript
+                  : _view},
+              onSelectionChanged: (selection) {
+                _setView(selection.first);
+              },
+              showSelectedIcon: false,
+              style: const ButtonStyle(
+                visualDensity: VisualDensity.compact,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            ),
+            const SizedBox(width: 16),
+            Container(
+              width: 1,
+              height: 28,
+              color: Colors.grey.shade300,
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              icon: Icon(_isEditingMode ? Icons.check : Icons.edit),
+              onPressed: currentTranscript.segments.isNotEmpty && !_isSaving
+                  ? _toggleEditingMode
+                  : null,
+              tooltip: _isEditingMode ? 'Save Changes' : 'Edit Transcript',
+              color: _isEditingMode ? Colors.green : null,
+            ),
+            IconButton(
+              icon: const Icon(Icons.download),
+              onPressed: _showExportDialog,
+              tooltip: 'Export Transcript',
+            ),
+            IconButton(
+              icon: const Icon(Icons.subtitles_off),
+              onPressed: () async {
+                await _loadSubtitleTracks();
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('🔄 Subtitles reloaded'),
+                    duration: Duration(seconds: 1),
+                  ),
+                );
+              },
+              tooltip: 'Reload Subtitles',
+            ),
+            IconButton(
+              icon: const Icon(Icons.video_settings),
+              onPressed: _updateVideoSubtitles,
+              tooltip: 'Update Video Subtitles',
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
