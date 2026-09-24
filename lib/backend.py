@@ -4546,36 +4546,16 @@ def _messages_look_done(raw: bytes, expected_langs=None, log: bool = True) -> bo
       pairing, which is not available here. So we do NOT try to match
       `expected_langs` against individual tracks. Instead we require:
 
-        1. ASR content present (>=5 messages).
+        1. ASR content present (>=5 messages, some with an `end` time).
         2. At least one MT track if the caller asked for any.
         3. Every existing MT track ends close to the ASR end.
 
       That catches the "translation stops at minute 3 of a 45-minute
       video" problem without relying on a mapping we don't have.
     """
-
-    ...
-    if expected_langs and not mt_tracks:
-        if log:
-            logging.info("messages.json has ASR but no MT tracks yet")
-        return False
-
-        incomplete = []
-    for sender, mt_end in mt_tracks.items():
-        if not _coverage_is_ok(mt_end, asr_max_end):
-            incomplete.append(f"{sender} covers {mt_end:.0f}s of {asr_max_end:.0f}s")
-
-    if incomplete:
-        if log:
-            logging.info(
-                "messages.json stable but MT tracks still short: %s",
-                "; ".join(incomplete),
-            )
-        return False
-    ...
-
     if not raw or len(raw) < MIN_MESSAGES_BYTES:
         return False
+
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, TypeError, ValueError):
@@ -4585,8 +4565,7 @@ def _messages_look_done(raw: bytes, expected_langs=None, log: bool = True) -> bo
 
     asr_count = 0
     asr_max_end = 0.0
-    # sender -> max end seen for that track
-    mt_tracks: dict[str, float] = {}
+    mt_tracks: dict[str, float] = {}   # sender -> max end seen for that track
 
     for item in data:
         if not (isinstance(item, list) and len(item) >= 2):
@@ -4627,25 +4606,20 @@ def _messages_look_done(raw: bytes, expected_langs=None, log: bool = True) -> bo
             incomplete.append(f"{sender} covers {mt_end:.0f}s of {asr_max_end:.0f}s")
 
     if incomplete:
-        logging.info(
-            "messages.json stable but MT tracks still short: %s",
-            "; ".join(incomplete),
-        )
+        if log:
+            logging.info(
+                "messages.json stable but MT tracks still short: %s",
+                "; ".join(incomplete),
+            )
         return False
 
-    if mt_tracks:
+    if mt_tracks and log:
         logging.info(
             "messages.json: %d MT track(s), all covering up to %.0fs",
             len(mt_tracks),
             asr_max_end,
         )
     return True
-
-
-# How often to re-fetch messages.json purely to refresh the progress
-# bar. The stability check already fetches it occasionally; this adds
-# a periodic tick so the bar moves even while the file is growing.
-_PROGRESS_FETCH_INTERVAL = 30.0
 
 
 def _compute_translation_progress(raw: bytes) -> tuple[float, float]:
