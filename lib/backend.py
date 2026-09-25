@@ -4131,12 +4131,35 @@ def update_video_subtitles(session_id):
             except OSError:
                 pass
 
-        # Always start from the original video. Using the previous
-        # video_subtitled.mp4 as input would compound any encoding issue
-        # (or greenscreen) that a prior run may have introduced.
-        video_path = os.path.join(session_dir, "video.mp4")
+        # Always start from the *original* upload, not the session-local
+        # green-screen placeholder and not a previous video_subtitled.mp4.
+        # Re-encoding a re-encoded file compounds quality loss; feeding
+        # the green-screen back in would embed subtitles into the
+        # placeholder instead of the real footage.
+        original_path = _get_session_original_video_path(session_id)
+        if original_path:
+            video_path = original_path
+            source_label = "original upload"
+        elif os.path.exists(placeholder):
+            video_path = placeholder
+            source_label = "session placeholder (no original found)"
+        else:
+            return (
+                jsonify(
+                    {
+                        "error": (
+                            "No original video found for this session. "
+                            "The uploaded file may have been deleted."
+                        )
+                    }
+                ),
+                404,
+            )
+
         logging.info(
-            "update_video_subtitles: ffmpeg input = %s (original)", video_path
+            "update_video_subtitles: ffmpeg input = %s (%s)",
+            video_path,
+            source_label,
         )
 
         # --- 4. Build ffmpeg command to embed subtitles ---
