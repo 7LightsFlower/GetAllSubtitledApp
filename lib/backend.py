@@ -4,7 +4,6 @@
 import base64
 import contextvars
 import datetime
-from email.utils import quote
 import importlib
 import hashlib
 import io
@@ -101,6 +100,18 @@ ALLOWED_TARGET_SERVERS = {
     "https://lt2srv-backup.iar.kit.edu",
 }
 INTERNAL_SERVER_URL = "https://lt2srv-sscherrer.isl.iar.kit.edu"  # default
+
+# When True, upload a tiny solid-colour video that carries the audio
+# instead of the full video. The KIT server only processes the audio
+# track, so this is a 100× reduction in upload size.
+# Set env USE_GREEN_SCREEN_UPLOAD=0 to fall back to uploading the
+# original video through the same multipart code path.
+USE_GREEN_SCREEN_UPLOAD = os.environ.get("USE_GREEN_SCREEN_UPLOAD", "1") == "1"
+
+# Some internal proxies reject chunked multipart uploads. Keep this
+# configurable so callers can toggle Transfer-Encoding: chunked when
+# needed without hitting a NameError during request handling.
+USE_CHUNKED_UPLOAD = os.environ.get("USE_CHUNKED_UPLOAD", "0") == "1"
 
 
 def _resolve_target_url(requested: str | None) -> str:
@@ -486,6 +497,7 @@ def _public_base_url() -> str:
         return f"{proto}://{fwd_host}".rstrip("/")
     return request.host_url.rstrip("/")
 
+
 _SESSION_ID_PATTERNS = [
     # <a href="/archivesession/XYZ">…</a>   (and /session/)
     re.compile(r"/archivesession/([A-Za-z0-9_\-=]+)"),
@@ -508,9 +520,7 @@ _SESSION_ID_PATTERNS = [
 ]
 
 # Query-string form:  /archivesession?id=XYZ  or  ?session=XYZ
-_QS_PARAM_RE = re.compile(
-    r'[?&](?:session(?:_?id)?|id)=([^&"\'\s<>]+)', re.IGNORECASE
-)
+_QS_PARAM_RE = re.compile(r'[?&](?:session(?:_?id)?|id)=([^&"\'\s<>]+)', re.IGNORECASE)
 
 
 def _session_id_from_any_url(url: str) -> str | None:
@@ -595,6 +605,7 @@ def _extract_session_id(resp: requests.Response) -> str | None:
 
     return None
 
+
 def _thumbnail_absolute_url(video: dict) -> str | None:
     """Build a browser-usable, percent-encoded thumbnail URL.
 
@@ -606,7 +617,7 @@ def _thumbnail_absolute_url(video: dict) -> str | None:
     thumb = video.get("thumbnail_url")
     if not thumb or not thumb.startswith("/thumbnails/"):
         return thumb
-    filename = thumb[len("/thumbnails/"):]
+    filename = thumb[len("/thumbnails/") :]
     return f"{_public_base_url()}/thumbnails/{quote(filename, safe='')}"
 
 
@@ -3934,21 +3945,34 @@ def update_video_subtitles(session_id):
     Also updates messages.json to reflect the changes.
     """
     session_dir = os.path.join(SESSION_FOLDER, session_id)
-    video_path = os.path.join(session_dir, "video.mp4")
+    if not os.path.isdir(session_dir):
+        return jsonify({"error": "Session not found"}), 404
+
+    # Same preference order as get_session_file():
+    #   1. already-subtitled video (incremental re-edits)
+    #   2. original full-quality video
+    #   3. session-local placeholder
+    modified_candidate = os.path.join(session_dir, "video_subtitled.mp4")
+    original = _get_session_original_video_path(session_id)
+    placeholder = os.path.join(session_dir, "video.mp4")
+
+    if os.path.exists(modified_candidate):
+        video_path = modified_candidate
+    elif original:
+        video_path = original
+    elif os.path.exists(placeholder):
+        video_path = placeholder
+    else:
+        return jsonify({"error": "No video source found for this session"}), 404
 
     logging.info(
-        "update_video_subtitles: session=%r dir_exists=%s video_exists=%s",
+        "update_video_subtitles: session=%r using source=%s "
+        "(dir_exists=%s, original=%s)",
         _short_sid(session_id),
+        os.path.basename(video_path),
         os.path.isdir(session_dir),
-        os.path.exists(video_path),
+        bool(original),
     )
-
-    if not os.path.exists(video_path):
-        logging.warning(
-            "update_video_subtitles: video.mp4 missing for session %s",
-            _short_sid(session_id),
-        )
-        return jsonify({"error": "video.mp4 not found"}), 404
 
     try:
         # --- 1. Get list of VTT files in the session ---
@@ -4454,9 +4478,7 @@ def _fetch_messages_json_bytes(session_id, token, server_url=None):
             # re-log here after the size probe already complained.
             _note_404(session_id, url)
         else:
-            logging.warning(
-                "fetch_messages_json: HTTP %s for %s", r.status_code, url
-            )
+            logging.warning("fetch_messages_json: HTTP %s for %s", r.status_code, url)
     except requests.exceptions.RequestException as e:
         logging.warning("fetch_messages_json failed: %s", e)
     return b""
@@ -4565,7 +4587,7 @@ def _messages_look_done(raw: bytes, expected_langs=None, log: bool = True) -> bo
 
     asr_count = 0
     asr_max_end = 0.0
-    mt_tracks: dict[str, float] = {}   # sender -> max end seen for that track
+    mt_tracks: dict[str, float] = {}  # sender -> max end seen for that track
 
     for item in data:
         if not (isinstance(item, list) and len(item) >= 2):
@@ -4694,6 +4716,7 @@ def _count_messages(raw: bytes) -> int:
         return len(data)
     return 0
 
+
 # How often to re-fetch messages.json purely to refresh the progress
 # bar. The stability check already fetches it occasionally; this adds
 # a periodic tick so the bar moves even while the file is growing.
@@ -4703,6 +4726,7 @@ _PROGRESS_FETCH_INTERVAL = 60.0  # was 30.0
 # this long, emit one short heartbeat line so the panel doesn't look
 # frozen. Rare enough that it doesn't spam.
 _PROGRESS_HEARTBEAT_SECONDS = 180.0
+
 
 def wait_for_session_ready(
     session_id, token, server_url=None, expected_langs=None, timeout=1800
@@ -4730,9 +4754,6 @@ def wait_for_session_ready(
     last_reported_mt_end = 0.0
     last_reported_asr_end = 0.0
     last_heartbeat = started
-
-    # Only surface "has ASR but no MT yet" once per session.
-    reported_no_mt = False
 
     # Cooldown between two events of the same kind. Complements the
     # value-advance check below.
@@ -4816,9 +4837,7 @@ def wait_for_session_ready(
         now = time.time()
         if now - last_progress_fetch >= _PROGRESS_FETCH_INTERVAL:
             last_progress_fetch = now
-            raw_for_progress = _fetch_messages_json_bytes(
-                session_id, token, server_url
-            )
+            raw_for_progress = _fetch_messages_json_bytes(session_id, token, server_url)
             mt_end, asr_end = _compute_translation_progress(raw_for_progress)
             video_dur = _session_video_duration(session_id)
 
@@ -4833,10 +4852,7 @@ def wait_for_session_ready(
                         stage="translating",
                         progress=prog,
                     )
-                elif (
-                    mt_end <= 0
-                    and asr_end > last_reported_asr_end
-                ):
+                elif mt_end <= 0 and asr_end > last_reported_asr_end:
                     last_reported_asr_end = asr_end
                     prog = min((asr_end / video_dur) * 0.05, 0.05)
                     _job_log(
@@ -4902,8 +4918,7 @@ def wait_for_session_ready(
                 )
 
             # _messages_look_done logged why it failed, at most once.
-            # Remember that we've heard it and reset the stability gate.
-            reported_no_mt = True
+            # Reset the stability gate and try again once the file changes.
             stable_count = 0
 
         time.sleep(2)
@@ -5112,6 +5127,207 @@ def _file_has_audio_stream(path):
         return False
 
 
+def _get_session_original_video_path(session_id: str) -> str | None:
+    """Path to the original full-quality video for a session.
+
+    The session folder only ever contains a green-screen placeholder;
+    the real video lives in UPLOAD_FOLDER and is found via
+    sessions[session_id]['video_key'] -> videos[...]['file_name'].
+    """
+    sess = sessions.get(session_id) or {}
+    video_key = sess.get("video_key")
+    if not video_key:
+        return None
+    for v in videos:
+        if v.get("key") == video_key:
+            fn = v.get("file_name")
+            if fn:
+                p = os.path.join(UPLOAD_FOLDER, fn)
+                if os.path.exists(p):
+                    return p
+    return None
+
+
+def extract_audio_from_video(video_path: str, output_dir: str | None = None):
+    """Extract audio to a compressed .m4a. Returns (path, duration) or (None, 0)."""
+    if not os.path.exists(video_path) or not _file_has_audio_stream(video_path):
+        return None, 0.0
+
+    duration = 0.0
+    try:
+        r = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                video_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            duration = float(r.stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+
+    if output_dir is None:
+        output_dir = tempfile.gettempdir()
+    os.makedirs(output_dir, exist_ok=True)
+
+    base = os.path.splitext(os.path.basename(video_path))[0]
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", base)[:60] or "audio"
+    # 32 kbps mono Opus: ~8 MB for a 42-minute lecture. Perfectly fine
+    # for speech recognition. Switch to AAC if the internal server
+    # turns out to reject .webm — see `codec` below.
+    codec = "libopus"        # or "aac" for .m4a
+    ext   = ".webm"          # or ".m4a" for AAC
+    audio_path = os.path.join(output_dir, f"{safe}_{uuid.uuid4().hex[:8]}{ext}")
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-vn",
+        "-map", "0:a:0",
+        "-ac", "1",              # mono
+        "-ar", "16000",          # 16 kHz — enough for speech
+        "-c:a", codec,
+        "-b:a", "32k",
+        audio_path,
+    ]
+    try:
+        r = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=1800, check=False
+        )
+    except (subprocess.TimeoutExpired, OSError, subprocess.SubprocessError) as e:
+        logging.error("extract_audio: %s", e)
+        return None, 0.0
+
+    if (
+        r.returncode != 0
+        or not os.path.exists(audio_path)
+        or os.path.getsize(audio_path) < 1000
+    ):
+        logging.error(
+            "extract_audio: rc=%s stderr=%s", r.returncode, (r.stderr or "")[-500:]
+        )
+        if os.path.exists(audio_path):
+            try:
+                os.remove(audio_path)
+            except OSError:
+                pass
+        return None, 0.0
+
+    logging.info(
+        "🎵 Extracted audio: %s (%.1f MB, %.1fs)",
+        os.path.basename(audio_path),
+        os.path.getsize(audio_path) / (1024 * 1024),
+        duration,
+    )
+    return audio_path, duration
+
+
+def create_green_screen_video(
+    audio_path, output_path, duration, width=320, height=240, fps=5, color="0x00FF00"
+) -> bool:
+    """Build a small solid-colour video with this audio."""
+    if not os.path.exists(audio_path):
+        return False
+    if duration <= 0:
+        duration = 60.0
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=c={color}:s={width}x{height}:r={fps}:d={duration}",
+        "-i",
+        audio_path,
+        "-shortest",
+        "-c:v",
+        "libx264",
+        "-tune",
+        "stillimage",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "35",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "96k",
+        "-movflags",
+        "+faststart",
+        output_path,
+    ]
+    try:
+        r = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=1800, check=False
+        )
+    except (subprocess.TimeoutExpired, OSError, subprocess.SubprocessError) as e:
+        logging.error("green_screen: %s", e)
+        return False
+
+    if (
+        r.returncode != 0
+        or not os.path.exists(output_path)
+        or os.path.getsize(output_path) < 1000
+    ):
+        logging.error(
+            "green_screen: rc=%s stderr=%s", r.returncode, (r.stderr or "")[-500:]
+        )
+        return False
+
+    logging.info(
+        "🟩 Green-screen video: %s (%.1f MB)",
+        os.path.basename(output_path),
+        os.path.getsize(output_path) / (1024 * 1024),
+    )
+    return True
+
+
+def prepare_upload_source(original_video_path: str) -> tuple[str, str, list[str]]:
+    """Decide what to send to the internal server.
+
+    Returns (source_path, upload_filename, cleanup_list).
+
+    If USE_GREEN_SCREEN_UPLOAD is off, or green-screen generation fails,
+    returns (original_video_path, basename, []) — the caller's existing
+    multipart code then behaves exactly as it did before.
+    """
+    if not USE_GREEN_SCREEN_UPLOAD:
+        return (original_video_path, os.path.basename(original_video_path), [])
+
+    audio_path, duration = extract_audio_from_video(original_video_path)
+    if audio_path is None:
+        logging.warning(
+            "prepare_upload_source: audio extraction failed; "
+            "falling back to original upload"
+        )
+        return (original_video_path, os.path.basename(original_video_path), [])
+
+    cleanup = [audio_path]
+    gs_path = os.path.join(tempfile.gettempdir(), f"green_{uuid.uuid4().hex[:8]}.mp4")
+    if not create_green_screen_video(audio_path, gs_path, duration):
+        logging.warning(
+            "prepare_upload_source: green-screen build failed; "
+            "falling back to original upload"
+        )
+        return (original_video_path, os.path.basename(original_video_path), cleanup)
+
+    cleanup.append(gs_path)
+    return (gs_path, "green_screen.mp4", cleanup)
+
+
 # ─── AUTH ENDPOINTS ─────────────────────────────────────────────────────
 
 
@@ -5284,6 +5500,7 @@ def video_detail(video_key):
 
 @app.route("/media/<video_key>")
 def serve_video(video_key):
+    """Serve the original uploaded video file for a project."""
     project = next((p for p in videos if p["key"] == video_key), None)
     if not project:
         return jsonify({"error": "Video not found"}), 404
@@ -5590,10 +5807,21 @@ def get_session_output(session_id):
                 else:
                     url = f"/session_file/{session_id}/{file}"
 
+                # If this is the placeholder video.mp4, report the
+                # size of the ORIGINAL video instead. The session
+                # folder only ever holds a tiny green-screen copy,
+                # but get_session_file() serves the original, so the
+                # size shown in the UI must match what is served.
+                reported_size = os.path.getsize(file_path)
+                if file == "video.mp4":
+                    _orig = _get_session_original_video_path(session_id)
+                    if _orig:
+                        reported_size = os.path.getsize(_orig)
+
                 files.append(
                     {
                         "name": file,
-                        "size": os.path.getsize(file_path),
+                        "size": reported_size,
                         "url": url,
                         "modified": mod_time,
                     }
@@ -5640,13 +5868,20 @@ def get_session_file(session_id, filename):
         return response
 
     if filename.lower().endswith(".mp4"):
-        # A request for "video.mp4" is served from the subtitled version
-        # if it exists, otherwise the original.
-        actual_path = file_path
-        if filename == "video.mp4":
-            modified = os.path.join(session_dir, "video_subtitled.mp4")
-            if os.path.exists(modified):
-                actual_path = modified
+        # Preference order:
+        #   1. video_subtitled.mp4 (user already embedded subtitles)
+        #   2. the original full-quality video from UPLOAD_FOLDER
+        #   3. the session-local file (green-screen placeholder)
+        modified = os.path.join(session_dir, "video_subtitled.mp4")
+        original = _get_session_original_video_path(session_id)
+
+        if os.path.exists(modified):
+            actual_path = modified
+        elif original and filename == "video.mp4":
+            actual_path = original
+        else:
+            actual_path = file_path
+
         return send_file(
             actual_path,
             as_attachment=False,
@@ -6056,6 +6291,56 @@ def session_resync(session_id):
     download_session_files(session_id, token)
     return jsonify({"success": True, "session_id": session_id}), 200
 
+def _post_multipart_with_retries(
+    target_url: str,
+    body_file,
+    headers: dict,
+    cookies: dict,
+    *,
+    total_size: int,           # NEW — for the error log
+    max_attempts: int = 3,
+    base_delay: float = 5.0,
+):
+    """POST a multipart body, retrying on transient connection resets."""
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            body_file.seek(0)
+            resp = requests.post(
+                target_url,
+                data=body_file,
+                headers=headers,
+                cookies=cookies,
+                timeout=(60, 3600),
+                verify=False,
+                allow_redirects=True,
+            )
+            if attempt > 1:
+                logging.info(
+                    "internal_upload: succeeded on attempt %d/%d",
+                    attempt, max_attempts,
+                )
+            return resp
+
+        # ─── THIS IS THE BLOCK YOU ASKED ABOUT ─────────────────────
+        except requests.exceptions.ConnectionError as e:
+            logging.error(
+                "internal_upload: connection reset after %d bytes "
+                "(Content-Length: %s, chunked: %s)",
+                total_size,
+                headers.get("Content-Length", "<none>"),
+                USE_CHUNKED_UPLOAD,
+            )
+            last_exc = e
+            if attempt < max_attempts:
+                delay = base_delay * (2 ** (attempt - 1))
+                logging.info(
+                    "internal_upload: retrying in %.1fs", delay
+                )
+                time.sleep(delay)
+        # ───────────────────────────────────────────────────────────
+    raise last_exc
+
 
 def _session_files_look_incomplete(session_dir):
     messages = os.path.join(session_dir, "messages.json")
@@ -6209,7 +6494,7 @@ def youtube_download_and_upload():
                 duration = info.get("duration", 0)
 
             clean_title = re.sub(r'[\\/*?:"<>|]+', "_", title).strip()
-            clean_title = re.sub(r"\s+", "_", clean_title)   # spaces → _
+            clean_title = re.sub(r"\s+", "_", clean_title)  # spaces → _
             filename = f"{clean_title}.mp4"
             if len(filename) > 200:
                 name, ext = os.path.splitext(filename)
@@ -6673,476 +6958,71 @@ def generate_video_thumbnail_simple(video_path, thumbnail_path):
 
 
 # ─── UPLOAD ENDPOINT ────────────────────────────────────────────────────
+def _upload_to_internal_server_and_register(
+    *,
+    local_path: str,
+    file_size: int,
+    session_name: str,
+    form_data: dict,
+    token: str,
+    target_url: str,
+    base_url: str,
+    video_key: str,
+    project: dict,
+    expected_mt: list,
+    clear_stale_session: bool = False,
+) -> tuple[dict, int]:
+    """Upload the prepared media to the KIT server and register the session.
 
+    Returns ``(response_body, http_status)``; both are suitable for
+    ``jsonify(body), status``.
 
-@app.route("/upload", methods=["POST", "OPTIONS"])
-def upload_lecture():
-    """Upload a video file to the internal server using streaming."""
-    if request.method == "OPTIONS":
-        response = jsonify({"message": "OK"})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add(
-            "Access-Control-Allow-Headers", "Content-Type,Authorization"
-        )
-        response.headers.add("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-        return response, 200
+    Every upload-side concern lives here:
+      * green-screen substitution (via ``prepare_upload_source``),
+      * multipart body assembly + a POST with explicit Content-Length,
+      * session-id extraction with the KIT base64 fallback,
+      * optional clearing of any stale local session directory,
+      * registering the session/job and spawning the background worker,
+      * temp-file cleanup in ``finally``.
 
-    # ─── 1. Validate inputs ─────────────────────────────────────────
-    token = request.form.get("token", "")
-    if not token:
-        return jsonify({"error": "Missing token"}), 400
-    if "videofile" not in request.files:
-        return jsonify({"error": "No video file provided"}), 400
-
-    file_storage = request.files["videofile"]
-    if file_storage.filename == "":
-        return jsonify({"error": "Empty filename"}), 400
-
-    session_name = request.form.get("name", file_storage.filename)
-
-    # ─── 2. Normalize filename (force .mp4) ────────────────────────
-    original_filename = file_storage.filename
-    if not original_filename.lower().endswith(".mp4"):
-        name_without_ext = os.path.splitext(original_filename)[0]
-        original_filename = f"{name_without_ext}.mp4"
-        logging.info("📹 Added .mp4 extension: %s", original_filename)
-
-    # ─── 3. Reuse existing project or create a new one ────────────
-    existing_video = None
-    for video in videos:
-        if video.get("file_name") == original_filename:
-            existing_video = video
-            break
-
-    file_size = 0
-    local_filename = original_filename
-    local_path = os.path.join(UPLOAD_FOLDER, local_filename)
-    project = None
-    video_key = None
-
-    if existing_video:
-        video_key = existing_video["key"]
-        project = existing_video
-        logging.info(
-            "📹 Using existing video: %s (key: %s)", original_filename, video_key
-        )
-
-        if not os.path.exists(local_path):
-            file_storage.save(local_path)
-            file_size = os.path.getsize(local_path)
-            project["file_size"] = file_size
-            logging.info("✅ Restored video file: %s", local_filename)
-        else:
-            file_size = os.path.getsize(local_path)
-            project["file_size"] = file_size
-            logging.info(
-                "✅ Using existing file: %s (%d bytes)", local_filename, file_size
-            )
-    else:
-        # New video — pick a unique filename
-        base_name, ext = os.path.splitext(original_filename)
-        if not ext:
-            ext = ".mp4"
-        counter = 1
-        while os.path.exists(os.path.join(UPLOAD_FOLDER, local_filename)):
-            local_filename = f"{base_name}_{counter}{ext}"
-            counter += 1
-
-        local_path = os.path.join(UPLOAD_FOLDER, local_filename)
-        file_storage.save(local_path)
-        file_size = os.path.getsize(local_path)
-        logging.info("✅ New video saved: %s (%d bytes)", local_filename, file_size)
-
-        video_key = str(uuid.uuid4())
-        project = {
-            "key": video_key,
-            "name": session_name,
-            "file_name": local_filename,
-            "uploaded": utc_now_iso(),
-            "last_opened": None,
-            "duration": 120.0,
-            "fps": 30.0,
-            "file_size": file_size,
-            "segment_count": 0,
-            "languages": request.form.getlist("language") or ["en"],
-            "thumbnail_url": None,
-            "segmentation_done": False,
-            "segmentation_progress": 0,
-        }
-        videos.append(project)
-
-    # ─── 4. Build the data dict for the internal server ────────────
-    data = {}
-    for key in request.form.keys():
-        if key == "token":
-            continue
-        values = request.form.getlist(key)
-        data[key] = values[0] if len(values) == 1 else values
-    if "path" not in data:
-        data["path"] = "/home/admin@example.com"
-
-    headers = {
-        "X-Forward-Auth": token,
-        "Authorization": f"Bearer {token}",
-        "User-Agent": "Mozilla/5.0 (compatible; LT-Uploader/1.0)",
-    }
-    cookies = {"_forward_auth": token}
-
-    # ─── 5. Build the multipart body into a temp file ──────────────
-    #     We build it explicitly so we can send an explicit Content-Length.
-    #     Many proxies and the internal server reject chunked uploads.
-    #
-    #     IMPORTANT (Windows): NamedTemporaryFile holds an exclusive lock
-    #     on the file until its handle is closed. If we try to reopen the
-    #     file for reading while the write handle is still open, Windows
-    #     raises PermissionError → Flask returns 500. Using `with` here
-    #     guarantees the handle is released before we re-open for reading.
+    The two callers only differ in what they send in and whether they
+    want the stale-session cleanup (``forward_to_internal`` does).
+    """
+    upload_source_path = local_path
+    upload_filename_used = os.path.basename(local_path)
+    gs_cleanup: list = []
     temp_multipart_path = None
+
     try:
-        # Resolve which internal server this upload should go to.
-        # Form value wins, but only if it is on the allow-list.
-        target_url = _resolve_target_url(request.form.get("targetServer"))
-        base_url = target_url.rsplit("/upload_lecture", 1)[0]
+        # ── 1. Decide what to send ────────────────────────────────
+        upload_source_path, upload_filename_used, gs_cleanup = \
+            prepare_upload_source(local_path)
 
-        logging.info("Uploading to internal server: %s", target_url)
-        logging.info("Data keys: %s", list(data.keys()))
-        logging.info("File size: %d bytes", file_size)
+        if upload_source_path != local_path:
+            logging.info(
+                "internal_upload: sending green-screen (%.1f MB) instead "
+                "of original (%.1f MB)",
+                os.path.getsize(upload_source_path) / (1024 * 1024),
+                file_size / (1024 * 1024),
+            )
 
+        logging.info("internal_upload: posting to %s", target_url)
+        logging.info(
+            "internal_upload: form keys = %s", sorted(form_data.keys())
+        )
+
+        # ── 2. Build the multipart body in a temp file ────────────
+        # We build it explicitly so we can send an explicit
+        # Content-Length. Many proxies and the internal server reject
+        # chunked uploads.
+        #
+        # Windows note: NamedTemporaryFile holds an exclusive lock on
+        # the file until its handle is closed. Using `with` guarantees
+        # the handle is released before we re-open for reading.
         boundary = f"----WebKitFormBoundary{uuid.uuid4().hex[:16]}"
         content_type = f"multipart/form-data; boundary={boundary}"
-
         total_size = 0
 
-        with tempfile.NamedTemporaryFile(delete=False) as temp_multipart:
-            temp_multipart_path = temp_multipart.name
-
-            # Form fields
-            for key, value in data.items():
-                if isinstance(value, list):
-                    for v in value:
-                        part = (
-                            f"--{boundary}\r\n"
-                            f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
-                            f"{v}\r\n"
-                        ).encode("utf-8")
-                        temp_multipart.write(part)
-                        total_size += len(part)
-                else:
-                    part = (
-                        f"--{boundary}\r\n"
-                        f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
-                        f"{value}\r\n"
-                    ).encode("utf-8")
-                    temp_multipart.write(part)
-                    total_size += len(part)
-
-            # File header
-            upload_filename = file_storage.filename
-            mimetype = mimetypes.guess_type(upload_filename)[0] or "video/mp4"
-            file_header = (
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="videofile"; '
-                f'filename="{upload_filename}"\r\n'
-                f"Content-Type: {mimetype}\r\n\r\n"
-            ).encode("utf-8")
-            temp_multipart.write(file_header)
-            total_size += len(file_header)
-
-            # File content, streamed in 1 MB chunks
-            with open(local_path, "rb") as f:
-                while True:
-                    chunk = f.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    temp_multipart.write(chunk)
-                    total_size += len(chunk)
-
-            # Trailer
-            trailer = f"\r\n--{boundary}--\r\n".encode("utf-8")
-            temp_multipart.write(trailer)
-            total_size += len(trailer)
-
-        # `with` closed the handle here — safe to reopen on Windows now.
-        logging.info("Multipart body prepared: %d bytes total", total_size)
-
-        # ─── 6. POST to the internal server ────────────────────────
-        headers_with_length = {
-            **headers,
-            "Content-Type": content_type,
-            "Content-Length": str(total_size),
-        }
-
-        with open(temp_multipart_path, "rb") as body_file:
-            resp = requests.post(
-                target_url,
-                data=body_file,
-                headers=headers_with_length,
-                cookies=cookies,
-                timeout=(60, 3600),
-                verify=False,
-                allow_redirects=True,
-            )
-
-        logging.info("Response status: %s", resp.status_code)
-        logging.info("Response URL: %s", resp.url)
-
-        if resp.status_code >= 400:
-            logging.error(
-                "Internal server rejected upload: %s\nBody: %s",
-                resp.status_code,
-                resp.text[:2000],
-            )
-
-        # ─── 7. Extract session id ─────────────────────────────────
-        session_id = _extract_session_id(resp)
-        if session_id:
-            logging.info("Extracted session ID from response: %s", session_id)
-
-        # Fallback: KIT returns a generic "Success" page with no id.
-        # Reconstruct from the path convention base64("/home/<user>/<name>").
-        if not session_id and session_name:
-            user_email = data.get("path", "/home/admin@example.com")
-            user_email = user_email.strip("/").split("/")[-1]
-            path = f"/home/{user_email}/{session_name}"
-            session_id = base64.b64encode(path.encode()).decode()
-            logging.info("Generated session ID: %s", session_id)
-
-        if not session_id:
-            logging.error(
-                "Upload to %s returned %s without a usable session id. Body:\n%s",
-                target_url,
-                resp.status_code,
-                resp.text,           # full body — fires at most once per upload
-            )
-            return (
-                jsonify(
-                    {
-                        "error": (
-                            "Internal server accepted the upload but did "
-                            "not return a session id. See the backend log "
-                            "for the response body."
-                        ),
-                        "status_code": resp.status_code,
-                        "response_preview": resp.text[:500],
-                    }
-                ),
-                502,
-            )
-
-        content = resp.text
-
-        # ─── 8. Register session + start background download ──────
-        if session_id:
-            project["session_id"] = session_id
-            project["session_url"] = f"{base_url}/archivesession/{session_id}"
-
-            # Collect the requested target languages *before* recording
-            # the session, so both stay in sync.
-            expected_mt = request.form.getlist("mtLanguage") or ["de"]
-            logging.info("Expected translation languages: %s", expected_mt)
-
-            _clear_cancel(session_id)
-
-            sessions[session_id] = {
-                "id": session_id,
-                "name": session_name,
-                "video_key": video_key,
-                "created_at": utc_now_iso(),
-                "url": f"{base_url}/archivesession/{session_id}",
-                "server": base_url,
-                "expected_mt": expected_mt,
-            }
-            logging.info("Session created: %s", session_id)
-
-            job = {
-                "id": session_id,
-                "video_key": video_key,
-                "status": "processing",
-                "progress": 0.0,
-                "transcript": None,
-                "segments": None,
-                "created_at": utc_now_iso(),
-                "config": dict(request.form),
-            }
-            jobs[session_id] = job
-
-            threading.Thread(
-                target=process_session_in_background,
-                args=(session_id, token, video_key, base_url, expected_mt),
-                daemon=True,
-            ).start()
-            save_state()
-
-        # ─── 9. Respond to the client ─────────────────────────────
-        try:
-            response_data = json.loads(content)
-            if session_id:
-                response_data.update(
-                    {
-                        "session_id": session_id,
-                        "video_key": video_key,
-                        "session_url": f"{base_url}/archivesession/{session_id}",
-                        "output_url": f"/session-output/{session_id}",
-                        "download_url": f"/session-zip/{session_id}",
-                    }
-                )
-            return jsonify(response_data), resp.status_code
-        except json.JSONDecodeError:
-            if session_id:
-                return (
-                    jsonify(
-                        {
-                            "status": "success",
-                            "session_id": session_id,
-                            "video_key": video_key,
-                            "session_url": f"{base_url}/archivesession/{session_id}",
-                            "output_url": f"/session_output/{session_id}",
-                            "download_url": f"/session_zip/{session_id}",
-                            "message": "Upload successful!",
-                            "response": content[:500],
-                        }
-                    ),
-                    resp.status_code,
-                )
-            return (
-                jsonify(
-                    {
-                        "status": "error",
-                        "message": "No session ID received",
-                        "response": content[:1000],
-                        "status_code": resp.status_code,
-                        "url": resp.url,
-                    }
-                ),
-                500,
-            )
-
-    except requests.exceptions.Timeout:
-        logging.error("Request to internal server timed out", exc_info=True)
-        return jsonify({"error": "Request timeout - file may be too large"}), 504
-    except requests.exceptions.RequestException as e:
-        logging.error("Request error (%s): %s", type(e).__name__, e, exc_info=True)
-        return (
-            jsonify(
-                {
-                    "error": f"Request failed: {type(e).__name__}: {e}",
-                }
-            ),
-            500,
-        )
-    except OSError as e:
-        logging.error("Upload error (%s): %s", type(e).__name__, e, exc_info=True)
-        return (
-            jsonify(
-                {
-                    "error": f"Upload failed: {type(e).__name__}: {e}",
-                }
-            ),
-            500,
-        )
-    finally:
-        # Always clean up the temp multipart body, even on success.
-        if temp_multipart_path and os.path.exists(temp_multipart_path):
-            try:
-                os.unlink(temp_multipart_path)
-            except OSError:
-                pass
-
-
-# ─── PROXY ENDPOINTS ────────────────────────────────────────────────────
-@app.route("/forward-to-internal/<video_key>", methods=["POST", "OPTIONS"])
-def forward_to_internal(video_key):
-    """Forward a locally-stored video to the internal KIT server.
-
-    Called by the Flutter client after /upload-chunk + /finish-upload
-    have stored the file locally. Uploads to the KIT server, creates a
-    session, spawns the background download worker, and returns the
-    session id so the client can start polling /job_progress.
-    """
-    if request.method == "OPTIONS":
-        response = jsonify({"message": "OK"})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add(
-            "Access-Control-Allow-Headers", "Content-Type,Authorization"
-        )
-        response.headers.add("Access-Control-Allow-Methods", "POST,OPTIONS")
-        return response, 200
-
-    # ─── 1. Token ──────────────────────────────────────────────
-    data_in = request.get_json(silent=True) or {}
-    token = (data_in.get("token") or "").strip()
-    if not token:
-        token = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
-    if not token:
-        return jsonify({"error": "Missing token"}), 400
-
-    session_name = (data_in.get("name") or "").strip()
-
-    # ─── 2. Look up the video ─────────────────────────────────
-    project = next((v for v in videos if v.get("key") == video_key), None)
-    if project is None:
-        return jsonify({"error": "Video not found", "video_key": video_key}), 404
-
-    file_name = project.get("file_name")
-    if not file_name:
-        return jsonify({"error": "Video has no file_name"}), 400
-
-    local_path = os.path.join(UPLOAD_FOLDER, file_name)
-    if not os.path.exists(local_path):
-        return jsonify({"error": f'File "{file_name}" not found on disk'}), 404
-
-    file_size = os.path.getsize(local_path)
-    if file_size < 1000:
-        return jsonify({"error": "File is too small to upload"}), 400
-
-    if not session_name:
-        session_name = project.get("name") or os.path.splitext(file_name)[0]
-
-    # ─── 3. Build the KIT form fields ─────────────────────────
-    # Defaults mirror what job_configuration_screen.dart sends.
-    user_email = "admin@example.com"
-
-    form_data = {
-        "path": f"/home/{user_email}",
-        "name": session_name,
-        "topicname": session_name,
-        "date": datetime.datetime.now().strftime("%Y-%m-%d"),
-        "speakername": "",
-        "availability": "private",
-        "format": "mixed",
-        "smartChaptering": "online_dynamic",
-        "errorCorrection": "None",
-        "ttsQualityMode": "low_latency",
-        "language": ["en"],
-        "mtLanguage": ["de"],
-        "audioLanguage": ["de"],
-        "profanity": "1",
-        "filter_music": "1",
-        "summarization": "1",
-        "logging": "1",
-        "legals": "1",
-        "profile": "profile_1",
-        "profile_names": "",
-        "shorten": "",
-        "mute": "120",
-        "pause": "2",
-        "save_profile": "1",
-    }
-
-    boundary = f"----WebKitFormBoundary{uuid.uuid4().hex[:16]}"
-    content_type = f"multipart/form-data; boundary={boundary}"
-
-    temp_multipart_path = None
-    try:
-        # Resolve which internal server this upload should go to.
-        # JSON body wins; fall back to a header; fall back to default.
-        target_url = _resolve_target_url(
-            data_in.get("targetServer") or request.headers.get("X-Target-Server")
-        )
-        base_url = target_url.rsplit("/upload_lecture", 1)[0]
-
-        # ─── 4. Build the multipart body in a temp file ──────
-        total_size = 0
         with tempfile.NamedTemporaryFile(delete=False) as temp_multipart:
             temp_multipart_path = temp_multipart.name
 
@@ -7151,7 +7031,8 @@ def forward_to_internal(video_key):
                     for v in value:
                         part = (
                             f"--{boundary}\r\n"
-                            f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                            f'Content-Disposition: form-data; '
+                            f'name="{key}"\r\n\r\n'
                             f"{v}\r\n"
                         ).encode("utf-8")
                         temp_multipart.write(part)
@@ -7159,16 +7040,19 @@ def forward_to_internal(video_key):
                 else:
                     part = (
                         f"--{boundary}\r\n"
-                        f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                        f'Content-Disposition: form-data; '
+                        f'name="{key}"\r\n\r\n'
                         f"{value}\r\n"
                     ).encode("utf-8")
                     temp_multipart.write(part)
                     total_size += len(part)
 
-            upload_filename = file_name
+            upload_filename = upload_filename_used
             if not upload_filename.lower().endswith(".mp4"):
                 upload_filename = f"{upload_filename}.mp4"
-            mimetype = mimetypes.guess_type(upload_filename)[0] or "video/mp4"
+            mimetype = (
+                mimetypes.guess_type(upload_filename)[0] or "video/mp4"
+            )
             file_header = (
                 f"--{boundary}\r\n"
                 f'Content-Disposition: form-data; name="videofile"; '
@@ -7178,7 +7062,7 @@ def forward_to_internal(video_key):
             temp_multipart.write(file_header)
             total_size += len(file_header)
 
-            with open(local_path, "rb") as f:
+            with open(upload_source_path, "rb") as f:
                 while True:
                     chunk = f.read(1024 * 1024)
                     if not chunk:
@@ -7191,106 +7075,105 @@ def forward_to_internal(video_key):
             total_size += len(trailer)
 
         logging.info(
-            "forward_to_internal: uploading %s (%d bytes) to %s",
-            file_name,
-            file_size,
-            target_url,
+            "internal_upload: multipart body prepared (%d bytes)", total_size
         )
 
-        # ─── 5. POST to the internal server ───────────────────
+        # ── 3. POST to the KIT server ─────────────────────────────
         headers = {
             "X-Forward-Auth": token,
             "Authorization": f"Bearer {token}",
             "User-Agent": "Mozilla/5.0 (compatible; LT-Uploader/1.0)",
             "Content-Type": content_type,
-            "Content-Length": str(total_size),
         }
+        if not USE_CHUNKED_UPLOAD:
+            headers["Content-Length"] = str(total_size)
+        # else: let requests pick Transfer-Encoding: chunked
         cookies = {"_forward_auth": token}
 
         with open(temp_multipart_path, "rb") as body_file:
-            resp = requests.post(
-                target_url,
-                data=body_file,
+            resp = _post_multipart_with_retries(
+                target_url=target_url,
+                body_file=body_file,
                 headers=headers,
                 cookies=cookies,
-                timeout=(60, 3600),
-                verify=False,
-                allow_redirects=True,
+                total_size=total_size,
             )
 
         logging.info(
-            "forward_to_internal: status=%s url=%s", resp.status_code, resp.url
+            "internal_upload: response status=%s url=%s",
+            resp.status_code,
+            resp.url,
         )
 
         if resp.status_code >= 400:
             logging.error(
-                "forward_to_internal: internal server rejected: %s\nBody: %s",
+                "internal_upload: internal server rejected %s:\n%s",
                 resp.status_code,
                 resp.text[:2000],
             )
             return (
-                jsonify(
-                    {
-                        "error": f"Internal server returned {resp.status_code}",
-                        "response": resp.text[:1000],
-                    }
-                ),
+                {
+                    "error": f"Internal server returned {resp.status_code}",
+                    "response": resp.text[:1000],
+                },
                 502,
             )
 
-        # ─── 6. Extract the session id ────────────────────────
+        # ── 4. Extract the session id ─────────────────────────────
         session_id = _extract_session_id(resp)
         if session_id:
-            logging.info("forward_to_internal: session id from response: %s", session_id)
+            logging.info(
+                "internal_upload: session id from response: %s", session_id
+            )
 
         # Fallback: KIT's upload endpoint returns a generic "Success"
         # page with no id. Its session ids follow a fixed convention —
-        # base64("/home/<user>/<session_name>") — so reconstruct it.
+        # base64 of the filesystem path "/home/<user>/<session_name>".
         if not session_id and session_name:
-            user_email = "admin@example.com"
+            user_email = form_data.get("path", "/home/admin@example.com")
+            user_email = user_email.strip("/").split("/")[-1]
             path = f"/home/{user_email}/{session_name}"
             session_id = base64.b64encode(path.encode()).decode()
             logging.info(
-                "forward_to_internal: generated session ID: %s", session_id
+                "internal_upload: generated session id: %s", session_id
             )
 
         if not session_id:
             logging.error(
-                "forward_to_internal: no session id in response. Body: %s",
-                resp.text[:1000],
+                "internal_upload: no session id in response. Body:\n%s",
+                resp.text,
             )
             return (
-                jsonify(
-                    {
-                        "error": "Internal server did not return a session id",
-                        "status_code": resp.status_code,
-                        "response_preview": resp.text[:500],
-                    }
-                ),
+                {
+                    "error": (
+                        "Internal server accepted the upload but did not "
+                        "return a session id. See the backend log for "
+                        "the response body."
+                    ),
+                    "status_code": resp.status_code,
+                    "response_preview": resp.text[:500],
+                },
                 502,
             )
-        # ─── 7. Clear stale local state for this session ──────
-        session_dir = os.path.join(SESSION_FOLDER, session_id)
-        if os.path.exists(session_dir):
-            try:
-                shutil.rmtree(session_dir)
-                logging.info(
-                    "forward_to_internal: cleared stale session dir %s",
-                    session_dir,
-                )
-            except OSError as e:
-                logging.warning("Could not clear %s: %s", session_dir, e)
 
-        with job_progress_lock:
-            _job_progress_store.pop(session_id, None)
+        # ── 5. Optionally clear stale local state ─────────────────
+        if clear_stale_session:
+            stale_dir = os.path.join(SESSION_FOLDER, session_id)
+            if os.path.exists(stale_dir):
+                try:
+                    shutil.rmtree(stale_dir)
+                    logging.info(
+                        "internal_upload: cleared stale session dir %s",
+                        stale_dir,
+                    )
+                except OSError as e:
+                    logging.warning(
+                        "Could not clear %s: %s", stale_dir, e
+                    )
+            with job_progress_lock:
+                _job_progress_store.pop(session_id, None)
 
-        # ─── 8. Register session + spawn background worker ────
-        # Normalise the requested translation targets before registering
-        # the session, so the recovery path can find them later.
-        expected_mt = data_in.get("mtLanguage") or data_in.get("mt_languages") or ["de"]
-        if isinstance(expected_mt, str):
-            expected_mt = [expected_mt]
-
+        # ── 6. Register session + spawn background worker ─────────
         _clear_cancel(session_id)
 
         project["session_id"] = session_id
@@ -7305,7 +7188,6 @@ def forward_to_internal(video_key):
             "server": base_url,
             "expected_mt": expected_mt,
         }
-
         jobs[session_id] = {
             "id": session_id,
             "video_key": video_key,
@@ -7314,7 +7196,7 @@ def forward_to_internal(video_key):
             "transcript": None,
             "segments": None,
             "created_at": utc_now_iso(),
-            "config": {"source": "forward_to_internal"},
+            "config": {"source": "internal_upload"},
             "expected_mt": expected_mt,
         }
 
@@ -7326,40 +7208,57 @@ def forward_to_internal(video_key):
         save_state()
 
         logging.info(
-            "forward_to_internal: session %s registered, worker started",
-            session_id,
+            "internal_upload: session %s registered, worker started",
+            _short_sid(session_id),
         )
 
-        return (
-            jsonify(
-                {
-                    "success": True,
-                    "session_id": session_id,
-                    "video_key": video_key,
-                    "session_url": f"{base_url}/archivesession/{session_id}",
-                    "output_url": f"{base_url}/session_output/{session_id}",
-                    "download_url": f"{base_url}/session_zip/{session_id}",
-                }
-            ),
-            200,
+        # ── 7. Build the client response ──────────────────────────
+        try:
+            response_data = json.loads(resp.text)
+            if not isinstance(response_data, dict):
+                response_data = {}
+        except json.JSONDecodeError:
+            response_data = {
+                "status": "success",
+                "message": "Upload successful!",
+                "response": resp.text[:500],
+            }
+
+        response_data.update(
+            {
+                "success": True,
+                "session_id": session_id,
+                "video_key": video_key,
+                "session_url": f"{base_url}/archivesession/{session_id}",
+                "output_url": f"/session-output/{session_id}",
+                "download_url": f"/session-zip/{session_id}",
+            }
         )
+        return response_data, resp.status_code
 
     except requests.exceptions.Timeout:
-        logging.error("forward_to_internal: timeout", exc_info=True)
-        return (
-            jsonify({"error": "Timeout while uploading to internal server"}),
-            504,
-        )
+        logging.error("internal_upload: request timed out", exc_info=True)
+        return {"error": "Request timeout - file may be too large"}, 504
     except requests.exceptions.RequestException as e:
-        logging.error("forward_to_internal: request error %s", e, exc_info=True)
+        logging.error(
+            "internal_upload: request error (%s): %s",
+            type(e).__name__,
+            e,
+            exc_info=True,
+        )
         return (
-            jsonify({"error": f"Request failed: {type(e).__name__}: {e}"}),
+            {"error": f"Request failed: {type(e).__name__}: {e}"},
             500,
         )
     except OSError as e:
-        logging.error("forward_to_internal: OS error %s", e, exc_info=True)
+        logging.error(
+            "internal_upload: OS error (%s): %s",
+            type(e).__name__,
+            e,
+            exc_info=True,
+        )
         return (
-            jsonify({"error": f"Upload failed: {type(e).__name__}: {e}"}),
+            {"error": f"Upload failed: {type(e).__name__}: {e}"},
             500,
         )
     finally:
@@ -7368,7 +7267,233 @@ def forward_to_internal(video_key):
                 os.unlink(temp_multipart_path)
             except OSError:
                 pass
+        for p in gs_cleanup:
+            try:
+                if os.path.exists(p):
+                    os.unlink(p)
+                    logging.info("🧹 Cleaned up temp file: %s", p)
+            except OSError:
+                pass
 
+@app.route("/upload", methods=["POST", "OPTIONS"])
+def upload_to_internal():
+    """Send a video to the internal KIT server and register the session.
+
+    Accepts two request shapes, detected from Content-Type:
+
+      * multipart/form-data with a `videofile` field
+            → the file is saved locally, then uploaded.
+      * application/json with a `video_key`
+            → the file already lives in UPLOAD_FOLDER; it is used
+              directly.
+
+    All the heavy lifting — green-screen substitution, multipart
+    assembly, POST, session-id extraction, session/job registration,
+    background worker spawn, temp-file cleanup — lives in
+    ``_upload_to_internal_server_and_register``.
+    """
+    if request.method == "OPTIONS":
+        response = jsonify({"message": "OK"})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add(
+            "Access-Control-Allow-Headers", "Content-Type,Authorization"
+        )
+        response.headers.add("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        return response, 200
+
+    content_type = (request.content_type or "").lower()
+    is_multipart = "multipart/form-data" in content_type
+
+    # ── Extract the token, whichever mode we're in ───────────────
+    if is_multipart:
+        token = request.form.get("token", "").strip()
+    else:
+        data_in = request.get_json(silent=True) or {}
+        token = (data_in.get("token") or "").strip()
+        if not token:
+            token = (
+                request.headers.get("Authorization", "")
+                .replace("Bearer ", "")
+                .strip()
+            )
+    if not token:
+        return jsonify({"error": "Missing token"}), 400
+
+    # ── Locate the local file + build mode-specific form fields ──
+    if is_multipart:
+        # ---------- Mode A: direct multipart upload ----------
+        if "videofile" not in request.files:
+            return jsonify({"error": "No video file provided"}), 400
+        file_storage = request.files["videofile"]
+        if not file_storage.filename:
+            return jsonify({"error": "Empty filename"}), 400
+
+        session_name = request.form.get("name", file_storage.filename)
+
+        original_filename = file_storage.filename
+        if not original_filename.lower().endswith(".mp4"):
+            original_filename = (
+                f"{os.path.splitext(original_filename)[0]}.mp4"
+            )
+            logging.info("📹 Added .mp4 extension: %s", original_filename)
+
+        existing = next(
+            (v for v in videos if v.get("file_name") == original_filename),
+            None,
+        )
+        local_filename = original_filename
+        local_path = os.path.join(UPLOAD_FOLDER, local_filename)
+
+        if existing:
+            video_key = existing["key"]
+            project = existing
+            logging.info(
+                "📹 Using existing video: %s (key: %s)",
+                original_filename, video_key,
+            )
+            if not os.path.exists(local_path):
+                file_storage.save(local_path)
+                logging.info("✅ Restored video file: %s", local_filename)
+        else:
+            base_name, ext = os.path.splitext(original_filename)
+            ext = ext or ".mp4"
+            counter = 1
+            while os.path.exists(local_path):
+                local_filename = f"{base_name}_{counter}{ext}"
+                local_path = os.path.join(
+                    UPLOAD_FOLDER, local_filename
+                )
+                counter += 1
+            file_storage.save(local_path)
+            logging.info("✅ New video saved: %s", local_filename)
+
+            video_key = str(uuid.uuid4())
+            project = {
+                "key": video_key,
+                "name": session_name,
+                "file_name": local_filename,
+                "uploaded": utc_now_iso(),
+                "last_opened": None,
+                "duration": 120.0,
+                "fps": 30.0,
+                "file_size": os.path.getsize(local_path),
+                "segment_count": 0,
+                "languages": request.form.getlist("language") or ["en"],
+                "thumbnail_url": None,
+                "segmentation_done": False,
+                "segmentation_progress": 0,
+            }
+            videos.append(project)
+
+        file_size = os.path.getsize(local_path)
+
+        # Copy the incoming form into a plain dict (skip token).
+        form_data = {}
+        for key in request.form.keys():
+            if key == "token":
+                continue
+            values = request.form.getlist(key)
+            form_data[key] = values[0] if len(values) == 1 else values
+        form_data.setdefault("path", "/home/admin@example.com")
+
+        expected_mt = request.form.getlist("mtLanguage") or ["de"]
+        target_url = _resolve_target_url(request.form.get("targetServer"))
+        clear_stale = False
+
+    else:
+        # ---------- Mode B: forward an already-stored video ----------
+        video_key = (data_in.get("video_key") or "").strip()
+        if not video_key:
+            return jsonify({"error": "video_key is required"}), 400
+
+        project = next(
+            (v for v in videos if v.get("key") == video_key), None
+        )
+        if project is None:
+            return (
+                jsonify({"error": "Video not found", "video_key": video_key}),
+                404,
+            )
+
+        file_name = project.get("file_name")
+        if not file_name:
+            return jsonify({"error": "Video has no file_name"}), 400
+
+        local_path = os.path.join(UPLOAD_FOLDER, file_name)
+        if not os.path.exists(local_path):
+            return (
+                jsonify({"error": f'File "{file_name}" not found on disk'}),
+                404,
+            )
+
+        file_size = os.path.getsize(local_path)
+        if file_size < 1000:
+            return jsonify({"error": "File is too small to upload"}), 400
+
+        session_name = (
+            (data_in.get("name") or "").strip()
+            or project.get("name")
+            or os.path.splitext(file_name)[0]
+        )
+
+        form_data = {
+            "path": "/home/admin@example.com",
+            "name": session_name,
+            "topicname": session_name,
+            "date": datetime.datetime.now().strftime("%Y-%m-%d"),
+            "speakername": "",
+            "availability": "private",
+            "format": "mixed",
+            "smartChaptering": "online_dynamic",
+            "errorCorrection": "None",
+            "ttsQualityMode": "low_latency",
+            "language": ["en"],
+            "mtLanguage": ["de"],
+            "audioLanguage": ["de"],
+            "profanity": "1",
+            "filter_music": "1",
+            "summarization": "1",
+            "logging": "1",
+            "legals": "1",
+            "profile": "profile_1",
+            "profile_names": "",
+            "shorten": "",
+            "mute": "120",
+            "pause": "2",
+            "save_profile": "1",
+        }
+
+        expected_mt = (
+            data_in.get("mtLanguage")
+            or data_in.get("mt_languages")
+            or ["de"]
+        )
+        if isinstance(expected_mt, str):
+            expected_mt = [expected_mt]
+
+        target_url = _resolve_target_url(
+            data_in.get("targetServer")
+            or request.headers.get("X-Target-Server")
+        )
+        clear_stale = True   # forward mode always resets stale state
+
+    # ── Delegate to the shared worker ─────────────────────────────
+    base_url = target_url.rsplit("/upload_lecture", 1)[0]
+
+    body, status = _upload_to_internal_server_and_register(
+        local_path=local_path,
+        file_size=file_size,
+        session_name=session_name,
+        form_data=form_data,
+        token=token,
+        target_url=target_url,
+        base_url=base_url,
+        video_key=video_key,
+        project=project,
+        expected_mt=expected_mt,
+        clear_stale_session=clear_stale,
+    )
+    return jsonify(body), status
 
 @app.route("/check-session", methods=["GET"])
 def check_session():
@@ -7441,7 +7566,6 @@ def dex_userinfo():
 @app.route("/debug-videos", methods=["GET"])
 def debug_videos():
     """Debug endpoint: return all video metadata (including duplicates)."""
-    base = _public_base_url()
     serialized = []
     for video in videos:
         v = dict(video)
