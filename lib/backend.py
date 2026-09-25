@@ -4131,25 +4131,32 @@ def update_video_subtitles(session_id):
             except OSError:
                 pass
 
-        # ffmpeg input: the current best version
-        original_video = os.path.join(session_dir, "video.mp4")
-        modified_video = os.path.join(session_dir, "video_subtitled.mp4")
-        video_path = (
-            modified_video if os.path.exists(modified_video) else original_video
+        # Always start from the original video. Using the previous
+        # video_subtitled.mp4 as input would compound any encoding issue
+        # (or greenscreen) that a prior run may have introduced.
+        video_path = os.path.join(session_dir, "video.mp4")
+        logging.info(
+            "update_video_subtitles: ffmpeg input = %s (original)", video_path
         )
-        logging.info("update_video_subtitles: ffmpeg input = %s", video_path)
 
         # --- 4. Build ffmpeg command to embed subtitles ---
-        # Start with basic command
+        #
+        # Stream layout in the output (in this order):
+        #   0 : video  (copied from input 0)
+        #   1 : audio  (copied from input 0)
+        #   2+: one subtitle track per valid VTT (re-encoded as mov_text)
+        #
+        # We map streams explicitly rather than using `-map 0` because
+        # we want to control exactly which subtitles end up in the file.
+
         cmd = ["ffmpeg", "-y"]
 
-        # Add input video
+        # Input 0: the video
         cmd.extend(["-i", video_path])
 
-        # Add validated subtitle files as inputs
+        # Inputs 1..N: one VTT per subtitle track
         valid_vtt_files = []
         for vtt in vtt_files:
-            # Validate VTT file first
             try:
                 with open(vtt["path"], "r", encoding="utf-8") as f:
                     content = f.read()
@@ -4158,7 +4165,8 @@ def update_video_subtitles(session_id):
                     continue
                 if "WEBVTT" not in content.upper():
                     logging.warning(
-                        "Skipping invalid VTT (no WEBVTT header): %s", vtt["filename"]
+                        "Skipping invalid VTT (no WEBVTT header): %s",
+                        vtt["filename"],
                     )
                     continue
             except (OSError, UnicodeError) as e:
@@ -4168,32 +4176,43 @@ def update_video_subtitles(session_id):
             cmd.extend(["-i", vtt["path"]])
             valid_vtt_files.append(vtt)
 
-        # Build subtitle stream mapping
-        # Video stream: 0:v:0, Audio stream: 0:a:0
-        cmd.extend(["-map", "0:v:0"])
-        cmd.extend(["-map", "0:a:0"])
+        # ── Stream mapping ─────────────────────────────────────────
+        # Video and audio from input 0. The `?` makes each map optional
+        # so a streamless video (audio-less lecture, say) doesn't abort
+        # the whole command.
+        cmd.extend(["-map", "0:v:0?"])
+        cmd.extend(["-map", "0:a:0?"])
 
-        # Map all subtitle streams from the additional inputs
-        # They start at index 1 (since we have 1 input file)
+        # Exclude any subtitle streams already present in the original
+        # video. This must come BEFORE the positive subtitle maps so it
+        # only strips streams from input 0, not the freshly added ones.
+        cmd.extend(["-map", "-0:s?"])
+
+        # Subtitles from inputs 1..N -> output stream 2..N+1
         for i, vtt in enumerate(valid_vtt_files):
             cmd.extend(["-map", f"{i + 1}:s"])
             stream_idx = 2 + i
 
-            # Human-readable label, e.g. "Russian", "German", "Transcript"
             display_name = _extract_simple_language_name(vtt["language"])
             if not display_name or display_name == "Unknown":
                 display_name = vtt["language"]
-
-            # Match the original KIT style: set title only, no language code.
             cmd.extend([f"-metadata:s:{stream_idx}", f"title={display_name}"])
 
-        # Remove any existing subtitle streams from the input
-        # This prevents duplication issues
-        cmd.extend(["-map", "-0:s?"])
-
-        # Output options
-        cmd.extend(["-c", "copy"])
+        # ── Codecs ─────────────────────────────────────────────────
+        # Copy the video and audio bitstreams verbatim (fast, lossless),
+        # but re-encode the subtitles as mov_text so MP4 can hold them.
+        cmd.extend(["-c:v", "copy"])
+        cmd.extend(["-c:a", "copy"])
         cmd.extend(["-c:s", "mov_text"])
+
+        # ── Container ──────────────────────────────────────────────
+        # Move the moov atom to the front of the file. Without this,
+        # browsers streaming the file over HTTP read the first frames
+        # before they've seen the index, and often render them as
+        # solid green. This is the single most important flag for web
+        # playback of an MP4.
+        cmd.extend(["-movflags", "+faststart"])
+
         cmd.append(temp_output)
 
         # Log the command for debugging (sanitize to avoid huge logs)
