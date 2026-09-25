@@ -1,4 +1,5 @@
 // lib/main.dart
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:asr_live_translator/screens/login_screen.dart';
 import 'package:asr_live_translator/screens/register_screen.dart';
@@ -13,8 +14,15 @@ Future<void> main() async {
 
   await LanguageConfig.load();
   refreshLanguageConstants();
+  if (kDebugMode) {
+    print('authBaseUrl    = $authBaseUrl');
+    print('flaskServerUrl = $flaskServerUrl');
+    print('dexRedirectUri = $dexRedirectUri');
+    print('isDevelopment  = $isDevelopment');
+  }
   
   runApp(const MyApp());
+
 }
 
 class MyApp extends StatelessWidget {

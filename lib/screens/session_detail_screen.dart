@@ -1294,7 +1294,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     required int mute,
     required double pause,
   }) async {
-    const uploadUrl = '$flaskServerUrl/upload';
+    final uploadUrl = '$flaskServerUrl/upload';
 
     final formData = html.FormData();
 

@@ -632,6 +632,17 @@ def _short_sid(session_id: str | None, keep: int = 8) -> str:
         return "<none>"
     return session_id[:keep] + "…"
 
+def _ensure_greenscreen_fields(project: dict) -> dict:
+    """Make sure every project carries the green-screen bookkeeping fields.
+
+    Old state files predate these fields; rather than migrating the
+    pickle, we add them lazily on read. Idempotent.
+    """
+    project.setdefault("greenscreen_file_name", None)
+    project.setdefault("greenscreen_status", "pending")
+    project.setdefault("greenscreen_progress", 0)
+    return project
+
 
 def _note_404(session_id: str, url: str) -> int:
     """Bump and return the consecutive-404 counter for a session.
@@ -5328,6 +5339,128 @@ def prepare_upload_source(original_video_path: str) -> tuple[str, str, list[str]
     return (gs_path, "green_screen.mp4", cleanup)
 
 
+def prepare_upload_source_cached(
+    original_video_path: str, video_key: str | None,
+) -> tuple[str, str, list[str]]:
+    """Like prepare_upload_source, but reuses a pre-built green-screen
+    if one exists on disk for this project.
+
+    Returns (source_path, upload_filename, cleanup_list). The cleanup
+    list is empty when the cached file is used (we must not delete it),
+    and contains the temp files when generation happened on the fly.
+    """
+    if video_key:
+        project = next(
+            (v for v in videos if v.get("key") == video_key), None
+        )
+        if project is not None:
+            _ensure_greenscreen_fields(project)
+            gs_name = project.get("greenscreen_file_name")
+            if gs_name:
+                gs_path = os.path.join(UPLOAD_FOLDER, gs_name)
+                if os.path.exists(gs_path) and os.path.getsize(gs_path) > 1000:
+                    logging.info(
+                        "internal_upload: using cached green-screen %s",
+                        gs_name,
+                    )
+                    return gs_path, gs_name, []
+
+    # No cached file — fall back to the existing on-the-fly path.
+    return prepare_upload_source(original_video_path)
+
+
+def _build_greenscreen_for_project(video_key: str) -> bool:
+    """Build the audio+green-screen stand-in for one project.
+
+    On success, writes the file into UPLOAD_FOLDER and updates the
+    project dict with `greenscreen_file_name`, `greenscreen_status`
+    and `greenscreen_progress`. Idempotent: if a usable file already
+    exists, returns immediately.
+    """
+    project = next((v for v in videos if v.get("key") == video_key), None)
+    if project is None:
+        logging.warning("greenscreen: project %s not found", video_key)
+        return False
+
+    _ensure_greenscreen_fields(project)
+
+    # Already done? Bail.
+    existing = project.get("greenscreen_file_name")
+    if existing:
+        p = os.path.join(UPLOAD_FOLDER, existing)
+        if os.path.exists(p) and os.path.getsize(p) > 1000:
+            project["greenscreen_status"] = "ready"
+            project["greenscreen_progress"] = 100
+            return True
+
+    original_name = project.get("file_name")
+    if not original_name:
+        project["greenscreen_status"] = "failed"
+        return False
+
+    original_path = os.path.join(UPLOAD_FOLDER, original_name)
+    if not os.path.exists(original_path):
+        project["greenscreen_status"] = "failed"
+        save_state()
+        return False
+
+    project["greenscreen_status"] = "building"
+    project["greenscreen_progress"] = 5
+    save_state()
+
+    # Two steps: extract audio → mux into a small green-screen mp4.
+    # Both intermediate and final files live in UPLOAD_FOLDER so they
+    # survive a restart; the temp audio is deleted afterwards.
+    base = os.path.splitext(original_name)[0]
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", base)[:60] or "video"
+    gs_name = f"{safe}__greenscreen.mp4"
+    gs_path = os.path.join(UPLOAD_FOLDER, gs_name)
+
+    audio_path = None
+    try:
+        audio_path, duration = extract_audio_from_video(
+            original_path, UPLOAD_FOLDER
+        )
+        if audio_path is None:
+            logging.warning(
+                "greenscreen: audio extraction failed for %s", video_key
+            )
+            project["greenscreen_status"] = "failed"
+            save_state()
+            return False
+
+        project["greenscreen_progress"] = 50
+        save_state()
+
+        if not create_green_screen_video(audio_path, gs_path, duration):
+            logging.warning(
+                "greenscreen: mux failed for %s", video_key
+            )
+            project["greenscreen_status"] = "failed"
+            save_state()
+            return False
+
+        project["greenscreen_file_name"] = gs_name
+        project["greenscreen_status"] = "ready"
+        project["greenscreen_progress"] = 100
+        save_state()
+
+        logging.info(
+            "✅ Greenscreen ready for %s → %s (%.1f MB)",
+            video_key,
+            gs_name,
+            os.path.getsize(gs_path) / (1024 * 1024),
+        )
+        return True
+
+    finally:
+        if audio_path and os.path.exists(audio_path):
+            try:
+                os.remove(audio_path)
+            except OSError:
+                pass
+
+
 # ─── AUTH ENDPOINTS ─────────────────────────────────────────────────────
 
 
@@ -5367,9 +5500,62 @@ def login():
 # ─── VIDEO ENDPOINTS ────────────────────────────────────────────────────
 
 
+@app.route("/prepare-greenscreen/<video_key>", methods=["POST", "OPTIONS"])
+def prepare_greenscreen(video_key):
+    """Build the audio+green-screen stand-in for a project, in the
+    background. Returns immediately; the client polls /video-detail
+    (or /videos) to observe `greenscreen_status`.
+    """
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    project = next((v for v in videos if v.get("key") == video_key), None)
+    if project is None:
+        return jsonify({"error": "Video not found"}), 404
+
+    _ensure_greenscreen_fields(project)
+
+    # Already done or in progress? Nothing to do.
+    if project.get("greenscreen_status") == "ready":
+        return (
+            jsonify(
+                {
+                    "success": True,
+                    "status": "ready",
+                    "greenscreen_file_name": project.get(
+                        "greenscreen_file_name"
+                    ),
+                }
+            ),
+            200,
+        )
+    if project.get("greenscreen_status") == "building":
+        return (
+            jsonify({"success": True, "status": "building"}),
+            200,
+        )
+
+    # Mark it as building *before* spawning the thread so a rapid
+    # double-click doesn't queue two workers.
+    project["greenscreen_status"] = "building"
+    project["greenscreen_progress"] = 0
+    save_state()
+
+    threading.Thread(
+        target=_build_greenscreen_for_project,
+        args=(video_key,),
+        daemon=True,
+    ).start()
+
+    return jsonify({"success": True, "status": "building"}), 202
+
+
 @app.route("/videos", methods=["GET"])
 def get_videos():
     """Return the list of uploaded videos with storage usage info."""
+
+    for video in videos:
+        _ensure_greenscreen_fields(video)    
     # ============ DEDUPLICATION LOGIC ============
     # Group videos by filename (without UUID prefix)
     video_groups = {}
@@ -5620,7 +5806,12 @@ def finish_upload():
 
 @app.route("/delete-video/<video_key>", methods=["POST", "DELETE", "OPTIONS"])
 def delete_video(video_key):
-    """Delete a single project: file, thumbnail, sessions and jobs."""
+    """Delete a project: original, green-screen, thumbnail, sessions, jobs.
+
+    Every artefact associated with the project is removed from disk and
+    from the in-memory state, in one call. Missing files are not an
+    error — the endpoint is idempotent.
+    """
     if request.method == "OPTIONS":
         return ("", 204)
 
@@ -5628,55 +5819,114 @@ def delete_video(video_key):
     if not target:
         return jsonify({"error": "Video not found"}), 404
 
+    _ensure_greenscreen_fields(target)
+
+    name = target.get("name", "<unnamed>")
+
+    # ── 1. Files on disk ──────────────────────────────────────────
+    # Everything a project owns lives in UPLOAD_FOLDER. We delete by
+    # explicit filename rather than by pattern so we never touch a
+    # different project's files.
     file_name = target.get("file_name")
+    gs_name = target.get("greenscreen_file_name")
 
-    # 1. Delete the video file from disk
+    def _safe_unlink(path: str, what: str):
+        """Remove a file, logging but never raising on failure."""
+        if not path:
+            return
+        if not os.path.exists(path):
+            return
+        try:
+            os.remove(path)
+            logging.info("🗑️ Deleted %s: %s", what, path)
+        except OSError as e:
+            logging.warning("Could not delete %s %s: %s", what, path, e)
+
     if file_name:
-        file_path = os.path.join(UPLOAD_FOLDER, file_name)
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                logging.info("🗑️ Deleted video file: %s", file_path)
-            except OSError as e:
-                logging.warning("Could not delete %s: %s", file_path, e)
-
-        # 2. Delete the thumbnail
+        _safe_unlink(
+            os.path.join(UPLOAD_FOLDER, file_name), "original video"
+        )
+        # The thumbnail is named after the original.
         thumb_name = f"{os.path.splitext(file_name)[0]}_thumb.jpg"
-        thumb_path = os.path.join(UPLOAD_FOLDER, thumb_name)
-        if os.path.exists(thumb_path):
-            try:
-                os.remove(thumb_path)
-                logging.info("🗑️ Deleted thumbnail: %s", thumb_path)
-            except OSError as e:
-                logging.warning("Could not delete %s: %s", thumb_path, e)
+        _safe_unlink(
+            os.path.join(UPLOAD_FOLDER, thumb_name), "thumbnail"
+        )
 
-    # 3. Delete any sessions and jobs that belong to this video
-    session_ids_to_remove = [
-        sid for sid, s in sessions.items() if s.get("video_key") == video_key
+    if gs_name:
+        _safe_unlink(
+            os.path.join(UPLOAD_FOLDER, gs_name), "green-screen"
+        )
+
+    # Belt-and-braces: also try the deterministic green-screen name in
+    # case the field was never populated (e.g. an interrupted build).
+    if file_name and not gs_name:
+        base = os.path.splitext(file_name)[0]
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", base)[:60] or "video"
+        orphan_gs = os.path.join(UPLOAD_FOLDER, f"{safe}__greenscreen.mp4")
+        _safe_unlink(orphan_gs, "orphaned green-screen")
+
+    # ── 2. Sessions on disk ───────────────────────────────────────
+    # A project can have any number of sessions (re-uploads of the
+    # same file). Every one of them owns a directory.
+    session_ids = [
+        sid for sid, s in sessions.items()
+        if s.get("video_key") == video_key
     ]
-    for sid in session_ids_to_remove:
+    for sid in session_ids:
         session_dir = os.path.join(SESSION_FOLDER, sid)
         if os.path.isdir(session_dir):
             try:
                 shutil.rmtree(session_dir)
                 logging.info("🗑️ Deleted session dir: %s", session_dir)
             except OSError as e:
-                logging.warning("Could not delete session dir %s: %s", session_dir, e)
+                logging.warning(
+                    "Could not delete session dir %s: %s", session_dir, e
+                )
         sessions.pop(sid, None)
 
-    job_ids_to_remove = [
-        jid for jid, j in jobs.items() if j.get("video_key") == video_key
+    # ── 3. Jobs (in-memory and persisted) ─────────────────────────
+    job_ids = [
+        jid for jid, j in jobs.items()
+        if j.get("video_key") == video_key
     ]
-    for jid in job_ids_to_remove:
+    for jid in job_ids:
         jobs.pop(jid, None)
 
-    # 4. Remove the video entry itself
+    # ── 4. In-memory progress entries ────────────────────────────
+    # `_job_progress_store` is keyed by session id, so it's already
+    # covered by the session removal above. `download_progress` is
+    # keyed by download id and is unrelated to a project. Nothing to
+    # do here for now, but leaving this comment so it's clear we
+    # considered it.
+
+    # ── 5. Chunk buffer (if the user re-uploaded this project) ────
+    # chunk_storage is keyed by filename; drop any matching entries.
+    if file_name:
+        # The exact key used by /upload-chunk is whatever the client
+        # sent as `filename`, which is typically the original name.
+        chunk_storage.pop(file_name, None)
+        # Also sweep anything else that shares the cleaned base name.
+        base = os.path.splitext(file_name)[0]
+        for key in [k for k in chunk_storage.keys() if base in k]:
+            chunk_storage.pop(key, None)
+
+    # ── 6. The project entry itself ───────────────────────────────
     videos.remove(target)
     save_state()
 
-    logging.info("✅ Deleted project '%s' (key=%s)", target.get("name"), video_key)
+    logging.info("✅ Deleted project '%s' (key=%s)", name, video_key)
 
-    return jsonify({"success": True, "deleted_key": video_key}), 200
+    return (
+        jsonify(
+            {
+                "success": True,
+                "deleted_key": video_key,
+                "deleted_sessions": len(session_ids),
+                "deleted_jobs": len(job_ids),
+            }
+        ),
+        200,
+    )
 
 
 @app.route("/update-project-name/<video_key>", methods=["POST", "OPTIONS"])
@@ -6996,7 +7246,7 @@ def _upload_to_internal_server_and_register(
     try:
         # ── 1. Decide what to send ────────────────────────────────
         upload_source_path, upload_filename_used, gs_cleanup = \
-            prepare_upload_source(local_path)
+            prepare_upload_source_cached(local_path, video_key)
 
         if upload_source_path != local_path:
             logging.info(
@@ -7582,34 +7832,93 @@ def debug_jobs():
     return jsonify({"count": len(jobs), "jobs": jobs}), 200
 
 
-@app.route("/clear-videos", methods=["POST"])
+@app.route("/clear-videos", methods=["POST", "OPTIONS"])
 def clear_videos():
-    """Clear all uploaded videos, thumbnails and chunk/job state."""
-    for video in videos:
-        file_name = video.get("file_name")
-        if not file_name:
+    """Wipe every project, file and piece of state.
+
+    After this call the server is back to a pristine state: no
+    uploaded files, no green-screens, no thumbnails, no sessions,
+    no jobs, no chunk buffers. The user table and the language
+    configuration are untouched.
+    """
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    logging.info("🧹 clear-videos: wiping all project data")
+
+    # ── 1. Files on disk ──────────────────────────────────────────
+    # Rather than tracking each file through `videos`, scan the two
+    # folders and delete everything. That also cleans up files that
+    # leaked past a previous delete (orphaned green-screens, thumbs
+    # for videos that were removed from the list by hand, ...).
+    removed_files = 0
+
+    for folder in (UPLOAD_FOLDER,):
+        if not os.path.isdir(folder):
             continue
-
-        file_path = os.path.join(UPLOAD_FOLDER, file_name)
-        if os.path.exists(file_path):
+        for entry in os.listdir(folder):
+            full = os.path.join(folder, entry)
+            if not os.path.isfile(full):
+                continue
             try:
-                os.remove(file_path)
+                os.remove(full)
+                removed_files += 1
             except OSError as e:
-                logging.warning("Could not remove %s: %s", file_path, e)
+                logging.warning(
+                    "clear-videos: could not remove %s: %s", full, e
+                )
 
-        thumb_filename = f"{os.path.splitext(file_name)[0]}_thumb.jpg"
-        thumb_path = os.path.join(UPLOAD_FOLDER, thumb_filename)
-        if os.path.exists(thumb_path):
+    # Session folders are directories, so handle them separately.
+    removed_sessions = 0
+    if os.path.isdir(SESSION_FOLDER):
+        for entry in os.listdir(SESSION_FOLDER):
+            full = os.path.join(SESSION_FOLDER, entry)
+            if not os.path.isdir(full):
+                continue
             try:
-                os.remove(thumb_path)
+                shutil.rmtree(full)
+                removed_sessions += 1
             except OSError as e:
-                logging.warning("Could not remove %s: %s", thumb_path, e)
+                logging.warning(
+                    "clear-videos: could not remove session dir %s: %s",
+                    full, e,
+                )
 
+    # ── 2. In-memory state ────────────────────────────────────────
     videos.clear()
     chunk_storage.clear()
     jobs.clear()
-    save_state()
-    return jsonify({"message": "Cleared"}), 200
+    sessions.clear()
+
+    # ── 3. Progress stores ────────────────────────────────────────
+    with job_progress_lock:
+        _job_progress_store.clear()
+    with download_progress_lock:
+        download_progress.clear()
+    with _cancelled_sessions_lock:
+        _cancelled_sessions.clear()
+    with _consecutive_404s_lock:
+        _consecutive_404s.clear()
+
+    # ── 4. Persist ────────────────────────────────────────────────
+    save_state(force=True)
+
+    logging.info(
+        "🧹 clear-videos: removed %d files, %d session dirs",
+        removed_files,
+        removed_sessions,
+    )
+
+    return (
+        jsonify(
+            {
+                "message": "Cleared",
+                "removed_files": removed_files,
+                "removed_sessions": removed_sessions,
+            }
+        ),
+        200,
+    )
 
 
 users["testuser@example.com"] = {

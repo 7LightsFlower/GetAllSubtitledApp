@@ -1,23 +1,36 @@
 // constants.dart
 
+import 'package:flutter/foundation.dart' show kIsWeb;
+// ignore: deprecated_member_use, avoid_web_libraries_in_flutter
+import 'dart:html' as html;
+
 import 'package:asr_live_translator/models/language_config.dart';
 
 // ─── App title ──────────────────────────────────────────────────
 const String appTitle = 'Subtitles in many languages';
 
 // ─── Environment mode ─────────────────────────────────────────
-// true  → local `flutter run -d chrome`
-// false → production (Docker / Nginx)
+// Kept for anything that still reads it. The backend URLs below no
+// longer depend on this flag — they follow the browser's hostname,
+// so `flutter run -d chrome` automatically talks to localhost:5000
+// and a build served by Nginx automatically talks to the public URL.
 const bool isDevelopment = false;
 
-// ─── Server addresses ─────────────────────────────────────────
-/// Public URL where the web app is hosted (frontend, i.e. the browser origin).
-/// Used only for display / OAuth redirects, NOT as an API base.
+/// True when the app is running in a browser on localhost / 127.0.0.1,
+/// or when it is not running on the web at all (native builds default
+/// to dev so a stray mobile build doesn't hit the production server).
+bool get runningOnLocalhost =>
+    !kIsWeb ||
+    html.window.location.hostname == 'localhost' ||
+    html.window.location.hostname == '127.0.0.1';
+
+// ─── Public web host ───────────────────────────────────────────
+/// Public URL where the web app is hosted (frontend, i.e. the browser
+/// origin). Used only for display / OAuth redirects, NOT as an API base.
 const String publicServerUrl = 'https://get-all-subtitled.isl.iar.kit.edu';
 
-/// Internal backend server (video processing + Dex OAuth; separate service).
-/// No trailing slash.
-// ── Internal server options ────────────────────────────────────
+// ─── Internal backend server (video processing + Dex OAuth) ────
+// Options the user may pick from. No trailing slash.
 const List<String> internalServerOptions = <String>[
   'https://lt2srv-sscherrer.isl.iar.kit.edu',
   'https://lecture-translator.kit.edu',
@@ -28,20 +41,33 @@ const String defaultInternalServerUrl =
     'https://lt2srv-sscherrer.isl.iar.kit.edu';
 
 const Map<String, String> internalServerLabels = {
-  'https://lt2srv-sscherrer.isl.iar.kit.edu': 'lt2srv-sscherrer (Default for now)',
+  'https://lt2srv-sscherrer.isl.iar.kit.edu':
+      'lt2srv-sscherrer (Default for now)',
   'https://lecture-translator.kit.edu': 'LT Main',
   'https://lt2srv-backup.iar.kit.edu': 'LT Backup',
 };
 
 String internalServerUrl = defaultInternalServerUrl;
 
-// ── Same-server API base ───────────────────────────────────────
-const String flaskServerUrl = String.fromEnvironment(
-  'API_BASE_URL',
-  defaultValue: isDevelopment ? 'http://localhost:5000' : '',
-);
+// ─── Flask backend base ────────────────────────────────────────
+// One source of truth. Both names resolve to the same value; keep
+// them because call sites already reference each separately.
+//
+//   localhost / 127.0.0.1  → http://localhost:5000
+//   anything else          → https://get-all-subtitled.isl.iar.kit.edu
+//
+// Because the value is picked at runtime, these must be `final`,
+// not `const`. If any call site wraps them inside a `const`
+// expression (e.g. `const Uri u = Uri.parse(authBaseUrl)`), that
+// call site will need to become `final` too.
+const String _devBackendUrl = 'http://localhost:5000';
+const String _prodBackendUrl = 'https://get-all-subtitled.isl.iar.kit.edu';
 
-const String authBaseUrl = flaskServerUrl;
+final String authBaseUrl =
+    runningOnLocalhost ? _devBackendUrl : _prodBackendUrl;
+
+final String flaskServerUrl =
+    runningOnLocalhost ? _devBackendUrl : _prodBackendUrl;
 
 String get videoApiBaseUrl => internalServerUrl;
 
@@ -60,7 +86,7 @@ const List<String> dexScopes = ['openid', 'profile', 'email'];
 
 String get dexIssuer => '$internalServerUrl/dex';
 
-const String dexRedirectUri = isDevelopment
+final String dexRedirectUri = runningOnLocalhost
     ? 'http://localhost:8080/'
     : '$publicServerUrl/';
 
@@ -83,7 +109,8 @@ Map<String, String> get _languageCodesByName {
   final cached = _languageCodesByNameCache;
   if (cached != null) return cached;
   final built = {
-    for (final e in languageNamesByCode.entries) e.value.toLowerCase(): e.key,
+    for (final e in languageNamesByCode.entries)
+      e.value.toLowerCase(): e.key,
   };
   _languageCodesByNameCache = built;
   return built;
@@ -124,7 +151,9 @@ String resolveLanguageName(String raw) {
   }
 
   // 1. Bare code or bare full name
-  if (languageNamesByCode.containsKey(lower)) return languageNamesByCode[lower]!;
+  if (languageNamesByCode.containsKey(lower)) {
+    return languageNamesByCode[lower]!;
+  }
   if (_languageCodesByName.containsKey(lower)) return trimmed;
 
   // 2. Whatever is inside parentheses
@@ -144,7 +173,8 @@ String resolveLanguageName(String raw) {
   }
 
   // 3. A 2-letter code after a separator: "asr:de", "en-ASR", "x_en"
-  final codeMatch = RegExp(r'[\s:\-_]([a-zA-Z]{2})\b').firstMatch(trimmed);
+  final codeMatch =
+      RegExp(r'[\s:\-_]([a-zA-Z]{2})\b').firstMatch(trimmed);
   if (codeMatch != null) {
     final code = codeMatch.group(1)!.toLowerCase();
     final name = languageNamesByCode[code];

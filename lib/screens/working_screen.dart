@@ -44,6 +44,12 @@ class VideoProject {
   final bool segmentationDone;
   final int segmentationProgress;
 
+  // Green-screen prep state. Populated by the backend's
+  // /videos response; defaults keep older servers working.
+  final String? greenscreenFileName;
+  final String greenscreenStatus;   // pending | building | ready | failed
+  final int greenscreenProgress;    // 0..100
+
   VideoProject({
     required this.key,
     required this.name,
@@ -58,6 +64,9 @@ class VideoProject {
     this.thumbnailUrl,
     required this.segmentationDone,
     required this.segmentationProgress,
+    required this.greenscreenFileName,
+    required this.greenscreenStatus,
+    required this.greenscreenProgress,
   });
 
   factory VideoProject.fromJson(Map<String, dynamic> json) {
@@ -80,6 +89,10 @@ class VideoProject {
       thumbnailUrl: json['thumbnail_url'] as String?,
       segmentationDone: json['segmentation_done'] as bool? ?? false,
       segmentationProgress: json['segmentation_progress'] as int? ?? 0,
+      greenscreenFileName: json['greenscreen_file_name'] as String?,
+      greenscreenStatus:
+          json['greenscreen_status'] as String? ?? 'pending',
+      greenscreenProgress: json['greenscreen_progress'] as int? ?? 0,
     );
   }
 }
@@ -118,8 +131,11 @@ class _WorkingScreenState extends State<WorkingScreen> {
   double _storageLimit = 50.0;
   String? _listError;
 
-  // ─── Lifecycle ──────────────────────────────────────────────────────────
+  // Track which project keys already had the trigger fired, so we
+  // don't spam the backend on every refresh.
+  final Set<String> _greenscreenTriggered = {};
 
+  // ─── Lifecycle ────────────────────────────────────────────────
   @override
   void initState() {
     super.initState();
@@ -133,50 +149,176 @@ class _WorkingScreenState extends State<WorkingScreen> {
       _listError = null;
     });
 
+    final url = Uri.parse('$authBaseUrl/videos');
+
+    if (kDebugMode) {
+      print('📡 GET $url  (authBaseUrl="$authBaseUrl")');
+    }
+
+    http.Response response;
     try {
-      final url = Uri.parse('$authBaseUrl/videos');
-      if (kDebugMode) print('📡 Fetching videos from: $url');
-      final response =
-          await http.get(url, headers: {'Content-Type': 'application/json'});
-
-      if (!mounted) return;
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
-        if (kDebugMode) {
-          print('📦 Video list response: ${jsonEncode(data)}');
-        }
-
-        final projects = (data['projects'] as List?)?.map((e) {
-          try {
-            return VideoProject.fromJson(e as Map<String, dynamic>);
-          } catch (e) {
-            if (kDebugMode) print('❌ Error parsing project: $e');
-            return null;
-          }
-        }).whereType<VideoProject>().toList() ??
-            [];
-
-        if (mounted) {
-          setState(() {
-            _projects = projects;
-            _storageUsed = (data['storage_used_gb'] ?? 0.0).toDouble();
-            _storageLimit = (data['storage_limit_gb'] ?? 50.0).toDouble();
-            _isLoading = false;
-          });
-        }
-      } else {
-        throw Exception('Failed to load projects (HTTP ${response.statusCode})');
-      }
-    } catch (e) {
-      if (kDebugMode) print('❌ Error in _fetchProjects: $e');
+      response = await http
+          .get(url, headers: {'Accept': 'application/json'})
+          .timeout(const Duration(seconds: 15));
+    } on TimeoutException {
+      if (kDebugMode) print('❌ Timed out after 15 s');
       if (mounted) {
         setState(() {
-          _listError = 'Error loading projects: $e';
+          _listError =
+              'The backend did not respond within 15 seconds. '
+              'Make sure the Flask server is running on port 5000.';
           _isLoading = false;
         });
       }
+      return;
+    } on http.ClientException catch (e) {
+      if (kDebugMode) print('❌ ClientException: $e');
+      if (mounted) {
+        setState(() {
+          _listError =
+              'Cannot reach the backend at $authBaseUrl.\n\n'
+              'Check that the Flask server is running and that the URL '
+              'in constants.dart is correct.';
+          _isLoading = false;
+        });
+      }
+      return;
+    } catch (e) {
+      if (kDebugMode) print('❌ Unexpected network error: $e');
+      if (mounted) {
+        setState(() {
+          _listError = 'Network error while loading projects: $e';
+          _isLoading = false;
+        });
+      }
+      return;
     }
+
+    // ── Check the response before parsing it. ──
+    final contentType = response.headers['content-type'] ?? '';
+    final bodyPreview = response.body.length > 200
+        ? response.body.substring(0, 200)
+        : response.body;
+
+    if (kDebugMode) {
+      print('📡 status=${response.statusCode} content-type=$contentType');
+      print('📡 body preview: $bodyPreview');
+    }
+
+    if (response.statusCode != 200) {
+      if (mounted) {
+        setState(() {
+          _listError =
+              'Backend returned HTTP ${response.statusCode}.\n\n'
+              '${_shorten(bodyPreview, 200)}';
+          _isLoading = false;
+        });
+      }
+      return;
+    }
+
+    if (!contentType.contains('application/json') &&
+        bodyPreview.trimLeft().startsWith('<')) {
+      if (kDebugMode) {
+        print('❌ Got HTML instead of JSON — wrong URL?');
+      }
+      if (mounted) {
+        setState(() {
+          _listError =
+              'The URL "$authBaseUrl/videos" returned an HTML page, not '
+              'JSON. This usually means authBaseUrl is pointing at the '
+              'web host instead of the Flask backend.\n\n'
+              'Fix: set authBaseUrl to your Flask server, e.g. '
+              '"http://localhost:5000" when running locally.';
+          _isLoading = false;
+        });
+      }
+      return;
+    }
+
+    Map<String, dynamic> data;
+    try {
+      data = jsonDecode(response.body) as Map<String, dynamic>;
+    } catch (e) {
+      if (kDebugMode) print('❌ JSON parse failed: $e');
+      if (mounted) {
+        setState(() {
+          _listError =
+              'The backend returned something that is not valid JSON.\n\n'
+              '${_shorten(bodyPreview, 200)}';
+          _isLoading = false;
+        });
+      }
+      return;
+    }
+
+    final projects = (data['projects'] as List?)
+            ?.map((e) {
+              try {
+                return VideoProject.fromJson(e as Map<String, dynamic>);
+              } catch (err) {
+                if (kDebugMode) print('❌ Error parsing project: $err');
+                return null;
+              }
+            })
+            .whereType<VideoProject>()
+            .toList() ??
+        [];
+
+    if (!mounted) return;
+    setState(() {
+      _projects = projects;
+      _storageUsed =
+          (data['storage_used_gb'] as num?)?.toDouble() ?? 0.0;
+      _storageLimit =
+          (data['storage_limit_gb'] as num?)?.toDouble() ?? 50.0;
+      _isLoading = false;
+    });
+
+    // Fire-and-forget: ask the backend to prepare a green-screen for
+    // any project that still needs one. The server answers immediately
+    // (202) and does the work in a background thread.
+    _triggerGreenscreenForPendingProjects();
+  }
+
+  Future<void> _triggerGreenscreenForPendingProjects() async {
+    final toTrigger = _projects
+        .where((p) => _projectNeedsGreenscreen(p))
+        .where((p) => !_greenscreenTriggered.contains(p.key))
+        .toList();
+
+    if (toTrigger.isEmpty) return;
+
+    for (final p in toTrigger) {
+      _greenscreenTriggered.add(p.key);
+      try {
+        await http.post(
+          Uri.parse('$authBaseUrl/prepare-greenscreen/${p.key}'),
+          headers: {'Content-Type': 'application/json'},
+        );
+        if (kDebugMode) {
+          print('🧪 prepare-greenscreen requested for ${p.key}');
+        }
+      } catch (e) {
+        // If the request itself fails, allow a retry on the next
+        // refresh by forgetting the key.
+        _greenscreenTriggered.remove(p.key);
+        if (kDebugMode) {
+          print('prepare-greenscreen failed for ${p.key}: $e');
+        }
+      }
+    }
+
+    // Single refresh after a short delay. The server does the heavy
+    // lifting; we just need the UI to catch up on the new status.
+    Future.delayed(const Duration(seconds: 6), () {
+      if (mounted) _fetchProjects();
+    });
+  }
+
+  bool _projectNeedsGreenscreen(VideoProject p) {
+    final s = p.greenscreenStatus;
+    return s == 'pending' || s == 'failed';
   }
 
   void _showSnackBar(String msg, {bool isError = false}) {
@@ -189,8 +331,76 @@ class _WorkingScreenState extends State<WorkingScreen> {
     );
   }
 
-  // ─── YouTube URL detection and extraction ─────────────────────────────
+  String _shorten(String s, int max) {
+    if (s.length <= max) return s;
+    return '${s.substring(0, max)}…';
+  }
 
+  void _showBackendHelp() {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.help_outline),
+            SizedBox(width: 8),
+            Text('How to fix this'),
+          ],
+        ),
+        content: SizedBox(
+          width: 480,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('1. Start the backend server:',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 4),
+                const SelectableText(
+                  'cd GetAllSubtitledApp/lib\n'
+                  'python backend.py',
+                  style: TextStyle(fontFamily: 'monospace', fontSize: 12),
+                ),
+                const SizedBox(height: 12),
+                const Text('2. Confirm the URL in constants.dart:',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 4),
+                const SelectableText(
+                  "const String authBaseUrl    = 'http://localhost:5000';\n"
+                  "const String flaskServerUrl = 'http://localhost:5000';",
+                  style: TextStyle(fontFamily: 'monospace', fontSize: 12),
+                ),
+                const SizedBox(height: 12),
+                const Text('3. Test from a terminal:',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 4),
+                const SelectableText(
+                  'curl http://localhost:5000/videos\n'
+                  '# should print JSON, not HTML',
+                  style: TextStyle(fontFamily: 'monospace', fontSize: 12),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  'Current authBaseUrl: "$authBaseUrl"',
+                  style: const TextStyle(
+                      fontStyle: FontStyle.italic, color: Colors.grey),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─── YouTube URL detection and extraction ─────────────────────
   bool _isYouTubeUrl(String url) {
     final youtubePatterns = [
       r'youtube\.com/watch\?v=',
@@ -233,7 +443,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
         throw Exception('Could not extract video ID from YouTube URL');
       }
 
-      const serverUrl = '$flaskServerUrl/api/youtube-info';
+      final serverUrl = '$flaskServerUrl/api/youtube-info';
 
       final response = await http.post(
         Uri.parse(serverUrl),
@@ -319,8 +529,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
     );
   }
 
-  // ─── Import from text ─────────────────────────────────────────────────
-
+  // ─── Import from text ─────────────────────────────────────────
   Future<void> _importVideosFromText() async {
     if (!mounted) return;
 
@@ -438,20 +647,14 @@ class _WorkingScreenState extends State<WorkingScreen> {
       if (_isYouTubeUrl(url)) {
         final videoUrl = await _getYouTubeVideoUrl(url);
         if (videoUrl != null) {
-          resolvedUrls.add({
-            'original': url,
-            'resolved': videoUrl,
-          });
+          resolvedUrls.add({'original': url, 'resolved': videoUrl});
           if (kDebugMode) print('✅ Resolved YouTube URL: $url -> $videoUrl');
         } else {
           errors.add('Could not resolve YouTube URL: $url');
           if (kDebugMode) print('❌ Failed to resolve YouTube URL: $url');
         }
       } else if (_isValidUrl(url)) {
-        resolvedUrls.add({
-          'original': url,
-          'resolved': url,
-        });
+        resolvedUrls.add({'original': url, 'resolved': url});
       } else {
         errors.add('Invalid URL: $url');
       }
@@ -467,7 +670,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
       return;
     }
 
-    final finalUrls = resolvedUrls.map((entry) => entry['resolved']!).toList();
+    final finalUrls = resolvedUrls.map((e) => e['resolved']!).toList();
 
     showDialog(
       // ignore: use_build_context_synchronously
@@ -496,8 +699,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
     );
   }
 
-  // ─── Navigation and actions ──────────────────────────────────
-
+  // ─── Navigation and actions ───────────────────────────────────
   void _openSessionDetail(String videoKey) {
     Navigator.push(
       context,
@@ -584,8 +786,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
             ),
             const Divider(),
             ListTile(
-              leading:
-                  const Icon(Icons.delete, color: Colors.red),
+              leading: const Icon(Icons.delete, color: Colors.red),
               title: const Text(
                 'Delete Project',
                 style: TextStyle(color: Colors.red),
@@ -619,6 +820,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
             if (project.lastOpened != null)
               Text('Last Opened: ${_formatDate(project.lastOpened!)}'),
             Text('Segments: ${project.segmentCount}'),
+            Text('Green-screen: ${project.greenscreenStatus}'),
           ],
         ),
         actions: [
@@ -647,8 +849,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
     Navigator.pushNamed(context, '/segments_list', arguments: videoKey);
   }
 
-  // ─── Delete – no token needed, hits the Flask server ─────────────────
-
+  // ─── Delete ───────────────────────────────────────────────────
   Future<void> _deleteProject(String videoKey) async {
     if (!mounted) return;
 
@@ -664,6 +865,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
       if (!mounted) return;
       if (response.statusCode == 200) {
         _showSnackBar('Project deleted.');
+        _greenscreenTriggered.remove(videoKey);
         _fetchProjects();
       } else {
         _showSnackBar(
@@ -697,8 +899,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
         false;
   }
 
-  // ─── Edit name – no token needed ────────────────────────────────────
-
+  // ─── Edit name ────────────────────────────────────────────────
   Future<void> _editProjectName(VideoProject project) async {
     if (!mounted) return;
 
@@ -744,8 +945,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
     }
   }
 
-  // ─── Upload – using bytes (web-compatible) ──────────────────────────
-
+  // ─── Upload ───────────────────────────────────────────────────
   Future<void> _uploadVideo() async {
     if (!mounted) return;
     FilePickerResult? result = await FilePicker.platform.pickFiles(
@@ -769,14 +969,13 @@ class _WorkingScreenState extends State<WorkingScreen> {
       builder: (ctx) => _UploadDialog(
         bytes: bytes,
         fileName: fileName,
-        mode: UploadMode.chunked, 
+        mode: UploadMode.chunked,
         onUploadComplete: _fetchProjects,
       ),
     );
   }
 
-  // ─── Logout from public server ──────────────────────────────────────
-
+  // ─── Logout ───────────────────────────────────────────────────
   Future<void> _logoutPublic() async {
     if (!mounted) return;
     final prefs = await SharedPreferences.getInstance();
@@ -787,8 +986,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
     }
   }
 
-  // ─── UI Build ──────────────────────────────────────────────────
-
+  // ─── UI ───────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -897,9 +1095,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
                   ),
                 ),
                 const SizedBox(height: 8),
-                Expanded(
-                  child: _buildGrid(),
-                ),
+                Expanded(child: _buildGrid()),
               ],
             ),
     );
@@ -908,31 +1104,69 @@ class _WorkingScreenState extends State<WorkingScreen> {
   Widget _buildGrid() {
     if (_listError != null) {
       return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.error_outline, size: 60, color: Colors.orange),
-            const SizedBox(height: 16),
-            const Text(
-              'Unable to load projects',
-              style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.red),
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 560),
+            child: Card(
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: BorderSide(color: Colors.orange.shade200),
+              ),
+              color: Colors.orange.shade50,
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.cloud_off,
+                            size: 32, color: Colors.orange.shade800),
+                        const SizedBox(width: 12),
+                        const Expanded(
+                          child: Text(
+                            'Cannot load projects',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    SelectableText(
+                      _listError!,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        height: 1.45,
+                        color: Colors.black87,
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    Row(
+                      children: [
+                        FilledButton.icon(
+                          onPressed: _fetchProjects,
+                          icon: const Icon(Icons.refresh, size: 18),
+                          label: const Text('Retry'),
+                        ),
+                        const SizedBox(width: 12),
+                        OutlinedButton.icon(
+                          onPressed: _showBackendHelp,
+                          icon: const Icon(Icons.help_outline, size: 18),
+                          label: const Text('How to fix'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
             ),
-            const SizedBox(height: 8),
-            Text(
-              _listError!,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.grey),
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton.icon(
-              onPressed: _fetchProjects,
-              icon: const Icon(Icons.refresh),
-              label: const Text('Retry'),
-            ),
-          ],
+          ),
         ),
       );
     }
@@ -986,10 +1220,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
         mainAxisSpacing: 12,
       ),
       itemCount: filtered.length,
-      itemBuilder: (context, index) {
-        final project = filtered[index];
-        return _buildCard(project);
-      },
+      itemBuilder: (context, index) => _buildCard(filtered[index]),
     );
   }
 
@@ -1014,9 +1245,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
                         project.thumbnailUrl!,
                         fit: BoxFit.cover,
                         width: double.infinity,
-                        errorBuilder: (context, error, stackTrace) {
-                          return _buildThumbnailPlaceholder(project);
-                        },
+                        errorBuilder: (context, error, stackTrace) =>
+                            _buildThumbnailPlaceholder(project),
                         loadingBuilder: (context, child, loadingProgress) {
                           if (loadingProgress == null) return child;
                           return Container(
@@ -1025,8 +1255,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
                               child: CircularProgressIndicator(
                                 value: loadingProgress.expectedTotalBytes !=
                                         null
-                                    ? loadingProgress
-                                            .cumulativeBytesLoaded /
+                                    ? loadingProgress.cumulativeBytesLoaded /
                                         loadingProgress.expectedTotalBytes!
                                     : null,
                               ),
@@ -1143,10 +1372,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
               gradient: LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
-                colors: [
-                  Colors.grey[800]!,
-                  Colors.grey[900]!,
-                ],
+                colors: [Colors.grey[800]!, Colors.grey[900]!],
               ),
             ),
           ),
@@ -1161,8 +1387,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
                 ),
                 const SizedBox(height: 4),
                 Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 6, vertical: 2),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                   decoration: BoxDecoration(
                     color: Colors.black.withValues(alpha: 0.6),
                     borderRadius: BorderRadius.circular(4),
@@ -1191,10 +1417,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
               ),
               child: Text(
                 project.fileName.split('.').last.toUpperCase(),
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 8,
-                ),
+                style: const TextStyle(color: Colors.white, fontSize: 8),
               ),
             ),
           ),
@@ -1204,6 +1427,51 @@ class _WorkingScreenState extends State<WorkingScreen> {
   }
 
   Widget _buildPipelineStatus(VideoProject project) {
+    final gs = project.greenscreenStatus;
+
+    if (gs == 'ready') {
+      return const Row(
+        children: [
+          Icon(Icons.check_circle, color: Colors.green, size: 11),
+          SizedBox(width: 2),
+          Text('Green-screen ready',
+              style: TextStyle(fontSize: 8, color: Colors.green)),
+        ],
+      );
+    }
+    if (gs == 'building') {
+      final pct = project.greenscreenProgress;
+      return Row(
+        children: [
+          SizedBox(
+            width: 10,
+            height: 10,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              value: pct > 0 ? pct / 100.0 : null,
+            ),
+          ),
+          const SizedBox(width: 2),
+          Text(
+            pct > 0 ? 'Preparing $pct%' : 'Preparing…',
+            style: const TextStyle(fontSize: 8, color: Colors.blue),
+          ),
+        ],
+      );
+    }
+    if (gs == 'failed') {
+      return const Row(
+        children: [
+          Icon(Icons.error_outline, color: Colors.orange, size: 11),
+          SizedBox(width: 2),
+          Text('Prep failed',
+              style: TextStyle(fontSize: 8, color: Colors.orange)),
+        ],
+      );
+    }
+
+    // Fall back to the old segmentation-based indicator when the
+    // backend hasn't told us anything yet.
     if (project.segmentationDone) {
       return const Row(
         children: [
@@ -1212,34 +1480,15 @@ class _WorkingScreenState extends State<WorkingScreen> {
           Text('Done', style: TextStyle(fontSize: 8, color: Colors.green)),
         ],
       );
-    } else if (project.segmentationProgress > 0) {
-      return Row(
-        children: [
-          SizedBox(
-            width: 10,
-            height: 10,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              value: project.segmentationProgress / 100,
-            ),
-          ),
-          const SizedBox(width: 2),
-          Text(
-            '${project.segmentationProgress}%',
-            style: const TextStyle(fontSize: 8),
-          ),
-        ],
-      );
-    } else {
-      return const Row(
-        children: [
-          Icon(Icons.content_cut, color: Colors.grey, size: 11),
-          SizedBox(width: 2),
-          Text('Pending',
-              style: TextStyle(fontSize: 8, color: Colors.grey)),
-        ],
-      );
     }
+    return const Row(
+      children: [
+        Icon(Icons.hourglass_empty, color: Colors.grey, size: 11),
+        SizedBox(width: 2),
+        Text('Not prepared',
+            style: TextStyle(fontSize: 8, color: Colors.grey)),
+      ],
+    );
   }
 
   String _formatDate(DateTime dt) {
@@ -1265,14 +1514,12 @@ class _WorkingScreenState extends State<WorkingScreen> {
       return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
     } else if (bytes >= 1024) {
       return '${(bytes / 1024).toStringAsFixed(0)} KB';
-    } else {
-      return '$bytes B';
     }
+    return '$bytes B';
   }
 }
 
 // ─── Import Videos Dialog ──────────────────────────────────────
-
 class _ImportVideosDialog extends StatefulWidget {
   final List<String> urls;
   final bool autoSegmentation;
@@ -1325,16 +1572,13 @@ class _ImportVideosDialogState extends State<_ImportVideosDialog> {
         if (response.statusCode != 200) {
           throw Exception('Failed to download: HTTP ${response.statusCode}');
         }
-
         if (response.bodyBytes.isEmpty) {
           throw Exception('Downloaded file is empty');
         }
 
         final fileName = _extractFileNameFromUrl(status.url, response);
 
-        setState(() {
-          status.message = 'Uploading...';
-        });
+        setState(() => status.message = 'Uploading...');
 
         await _uploadVideoToServer(
           bytes: response.bodyBytes,
@@ -1366,10 +1610,7 @@ class _ImportVideosDialogState extends State<_ImportVideosDialog> {
       }
     }
 
-    setState(() {
-      _isComplete = true;
-    });
-
+    setState(() => _isComplete = true);
     widget.onComplete();
   }
 
@@ -1429,25 +1670,15 @@ class _ImportVideosDialogState extends State<_ImportVideosDialog> {
   String _extractFileNameFromUrl(String url, http.Response response) {
     final disposition = response.headers['content-disposition'];
     if (disposition != null) {
-      final regex = RegExp(r'filename="([^"]+)"');
-      final match = regex.firstMatch(disposition);
-      if (match != null) {
-        return match.group(1)!;
-      }
+      final match = RegExp(r'filename="([^"]+)"').firstMatch(disposition);
+      if (match != null) return match.group(1)!;
     }
-
     try {
-      final uri = Uri.parse(url);
-      final path = uri.path;
-      final segments = path.split('/');
-      final lastSegment = segments.last;
-      if (lastSegment.contains('.')) {
-        return lastSegment;
-      }
+      final lastSegment = Uri.parse(url).path.split('/').last;
+      if (lastSegment.contains('.')) return lastSegment;
     } catch (_) {}
-
-    final extension = _getFileExtensionFromUrl(url);
-    return 'video_${DateTime.now().millisecondsSinceEpoch}.$extension';
+    return 'video_${DateTime.now().millisecondsSinceEpoch}'
+        '.${_getFileExtensionFromUrl(url)}';
   }
 
   String _getFileExtensionFromUrl(String url) {
@@ -1510,9 +1741,7 @@ class _ImportVideosDialogState extends State<_ImportVideosDialog> {
                     subtitle: status.state == ImportState.downloading &&
                             status.progress > 0
                         ? LinearProgressIndicator(
-                            value: status.progress / 100,
-                            minHeight: 4,
-                          )
+                            value: status.progress / 100, minHeight: 4)
                         : null,
                   );
                 },
@@ -1554,18 +1783,11 @@ class _ImportVideosDialogState extends State<_ImportVideosDialog> {
   }
 }
 
-// ─── Upload Dialog – accepts bytes (web-compatible) ──────────────
-
+// ─── Upload Dialog ─────────────────────────────────────────────
 class _UploadDialog extends StatefulWidget {
   final Uint8List bytes;
   final String fileName;
   final VoidCallback onUploadComplete;
-
-  /// How to reach the internal server once the file is stored locally.
-  /// `chunked` — chunk-upload + finish-upload only.
-  /// `forward` — chunk-upload, then call /forward_to_internal and
-  ///             show the JobProgressPanel while it processes.
-  /// `direct`  — POST everything to /upload in one shot (unused).
   final UploadMode mode;
 
   const _UploadDialog({
@@ -1587,13 +1809,8 @@ class _UploadDialogState extends State<_UploadDialog> {
   String _statusText = 'Ready';
   bool _autoSegmentation = true;
 
-  /// Set once the server tells us the session exists.
   String? _sessionId;
-
-  /// Set once the background processing finished on the server.
   bool _sessionComplete = false;
-
-  /// Populated by `/finish-upload`; needed to call `/forward_to_internal`.
   String? _videoKey;
 
   @override
@@ -1602,7 +1819,6 @@ class _UploadDialogState extends State<_UploadDialog> {
     _startUpload();
   }
 
-  // ─── 1. Upload the file to OUR server ──────────────────────────
   Future<void> _startUpload() async {
     setState(() {
       _isUploading = true;
@@ -1649,7 +1865,6 @@ class _UploadDialogState extends State<_UploadDialog> {
         });
       }
 
-      // ─── Finish the local file ──────────────────────────────────
       final finishResponse = await http.post(
         Uri.parse('$authBaseUrl/finish-upload'),
         headers: {'Content-Type': 'application/json'},
@@ -1674,7 +1889,6 @@ class _UploadDialogState extends State<_UploadDialog> {
 
       widget.onUploadComplete();
 
-      // ─── Depending on mode, forward to the internal server ────
       switch (widget.mode) {
         case UploadMode.chunked:
           _closeSoon();
@@ -1683,7 +1897,6 @@ class _UploadDialogState extends State<_UploadDialog> {
           await _forwardToInternal();
           break;
         case UploadMode.direct:
-          // Not implemented in this dialog.
           _closeSoon();
           break;
       }
@@ -1696,7 +1909,6 @@ class _UploadDialogState extends State<_UploadDialog> {
     }
   }
 
-  // ─── 2. Ask the server to forward to the internal one ──────────
   Future<void> _forwardToInternal() async {
     if (_videoKey == null) {
       _closeSoon();
@@ -1712,24 +1924,24 @@ class _UploadDialogState extends State<_UploadDialog> {
     try {
       final token = await InternalAuthService.getToken();
       final resp = await http.post(
-        Uri.parse('$flaskServerUrl/forward-to-internal/$_videoKey'),
+        Uri.parse('$authBaseUrl/upload'),
         headers: {
           'Content-Type': 'application/json',
           if (token != null) 'Authorization': 'Bearer $token',
         },
         body: jsonEncode({
+          'video_key': _videoKey,
           'token': token,
           'name': widget.fileName.replaceAll('.mp4', ''),
         }),
       );
 
       if (resp.statusCode != 200) {
-        throw Exception('Forward failed: ${resp.statusCode}');
+        throw Exception('Upload failed: ${resp.statusCode}');
       }
 
       final data = jsonDecode(resp.body) as Map<String, dynamic>;
       final sessionId = data['session_id'] as String?;
-
       if (sessionId == null) {
         throw Exception('Server did not return a session id');
       }
@@ -1755,12 +1967,9 @@ class _UploadDialogState extends State<_UploadDialog> {
     });
   }
 
-  // ─── Build ─────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    if (_sessionId != null) {
-      return _buildProcessingDialog(_sessionId!);
-    }
+    if (_sessionId != null) return _buildProcessingDialog(_sessionId!);
     return _buildUploadDialog();
   }
 
@@ -1840,8 +2049,7 @@ class _UploadDialogState extends State<_UploadDialog> {
   }
 }
 
-// ─── YouTube Download Dialog ────────────────────────────────────
-
+// ─── YouTube Download Dialog ───────────────────────────────────
 class _YouTubeDownloadDialog extends StatefulWidget {
   final String youtubeUrl;
   final VoidCallback onComplete;
