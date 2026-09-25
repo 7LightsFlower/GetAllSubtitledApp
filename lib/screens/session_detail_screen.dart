@@ -5,6 +5,7 @@ import 'dart:html' as html;
 import 'dart:convert';
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/screens/session_output_screen.dart';
+import 'package:asr_live_translator/theme/responsive.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:asr_live_translator/models/language_config.dart';
 import 'package:asr_live_translator/services/server_config_service.dart';
@@ -14,7 +15,6 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
-import 'package:asr_live_translator/theme/responsive.dart';
 import 'package:asr_live_translator/widgets/video_player_widget.dart';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -117,6 +117,60 @@ class LiveTranscriptScreen extends StatefulWidget {
 }
 
 class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
+    // ─────────────────────────────────────────────────────────────
+  //  RESPONSIVE HELPERS
+  // ─────────────────────────────────────────────────────────────
+  //
+  // Three breakpoints, matching what the rest of the app uses:
+  //   narrow   < 600 dp      (phones)
+  //   medium   600 – 999 dp  (tablets, small windows)
+  //   wide    ≥ 1000 dp      (desktop)
+  //
+  // Using MediaQuery.sizeOf() rather than MediaQuery.of() so the widget
+  // only rebuilds when the *size* changes, not on every unrelated
+  // MediaQueryData change (keyboard, brightness, …).
+
+  bool _isNarrow(BuildContext c) => MediaQuery.sizeOf(c).width < 600;
+  bool _isMedium(BuildContext c) {
+    final w = MediaQuery.sizeOf(c).width;
+    return w >= 600 && w < 1000;
+  }
+
+  /// Horizontal / vertical page padding. Was a hard-coded 16.
+  double _pagePadding(BuildContext c) {
+    if (_isNarrow(c)) return 12;
+    if (_isMedium(c)) return 16;
+    return 24;
+  }
+
+  /// Vertical gap between the top-level cards. Was a hard-coded 16.
+  double _sectionGap(BuildContext c) {
+    if (_isNarrow(c)) return 12;
+    if (_isMedium(c)) return 16;
+    return 24;
+  }
+
+  /// Body font size scaled by breakpoint.
+  double _bodySize(BuildContext c) {
+    if (_isNarrow(c)) return 13;
+    if (_isMedium(c)) return 14;
+    return 14;
+  }
+
+  /// Title font size (video title, section headings).
+  double _titleSize(BuildContext c) {
+    if (_isNarrow(c)) return 17;
+    if (_isMedium(c)) return 19;
+    return 20;
+  }
+
+  /// Detail-section heading ("Languages", "Segments").
+  double _sectionTitleSize(BuildContext c) {
+    if (_isNarrow(c)) return 15;
+    if (_isMedium(c)) return 16;
+    return 18;
+  }
+
   // ─── Session detail state ────────────────────────────────────────
   SessionDetail? _detail;
   bool _isLoadingDetail = true;
@@ -1613,9 +1667,13 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   //  WIDGET BUILDERS – DETAIL SECTION
   // ═══════════════════════════════════════════════════════════════════
 
-  Widget _infoChip(IconData icon, String label, String value) {
+    Widget _infoChip(IconData icon, String label, String value, BuildContext c) {
+    final narrow = _isNarrow(c);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: EdgeInsets.symmetric(
+        horizontal: narrow ? 8 : 12,
+        vertical: narrow ? 4 : 6,
+      ),
       decoration: BoxDecoration(
         color: Colors.grey.shade100,
         borderRadius: BorderRadius.circular(20),
@@ -1623,11 +1681,22 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 16, color: Colors.grey.shade700),
+          Icon(icon, size: narrow ? 14 : 16, color: Colors.grey.shade700),
           const SizedBox(width: 4),
-          Text('$label: ',
-              style: const TextStyle(fontWeight: FontWeight.w500)),
-          Text(value, style: const TextStyle(fontWeight: FontWeight.normal)),
+          Text(
+            '$label: ',
+            style: TextStyle(
+              fontWeight: FontWeight.w500,
+              fontSize: narrow ? 11 : 13,
+            ),
+          ),
+          Text(
+            value,
+            style: TextStyle(
+              fontWeight: FontWeight.normal,
+              fontSize: narrow ? 11 : 13,
+            ),
+          ),
         ],
       ),
     );
@@ -1709,40 +1778,53 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         // Title & file name
         Text(
           detail.name,
-          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+          style: TextStyle(
+            fontSize: _titleSize(context),
+            fontWeight: FontWeight.bold,
+          ),
         ),
         const SizedBox(height: 4),
         Text(
           detail.fileName,
-          style: const TextStyle(color: Colors.grey, fontSize: 14),
+          style: TextStyle(
+            color: Colors.grey,
+            fontSize: _bodySize(context) - 1,
+          ),
+          overflow: TextOverflow.ellipsis,
+          maxLines: 2,
         ),
         const SizedBox(height: 16),
 
         // Metadata chips
         Wrap(
-          spacing: 8,
-          runSpacing: 8,
+          spacing: _isNarrow(context) ? 6 : 8,
+          runSpacing: _isNarrow(context) ? 6 : 8,
           children: [
             _infoChip(Icons.calendar_today, 'Uploaded',
-                _formatDate(detail.uploaded)),
+                _formatDate(detail.uploaded), context),
             _infoChip(Icons.timer, 'Duration',
-                _formatDuration(detail.duration)),
-            _infoChip(Icons.speed, 'FPS', detail.fps.toStringAsFixed(1)),
-            _infoChip(Icons.storage, 'Size', _formatBytes(detail.fileSize)),
+                _formatDuration(detail.duration), context),
+            _infoChip(Icons.speed, 'FPS',
+                detail.fps.toStringAsFixed(1), context),
+            _infoChip(Icons.storage, 'Size',
+                _formatBytes(detail.fileSize), context),
             _infoChip(Icons.layers, 'Segments',
-                detail.segmentCount.toString()),
+                detail.segmentCount.toString(), context),
             if (detail.lastOpened != null)
               _infoChip(Icons.history, 'Last opened',
-                  _formatDate(detail.lastOpened!)),
+                  _formatDate(detail.lastOpened!), context),
           ],
         ),
 
         // Languages
         if (detail.languages.isNotEmpty) ...[
           const SizedBox(height: 16),
-          const Text(
+          Text(
             'Languages',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            style: TextStyle(
+              fontSize: _sectionTitleSize(context),
+              fontWeight: FontWeight.bold,
+            ),
           ),
           const SizedBox(height: 8),
           Wrap(
@@ -1884,7 +1966,25 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     );
   }
 
-    Widget _buildLanguageBlock({
+  Widget _chipAction(
+    BuildContext c, {
+    required String label,
+    required VoidCallback? onPressed,
+  }) {
+    return TextButton(
+      onPressed: onPressed,
+      style: TextButton.styleFrom(
+        padding: EdgeInsets.symmetric(horizontal: _isNarrow(c) ? 6 : 8),
+        minimumSize: Size(0, _isNarrow(c) ? 28 : 32),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        textStyle: TextStyle(fontSize: _isNarrow(c) ? 12 : 13),
+      ),
+      child: Text(label),
+    );
+  }
+
+  Widget _buildLanguageBlock({
+    required BuildContext context,
     required String title,
     required List<String> availableCodes,
     required List<String> selected,
@@ -1900,44 +2000,47 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
             Expanded(
               child: Text(
                 title,
-                style: const TextStyle(fontWeight: FontWeight.bold),
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: _bodySize(context),
+                ),
               ),
             ),
-            TextButton(
+            // Compact action buttons; on narrow screens they shrink a bit
+            // further so the title still has room to breathe.
+            _chipAction(
+              context,
+              label: 'All',
               onPressed: selected.length == availableCodes.length
                   ? null
                   : () => onReplaceAll([...availableCodes]),
-              style: TextButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                minimumSize: const Size(0, 32),
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              ),
-              child: const Text('All'),
             ),
-            const SizedBox(width: 4),
-            TextButton(
+            const SizedBox(width: 2),
+            _chipAction(
+              context,
+              label: 'None',
               onPressed: selected.isEmpty
                   ? null
                   : () => onReplaceAll(const []),
-              style: TextButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                minimumSize: const Size(0, 32),
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              ),
-              child: const Text('None'),
             ),
           ],
         ),
         const SizedBox(height: 4),
         Wrap(
-          spacing: 8,
+          spacing: _isNarrow(context) ? 6 : 8,
           runSpacing: 4,
           children: availableCodes.map((code) {
             final displayName = nameFor(code);
             return FilterChip(
-              label: Text('$displayName ($code)'),
+              label: Text(
+                '$displayName ($code)',
+                style: TextStyle(fontSize: _isNarrow(context) ? 11 : 13),
+              ),
               selected: selected.contains(code),
               onSelected: (_) => onToggle(code),
+              visualDensity: _isNarrow(context)
+                  ? VisualDensity.compact
+                  : VisualDensity.standard,
             );
           }).toList(),
         ),
@@ -2005,6 +2108,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         const SizedBox(height: 16),
 
         _buildLanguageBlock(
+          context: context,
           title: 'Input Languages',
           availableCodes: inputLangCodes,
           selected: _inputLanguages,
@@ -2019,6 +2123,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         const SizedBox(height: 16),
 
         _buildLanguageBlock(
+          context: context,
           title: 'Output Languages (Translation)',
           availableCodes: outputLangCodes,
           selected: _outputLanguages,
@@ -2033,6 +2138,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         const SizedBox(height: 16),
 
         _buildLanguageBlock(
+          context: context,
           title: 'Generated Audio Languages',
           availableCodes: audioLangCodes,
           selected: _audioLanguages,
@@ -2113,10 +2219,10 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         ),
         const SizedBox(height: 16),
 
-        Row(
-          children: [
-            Expanded(
-              child: TextFormField(
+                if (_isNarrow(context))
+          Column(
+            children: [
+              TextFormField(
                 controller: _muteController,
                 decoration: const InputDecoration(
                   labelText: 'Notify timeout (minutes)',
@@ -2130,10 +2236,8 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                   return null;
                 },
               ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: TextFormField(
+              const SizedBox(height: 12),
+              TextFormField(
                 controller: _pauseController,
                 decoration: const InputDecoration(
                   labelText: 'Speech segment timeout (seconds)',
@@ -2147,9 +2251,46 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                   return null;
                 },
               ),
-            ),
-          ],
-        ),
+            ],
+          )
+        else
+          Row(
+            children: [
+              Expanded(
+                child: TextFormField(
+                  controller: _muteController,
+                  decoration: const InputDecoration(
+                    labelText: 'Notify timeout (minutes)',
+                    border: OutlineInputBorder(),
+                  ),
+                  keyboardType: TextInputType.number,
+                  onChanged: (_) => _saveJobSettings(),
+                  validator: (val) {
+                    if (val == null || val.isEmpty) return null;
+                    if (int.tryParse(val) == null) return 'Enter a number';
+                    return null;
+                  },
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: TextFormField(
+                  controller: _pauseController,
+                  decoration: const InputDecoration(
+                    labelText: 'Speech segment timeout (seconds)',
+                    border: OutlineInputBorder(),
+                  ),
+                  keyboardType: TextInputType.number,
+                  onChanged: (_) => _saveJobSettings(),
+                  validator: (val) {
+                    if (val == null || val.isEmpty) return null;
+                    if (double.tryParse(val) == null) return 'Enter a number';
+                    return null;
+                  },
+                ),
+              ),
+            ],
+          ),
         const SizedBox(height: 16),
 
         const Text('Features',
@@ -2468,9 +2609,12 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           children: [
             const Icon(Icons.dns_outlined, size: 20, color: Colors.blueGrey),
             const SizedBox(width: 10),
-            const Text(
+            Text(
               'Internal server',
-              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                fontSize: _isNarrow(context) ? 12 : 14,
+              ),
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -2480,12 +2624,17 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                 children: [
                   Text(
                     currentLabel,
-                    style: const TextStyle(fontSize: 13),
+                    style: TextStyle(fontSize: _isNarrow(context) ? 12 : 13),
+                    maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
                   Text(
                     internalServerUrl,
-                    style: TextStyle(fontSize: 10, color: Colors.grey[600]),
+                    style: TextStyle(
+                      fontSize: _isNarrow(context) ? 9 : 10,
+                      color: Colors.grey[600],
+                    ),
+                    maxLines: _isNarrow(context) ? 1 : 1,
                     overflow: TextOverflow.ellipsis,
                   ),
                 ],
@@ -3115,13 +3264,13 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       body: Form(
         key: _formKey,
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
+          padding: EdgeInsets.all(_pagePadding(context)),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               // ─── Session detail header (thumbnail, title, meta) ───
               _buildDetailHeader(),
-              const SizedBox(height: 16),
+              SizedBox(height: _sectionGap(context)),
               // ─── Job History card ───
               Card(
                 elevation: 2,
@@ -3180,7 +3329,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                   ),
                 ),
               ),
-              const SizedBox(height: 16),
+              SizedBox(height: _sectionGap(context)),
 
               // ─── Job Settings (expandable) ───
               Card(
@@ -3238,11 +3387,11 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                   ),
                 ),
               ),
-              const SizedBox(height: 16),
+              SizedBox(height: _sectionGap(context)),
 
               // ─── Server picker ───
               _buildServerPicker(),
-              const SizedBox(height: 16),
+              SizedBox(height: _sectionGap(context)),
 
               // ─── Connect / Token section ───
               Container(
@@ -3552,7 +3701,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                   ],
                 ),
               ),
-              const SizedBox(height: 16),
+              SizedBox(height: _sectionGap(context)),
 
               // ─── Start Processing ───
               ElevatedButton(

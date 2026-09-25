@@ -1,4 +1,4 @@
-// session_output_screen.dart - Fixed without ignoring warnings
+// session_output_screen.dart
 
 import 'package:asr_live_translator/theme/responsive.dart';
 import 'package:flutter/material.dart';
@@ -10,7 +10,7 @@ import 'dart:convert';
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:asr_live_translator/models/session_data.dart';
-import 'package:asr_live_translator/models/subtitle_track.dart'; 
+import 'package:asr_live_translator/models/subtitle_track.dart';
 import 'package:asr_live_translator/widgets/video_player_widget.dart';
 import 'package:asr_live_translator/widgets/transcript_view.dart';
 import 'package:asr_live_translator/widgets/chapter_seekbar.dart';
@@ -53,11 +53,7 @@ class VTTCue {
   }
 }
 
-enum SessionView {
-  transcript,
-  split,
-  files,
-}
+enum SessionView { transcript, split, files }
 
 class _SessionOutputScreenState extends State<SessionOutputScreen> {
   VideoPlayerController? _videoController;
@@ -73,7 +69,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   String _secondaryLanguage = '';
   String _errorMessage = '';
   String _videoUrl = '';
-  
+
   int _currentSegmentIndex = -1;
   final ScrollController _scrollController = ScrollController();
   final ScrollController _secondaryScrollController = ScrollController();
@@ -84,6 +80,8 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   String? _selectedSubtitle;
   Map<String, List<VTTCue>> _parsedSubtitles = const {};
 
+  // Used by _downloadAllFiles to prevent double-tap.
+  bool _isDownloadingAll = false;
 
   @override
   void initState() {
@@ -100,34 +98,56 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     super.dispose();
   }
 
+  // ─────────────────────────────────────────────────────────────
+  //  RESPONSIVE HELPERS
+  // ─────────────────────────────────────────────────────────────
+  //
+  // Same breakpoints as session_detail_screen.dart, so the two screens
+  // feel consistent when the user navigates between them:
+  //   narrow   < 600 dp      (phones)
+  //   medium   600 – 999 dp  (tablets, small windows)
+  //   wide    ≥ 1000 dp      (desktop)
+
+  bool _isNarrow(BuildContext c) => MediaQuery.sizeOf(c).width < 600;
+
+  /// Horizontal / vertical page padding. Was a hard-coded 16.
+  double _pagePadding(BuildContext c) {
+    if (_isNarrow(c)) return 12;
+    if (MediaQuery.sizeOf(c).width < 1000) return 16;
+    return 24;
+  }
+
+  /// Vertical gap between sections. Was a hard-coded 16.
+  double _sectionGap(BuildContext c) {
+    if (_isNarrow(c)) return 12;
+    if (MediaQuery.sizeOf(c).width < 1000) return 16;
+    return 24;
+  }
+
   // ─── CUSTOM VTT PARSER ──────────────────────────────────────────────
 
-  /// Parse VTT content into a list of VTTCue objects
+  /// Parse VTT content into a list of VTTCue objects.
   List<VTTCue> _parseVTT(String content) {
     final List<VTTCue> cues = [];
     final lines = content.split('\n');
-    
+
     bool inCue = false;
     String currentText = '';
     double cueStart = 0.0;
     double cueEnd = 0.0;
     int cueIndex = 0;
     String? speaker;
-    
+
     for (int i = 0; i < lines.length; i++) {
-      String line = lines[i].trim();
-      
-      // Skip empty lines
+      final String line = lines[i].trim();
+
       if (line.isEmpty) continue;
-      
-      // Skip WEBVTT header
       if (line.startsWith('WEBVTT')) continue;
       if (line.startsWith('Kind:')) continue;
       if (line.startsWith('Language:')) continue;
-      
-      // Check if this is a timestamp line (contains -->)
+
       if (line.contains('-->')) {
-        // Save previous cue if exists
+        // Save previous cue if exists.
         if (inCue && currentText.isNotEmpty) {
           cues.add(VTTCue(
             index: cueIndex,
@@ -140,34 +160,29 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           currentText = '';
           speaker = null;
         }
-        
-        // Parse timestamps
+
         final parts = line.split('-->');
         if (parts.length == 2) {
           cueStart = _parseVTTTimestamp(parts[0].trim());
           cueEnd = _parseVTTTimestamp(parts[1].trim());
           inCue = true;
         }
-      } 
-      // Check if this is a cue index (just a number)
-      else if (RegExp(r'^\d+$').hasMatch(line)) {
-        // This is a cue number, skip it
+      } else if (RegExp(r'^\d+$').hasMatch(line)) {
+        // Cue index, skip.
         continue;
-      }
-      // This is text content
-      else if (inCue) {
-        // Check for speaker tag: <v Speaker Name>text</v>
-        final speakerMatch = RegExp(r'<v\s+([^>]+)>([^<]*)</v>').firstMatch(line);
+      } else if (inCue) {
+        final speakerMatch =
+            RegExp(r'<v\s+([^>]+)>([^<]*)</v>').firstMatch(line);
         if (speakerMatch != null) {
           speaker = speakerMatch.group(1)?.trim();
-          String text = speakerMatch.group(2)?.trim() ?? '';
+          final text = speakerMatch.group(2)?.trim() ?? '';
           if (text.isNotEmpty) {
             if (currentText.isNotEmpty) currentText += ' ';
             currentText += text;
           }
         } else {
-          // Remove any other HTML tags
-          String cleanText = line.replaceAll(RegExp(r'<[^>]+>'), '').trim();
+          final cleanText =
+              line.replaceAll(RegExp(r'<[^>]+>'), '').trim();
           if (cleanText.isNotEmpty) {
             if (currentText.isNotEmpty) currentText += ' ';
             currentText += cleanText;
@@ -175,8 +190,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         }
       }
     }
-    
-    // Save the last cue
+
     if (inCue && currentText.isNotEmpty) {
       cues.add(VTTCue(
         index: cueIndex,
@@ -186,24 +200,20 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         speaker: speaker,
       ));
     }
-    
+
     return cues;
   }
 
-  /// Parse VTT timestamp (00:00:00.000 or 00:00.000) to seconds
+  /// Parse VTT timestamp (00:00:00.000 or 00:00.000) to seconds.
   double _parseVTTTimestamp(String timestamp) {
-    // Replace comma with dot for decimal
     timestamp = timestamp.replaceAll(',', '.');
-    
     final parts = timestamp.split(':');
     if (parts.length == 3) {
-      // Format: HH:MM:SS.mmm
       final hours = double.tryParse(parts[0]) ?? 0;
       final minutes = double.tryParse(parts[1]) ?? 0;
       final seconds = double.tryParse(parts[2]) ?? 0;
       return hours * 3600 + minutes * 60 + seconds;
     } else if (parts.length == 2) {
-      // Format: MM:SS.mmm
       final minutes = double.tryParse(parts[0]) ?? 0;
       final seconds = double.tryParse(parts[1]) ?? 0;
       return minutes * 60 + seconds;
@@ -211,90 +221,69 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     return 0.0;
   }
 
-  /// Get subtitle text at specific time
+  /// Get subtitle text at a specific time.
   String? _getSubtitleAtTime(double time) {
     if (_selectedSubtitle == null) return null;
-    
     final cues = _parsedSubtitles[_selectedSubtitle];
     if (cues == null || cues.isEmpty) return null;
-    
-    // Find the cue that contains the current time
     for (final cue in cues) {
       if (time >= cue.start && time <= cue.end) {
         return cue.text;
       }
     }
-    
     return null;
   }
-
 
   Future<void> _loadSubtitleTracks() async {
     final List<SubtitleTrack> newTracks = [];
     final Map<String, List<VTTCue>> newParsed = {};
-    
-    // Find all VTT files
-    final allVttFiles = _files.where((f) => 
-      f.name.endsWith('.vtt') && 
-      f.name != 'subtitles.vtt'
-    ).toList();
-    
+
+    final allVttFiles = _files
+        .where((f) => f.name.endsWith('.vtt') && f.name != 'subtitles.vtt')
+        .toList();
+
     if (allVttFiles.isEmpty) {
       debugPrint('No VTT files found');
       return;
     }
-    
-    // Group VTT files by language
-    // First, try to find simple-named ones (subtitles_English.vtt, etc.)
-    // These are the preferred ones
+
     final Map<String, List<SessionFile>> languageFiles = {};
-    
     for (final file in allVttFiles) {
-      String language = _extractLanguageFromFilename(file.name);
-      if (!languageFiles.containsKey(language)) {
-        languageFiles[language] = [];
-      }
-      languageFiles[language]!.add(file);
+      final language = _extractLanguageFromFilename(file.name);
+      languageFiles.putIfAbsent(language, () => []).add(file);
     }
-    
-    // Sort languages - put "Original ASR" first if it exists
-    final sortedLanguages = languageFiles.keys.toList()..sort((a, b) {
-      // Prioritize Original ASR
-      if (a.contains('Original') && !b.contains('Original')) return -1;
-      if (!a.contains('Original') && b.contains('Original')) return 1;
-      // Then sort alphabetically
-      return a.compareTo(b);
-    });
-    
+
+    final sortedLanguages = languageFiles.keys.toList()
+      ..sort((a, b) {
+        if (a.contains('Original') && !b.contains('Original')) return -1;
+        if (!a.contains('Original') && b.contains('Original')) return 1;
+        return a.compareTo(b);
+      });
+
     final token = await InternalAuthService.getToken();
-    
+
     for (final language in sortedLanguages) {
       final files = languageFiles[language]!;
-      // Prefer files with simpler names (no special characters)
-      // Sort by filename length (shorter is better)
       files.sort((a, b) => a.name.length.compareTo(b.name.length));
-      
-      // Try to load the best file for this language
+
       for (final file in files) {
         try {
-          // Use the URL from the file object
-          final url = file.url.startsWith('http') 
-              ? file.url 
+          final url = file.url.startsWith('http')
+              ? file.url
               : '$flaskServerUrl${file.url}';
-          
-          debugPrint('Loading subtitle for language "$language" from: $url');
-          
+
+          debugPrint(
+              'Loading subtitle for language "$language" from: $url');
+
           final response = await http.get(
             Uri.parse(url),
-            headers: {
-              'Authorization': 'Bearer ${token ?? ''}',
-            },
+            headers: {'Authorization': 'Bearer ${token ?? ''}'},
           );
-          
+
           if (response.statusCode == 200) {
             final content = response.body;
             final cues = _parseVTT(content);
-            
+
             if (cues.isNotEmpty) {
               newParsed[language] = cues;
               newTracks.add(SubtitleTrack(
@@ -303,8 +292,9 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                 url: url,
                 content: content,
               ));
-              debugPrint('Loaded subtitle: ${file.name} (${cues.length} cues)');
-              break; // Successfully loaded this language
+              debugPrint(
+                  'Loaded subtitle: ${file.name} (${cues.length} cues)');
+              break;
             }
           }
         } catch (e) {
@@ -312,11 +302,10 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         }
       }
     }
-    
+
     setState(() {
       _subtitleTracks = newTracks;
       _parsedSubtitles = newParsed;
-      
       if (_subtitleTracks.isNotEmpty && _selectedSubtitle == null) {
         _selectedSubtitle = _subtitleTracks.first.language;
       }
@@ -343,13 +332,10 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
   /// Called by VideoPlayerWidget when the user picks a different subtitle track.
   void _onSubtitleChanged(String? language) {
-    setState(() {
-      _selectedSubtitle = language;
-    });
+    setState(() => _selectedSubtitle = language);
   }
 
   Future<void> _updateVideoSubtitles() async {
-    // Show confirmation dialog
     final confirm = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -358,19 +344,15 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'This will:',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
+            Text('This will:',
+                style: TextStyle(fontWeight: FontWeight.bold)),
             SizedBox(height: 8),
             Text('• Embed edited VTT subtitles into the video file'),
             Text('• Update messages.json with the edited content'),
             Text('• Keep all your changes in sync'),
             SizedBox(height: 12),
-            Text(
-              'This may take a few moments. Continue?',
-              style: TextStyle(fontWeight: FontWeight.w500),
-            ),
+            Text('This may take a few moments. Continue?',
+                style: TextStyle(fontWeight: FontWeight.w500)),
           ],
         ),
         actions: [
@@ -389,41 +371,36 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         ],
       ),
     );
-    
+
     if (confirm != true) return;
-    
-    setState(() {
-      _isLoading = true;
-    });
-    
+
+    setState(() => _isLoading = true);
+
     try {
       final token = await InternalAuthService.getToken();
-      final url = '$flaskServerUrl/update-video-subtitles/${widget.sessionId}';
-      
+      final url =
+          '$flaskServerUrl/update-video-subtitles/${widget.sessionId}';
+
       final response = await http.post(
         Uri.parse(url),
-        headers: {
-          'Authorization': 'Bearer ${token ?? ''}',
-        },
+        headers: {'Authorization': 'Bearer ${token ?? ''}'},
       );
-      
+
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        
-        // Show detailed success message
         final subtitleCount = data['embedded_subtitles']?.length ?? 0;
         final messagesUpdated = data['messages_updated'] ?? 0;
-        
+
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('✅ ${data['message']}\nEmbedded: $subtitleCount tracks, Updated: $messagesUpdated messages'),
+              content: Text(
+                  '✅ ${data['message']}\nEmbedded: $subtitleCount tracks, '
+                  'Updated: $messagesUpdated messages'),
               backgroundColor: Colors.green,
               duration: const Duration(seconds: 5),
             ),
           );
-          
-          // Reload data to show updates
           await _loadSessionData();
         }
       } else {
@@ -441,14 +418,12 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       }
     } finally {
       if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
+        setState(() => _isLoading = false);
       }
     }
   }
 
-  // ─── END OF VTT PARSING ──────────────────────────────────────────────
+  // ─── END OF VTT PARSING ─────────────────────────────────────────────
 
   Future<void> _loadSessionData() async {
     setState(() {
@@ -459,18 +434,18 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
     try {
       final token = await InternalAuthService.getToken();
-      
-      final outputUrl = '$flaskServerUrl/session-output/${widget.sessionId}';
+
+      final outputUrl =
+          '$flaskServerUrl/session-output/${widget.sessionId}';
       final outputResponse = await http.get(
         Uri.parse(outputUrl),
-        headers: {
-          'Authorization': 'Bearer ${token ?? ''}',
-        },
+        headers: {'Authorization': 'Bearer ${token ?? ''}'},
       );
 
       if (outputResponse.statusCode != 200) {
         setState(() {
-          _errorMessage = 'Failed to load session: ${outputResponse.statusCode}';
+          _errorMessage =
+              'Failed to load session: ${outputResponse.statusCode}';
           _isLoading = false;
         });
         return;
@@ -480,7 +455,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       final filesData = outputData['files'] as List? ?? [];
       _files = filesData.map((f) => SessionFile.fromJson(f)).toList();
 
-      // Sort files by modification date
       _files.sort((a, b) {
         if (a.modified == null && b.modified == null) return 0;
         if (a.modified == null) return 1;
@@ -488,12 +462,11 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         return b.modified!.compareTo(a.modified!);
       });
 
-      final transcriptUrl = '$flaskServerUrl/session-transcript-json/${widget.sessionId}';
+      final transcriptUrl =
+          '$flaskServerUrl/session-transcript-json/${widget.sessionId}';
       final transcriptResponse = await http.get(
         Uri.parse(transcriptUrl),
-        headers: {
-          'Authorization': 'Bearer ${token ?? ''}',
-        },
+        headers: {'Authorization': 'Bearer ${token ?? ''}'},
       );
 
       if (transcriptResponse.statusCode == 200) {
@@ -502,7 +475,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           _transcripts = transcriptData
               .map((t) => TranscriptData.fromJson(t))
               .toList();
-          
+
           if (_transcripts.isNotEmpty) {
             _selectedLanguage = _transcripts.first.language;
             _secondaryLanguage = _transcripts.length > 1
@@ -519,16 +492,14 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       );
 
       if (videoFile.name.isNotEmpty) {
-        _videoUrl = '$flaskServerUrl/session-file/${widget.sessionId}/${videoFile.name}';
+        _videoUrl =
+            '$flaskServerUrl/session-file/${widget.sessionId}/${videoFile.name}';
         _initializeVideoPlayer();
       }
 
-      // Load subtitle tracks after files are loaded
       await _loadSubtitleTracks();
 
-      setState(() {
-        _isLoading = false;
-      });
+      setState(() => _isLoading = false);
     } catch (e) {
       setState(() {
         _errorMessage = 'Error: $e';
@@ -539,12 +510,14 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
   void _extractChapters() {
     _chapters.clear();
-    
+
     final transcript = _transcripts.firstWhere(
       (t) => t.language == _selectedLanguage,
-      orElse: () => _transcripts.isNotEmpty ? _transcripts.first : TranscriptData.empty(),
+      orElse: () => _transcripts.isNotEmpty
+          ? _transcripts.first
+          : TranscriptData.empty(),
     );
-    
+
     if (transcript.segments.isEmpty) return;
 
     ChapterData? currentChapter;
@@ -561,11 +534,13 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       } else if (segment.markup == 'heading' && currentChapter != null) {
         currentChapter = currentChapter.copyWith(heading: segment.text);
         _chapters[_chapters.length - 1] = currentChapter;
-      } else if (currentChapter != null && 
-                 (segment.markup == null || segment.markup == 'paragraphBreak')) {
-        final updatedSegments = List<SegmentData>.from(currentChapter.segments)
-          ..add(segment);
-        currentChapter = currentChapter.copyWith(segments: updatedSegments);
+      } else if (currentChapter != null &&
+          (segment.markup == null ||
+              segment.markup == 'paragraphBreak')) {
+        final updatedSegments =
+            List<SegmentData>.from(currentChapter.segments)..add(segment);
+        currentChapter =
+            currentChapter.copyWith(segments: updatedSegments);
         _chapters[_chapters.length - 1] = currentChapter;
       }
     }
@@ -582,8 +557,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   }
 
   void _initializeVideoPlayer() {
-    // Tear down any previous controller so a reload never leaves a stale
-    // video playing in the background.
     final old = _videoController;
     if (old != null) {
       old.removeListener(_onVideoProgress);
@@ -591,22 +564,16 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       _videoController = null;
     }
 
-    // Default state on load / reload: stopped.
-    // We initialize the controller (so the first frame and duration are
-    // available) but do NOT call play(). The user starts playback with
-    // the play button.
     _videoController = VideoPlayerController.networkUrl(
       Uri.parse(_videoUrl),
-    )..initialize().then((_) {
+    )
+      ..initialize().then((_) {
         if (!mounted) {
-          // Widget was disposed while we were initializing.
           _videoController?.dispose();
           _videoController = null;
           return;
         }
-        setState(() {
-          _isVideoReady = true;
-        });
+        setState(() => _isVideoReady = true);
         _videoController!.addListener(_onVideoProgress);
         // NOTE: no play() here — the video stays paused until the user
         // presses the play button.
@@ -617,17 +584,23 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         });
       });
   }
-  
+
   void _onVideoProgress() {
-    if (_videoController == null || !_videoController!.value.isInitialized) return;
-    
-    final currentTime = _videoController!.value.position.inMilliseconds / 1000.0;
-    
+    if (_videoController == null ||
+        !_videoController!.value.isInitialized) {
+      return;
+    }
+
+    final currentTime =
+        _videoController!.value.position.inMilliseconds / 1000.0;
+
     final transcript = _transcripts.firstWhere(
       (t) => t.language == _selectedLanguage,
-      orElse: () => _transcripts.isNotEmpty ? _transcripts.first : TranscriptData.empty(),
+      orElse: () => _transcripts.isNotEmpty
+          ? _transcripts.first
+          : TranscriptData.empty(),
     );
-    
+
     if (transcript.segments.isEmpty) return;
 
     int newIndex = -1;
@@ -638,11 +611,9 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         break;
       }
     }
-    
+
     if (newIndex != _currentSegmentIndex) {
-      setState(() {
-        _currentSegmentIndex = newIndex;
-      });
+      setState(() => _currentSegmentIndex = newIndex);
     }
   }
 
@@ -656,27 +627,23 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   }
 
   void _toggleEditingMode() {
-    setState(() {
-      _isEditingMode = !_isEditingMode;
-    });
+    setState(() => _isEditingMode = !_isEditingMode);
   }
 
   void _selectLanguage(String language) {
-    setState(() {
-      _selectedLanguage = language;
-    });
+    setState(() => _selectedLanguage = language);
     _extractChapters();
   }
 
   void _selectSecondaryLanguage(String language) {
-    setState(() {
-      _secondaryLanguage = language;
-    });
+    setState(() => _secondaryLanguage = language);
   }
 
   void _togglePlayPause() {
-    if (_videoController == null || !_videoController!.value.isInitialized) return;
-    
+    if (_videoController == null ||
+        !_videoController!.value.isInitialized) {
+      return;
+    }
     if (_videoController!.value.isPlaying) {
       _videoController!.pause();
     } else {
@@ -686,25 +653,32 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   }
 
   void _seekTo(double seconds) {
-    if (_videoController == null || !_videoController!.value.isInitialized) return;
-    _videoController!.seekTo(Duration(milliseconds: (seconds * 1000).toInt()));
+    if (_videoController == null ||
+        !_videoController!.value.isInitialized) {
+      return;
+    }
+    _videoController!
+        .seekTo(Duration(milliseconds: (seconds * 1000).toInt()));
   }
 
   void _jumpToChapter(ChapterData chapter) {
-    if (_videoController == null || !_videoController!.value.isInitialized) return;
-    _videoController!.seekTo(Duration(milliseconds: (chapter.start * 1000).toInt()));
+    if (_videoController == null ||
+        !_videoController!.value.isInitialized) {
+      return;
+    }
+    _videoController!
+        .seekTo(Duration(milliseconds: (chapter.start * 1000).toInt()));
   }
 
   void _downloadFile(SessionFile file) async {
     try {
       final token = await InternalAuthService.getToken();
-      final downloadUrl = '$flaskServerUrl/session-file/${widget.sessionId}/${file.name}';
-      
+      final downloadUrl =
+          '$flaskServerUrl/session-file/${widget.sessionId}/${file.name}';
+
       final response = await http.get(
         Uri.parse(downloadUrl),
-        headers: {
-          'Authorization': 'Bearer ${token ?? ''}',
-        },
+        headers: {'Authorization': 'Bearer ${token ?? ''}'},
       );
 
       if (response.statusCode == 200) {
@@ -716,7 +690,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         html.Url.revokeObjectUrl(url);
 
         if (!mounted) return;
-        
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Downloaded: ${file.name}')),
         );
@@ -733,7 +706,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       );
     }
   }
-  bool _isDownloadingAll = false;
 
   Future<void> _downloadAllFiles() async {
     if (_files.isEmpty) {
@@ -745,7 +717,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       );
       return;
     }
-    if (_isDownloadingAll) return;          // guard against double-tap
+    if (_isDownloadingAll) return;
 
     setState(() => _isDownloadingAll = true);
 
@@ -758,8 +730,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
     try {
       final token = await InternalAuthService.getToken();
-
-      // IMPORTANT: encode the session id so '/', '+', '=' don't break the URL
       final encodedId = Uri.encodeComponent(widget.sessionId);
       final downloadUrl = '$flaskServerUrl/session-zip/$encodedId';
 
@@ -775,20 +745,18 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         throw Exception('Server returned an empty ZIP');
       }
 
-      // Parse filename from Content-Disposition if present
       String filename = 'session_${widget.sessionId}.zip';
       final cd = response.headers['content-disposition'] ?? '';
-      final m = RegExp(r'filename\*?=(?:UTF-8'')?"?([^";]+)"?').firstMatch(cd);
+      final m = RegExp(r'filename\*?=(?:UTF-8'')?"?([^";]+)"?')
+          .firstMatch(cd);
       if (m != null && m.group(1)!.trim().isNotEmpty) {
         filename = Uri.decodeComponent(m.group(1)!.trim());
       }
-      // Sanitize — a filename can never contain '/' or '\'
       filename = filename.replaceAll(RegExp(r'[\\/]'), '_');
 
       final blob = html.Blob([response.bodyBytes], 'application/zip');
       final url = html.Url.createObjectUrlFromBlob(blob);
 
-      // Attach, click, then revoke AFTER the browser has begun the download
       final anchor = html.AnchorElement(href: url)
         ..download = filename
         ..style.display = 'none';
@@ -832,7 +800,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     );
   }
 
-  // Helper method to convert SegmentData to JSON
   Map<String, dynamic> _segmentToJson(SegmentData segment) {
     return {
       'text': segment.text,
@@ -842,15 +809,17 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       if (segment.markup != null) 'markup': segment.markup,
       if (segment.words != null) 'words': segment.words,
       if (segment.wordId != null) 'word_id': segment.wordId,
-      if (segment.sourceTokens != null) 'source_tokens': segment.sourceTokens,
-      if (segment.speakerName != null) 'speaker_name': segment.speakerName,
-      if (segment.refinedSentenceCluster != null) 'refined_sentence_cluster': segment.refinedSentenceCluster,
+      if (segment.sourceTokens != null)
+        'source_tokens': segment.sourceTokens,
+      if (segment.speakerName != null)
+        'speaker_name': segment.speakerName,
+      if (segment.refinedSentenceCluster != null)
+        'refined_sentence_cluster': segment.refinedSentenceCluster,
       'unstable': segment.unstable,
       if (segment.messageId != null) 'message_id': segment.messageId,
     };
   }
 
-  // Helper method to create a copy of SegmentData with new text
   SegmentData _copySegmentWithText(SegmentData segment, String newText) {
     return SegmentData(
       text: newText,
@@ -868,51 +837,52 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     );
   }
 
-  // Save edited transcript
   Future<void> _saveEditedTranscript(TranscriptData editedTranscript) async {
-    setState(() {
-      _isSaving = true;
-    });
+    setState(() => _isSaving = true);
 
     try {
       final token = await InternalAuthService.getToken();
-      
-      final index = _transcripts.indexWhere(
-        (t) => t.language == editedTranscript.language
-      );
-      
+
+      final index = _transcripts
+          .indexWhere((t) => t.language == editedTranscript.language);
+
       if (index != -1) {
         _transcripts[index] = editedTranscript;
       }
-      
-      // Dynamically determine the filename
+
       String vttFilename = '';
-      
-      // Try to find an existing VTT file for this language
+
       final existingVtt = _files.firstWhere(
-        (f) => f.name.endsWith('.vtt') && 
-              f.name != 'subtitles.vtt' &&
-              (_extractLanguageFromFilename(f.name) == _extractLanguageFromFilename(editedTranscript.language) ||
-                f.name.contains(_extractSimpleLanguage(editedTranscript.language))),
+        (f) =>
+            f.name.endsWith('.vtt') &&
+            f.name != 'subtitles.vtt' &&
+            (_extractLanguageFromFilename(f.name) ==
+                    _extractLanguageFromFilename(
+                        editedTranscript.language) ||
+                f.name.contains(
+                    _extractSimpleLanguage(editedTranscript.language))),
         orElse: () => const SessionFile(name: '', size: 0, url: ''),
       );
-      
+
       if (existingVtt.name.isNotEmpty) {
         vttFilename = existingVtt.name;
       } else {
-        // Create a clean filename
-        String cleanLanguage = _extractSimpleLanguage(editedTranscript.language);
+        final cleanLanguage =
+            _extractSimpleLanguage(editedTranscript.language);
         vttFilename = 'subtitles_$cleanLanguage.vtt';
       }
 
-      final saveUrl = '$flaskServerUrl/session-transcript-save-vtt/${widget.sessionId}';
-      
+      final saveUrl =
+          '$flaskServerUrl/session-transcript-save-vtt/${widget.sessionId}';
+
       final requestBody = jsonEncode({
         'language': editedTranscript.language,
-        'segments': editedTranscript.segments.map((s) => _segmentToJson(s)).toList(),
+        'segments': editedTranscript.segments
+            .map((s) => _segmentToJson(s))
+            .toList(),
         'filename': vttFilename,
       });
-      
+
       final response = await http.post(
         Uri.parse(saveUrl),
         headers: {
@@ -924,54 +894,51 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
       if (response.statusCode == 200 || response.statusCode == 201) {
         final responseData = jsonDecode(response.body);
-        
-        // Update files list from response
+
         if (responseData.containsKey('files')) {
           final filesData = responseData['files'] as List? ?? [];
-          _files = filesData.map((f) => SessionFile.fromJson(f)).toList();
+          _files =
+              filesData.map((f) => SessionFile.fromJson(f)).toList();
         } else {
-          // Reload files if not in response
-          final outputUrl = '$flaskServerUrl/session-output/${widget.sessionId}';
+          final outputUrl =
+              '$flaskServerUrl/session-output/${widget.sessionId}';
           final outputResponse = await http.get(
             Uri.parse(outputUrl),
-            headers: {
-              'Authorization': 'Bearer ${token ?? ''}',
-            },
+            headers: {'Authorization': 'Bearer ${token ?? ''}'},
           );
 
           if (outputResponse.statusCode == 200) {
             final outputData = jsonDecode(outputResponse.body);
             final filesData = outputData['files'] as List? ?? [];
-            _files = filesData.map((f) => SessionFile.fromJson(f)).toList();
+            _files =
+                filesData.map((f) => SessionFile.fromJson(f)).toList();
           }
         }
 
-        // Reload subtitle tracks after saving
         await _loadSubtitleTracks();
-        
-        // Force the video player to reload subtitles
+
         if (_selectedSubtitle != null) {
           final currentSubtitle = _selectedSubtitle;
-          setState(() {
-            _selectedSubtitle = null;
-          });
+          setState(() => _selectedSubtitle = null);
           await Future.delayed(const Duration(milliseconds: 100));
-          setState(() {
-            _selectedSubtitle = currentSubtitle;
-          });
+          setState(() => _selectedSubtitle = currentSubtitle);
         }
 
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('✅ Transcript saved and VTT updated: ${responseData['vtt_filename']}'),
+              content: Text(
+                  '✅ Transcript saved and VTT updated: '
+                  '${responseData['vtt_filename']}'),
               backgroundColor: Colors.green,
               duration: const Duration(seconds: 3),
             ),
           );
         }
       } else {
-        throw Exception('Failed to save transcript. Server returned: ${response.statusCode}');
+        throw Exception(
+            'Failed to save transcript. Server returned: '
+            '${response.statusCode}');
       }
     } catch (e) {
       debugPrint('Error saving transcript: $e');
@@ -986,22 +953,32 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     }
   }
 
-  /// Extract simple language name (without parentheses or special characters)
+  /// Extract simple language name (without parentheses or special characters).
   String _extractSimpleLanguage(String language) {
     final name = resolveLanguageName(language);
     return name.replaceAll(' ', '_');
   }
 
-  // Download VTT directly - simplified version without unused variable
+  /// Build an edited VTT blob and trigger a browser download for it.
   Future<void> _downloadVTT(TranscriptData transcript) async {
     try {
       final filename = '${transcript.language}_edited.vtt';
-      
-      // Create blob directly from the generated content
-      final blob = html.Blob([_generateVTTContent(transcript)], 'text/vtt');
+      final content = _generateVTTContent(transcript);
+
+      final blob = html.Blob([content], 'text/vtt');
       final url = html.Url.createObjectUrlFromBlob(blob);
-      html.Url.revokeObjectUrl(url);
-      
+
+      final anchor = html.AnchorElement(href: url)
+        ..download = filename
+        ..style.display = 'none';
+      html.document.body?.append(anchor);
+      anchor.click();
+      anchor.remove();
+
+      Future.delayed(const Duration(seconds: 1), () {
+        html.Url.revokeObjectUrl(url);
+      });
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -1024,25 +1001,24 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     }
   }
 
-  // Save and download VTT
   Future<void> _saveAndDownloadVTT(TranscriptData editedTranscript) async {
     try {
       await _downloadVTT(editedTranscript);
-      
-      final index = _transcripts.indexWhere(
-        (t) => t.language == editedTranscript.language
-      );
-      
+
+      final index = _transcripts
+          .indexWhere((t) => t.language == editedTranscript.language);
+
       if (index != -1) {
         setState(() {
           _transcripts[index] = editedTranscript;
         });
       }
-      
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('✅ VTT downloaded for ${editedTranscript.language}'),
+            content: Text('✅ VTT downloaded for '
+                '${editedTranscript.language}'),
             backgroundColor: Colors.green,
             duration: const Duration(seconds: 2),
           ),
@@ -1061,50 +1037,43 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     }
   }
 
-  // In session_output_screen.dart - Update _generateVTTContent
-
   String _generateVTTContent(TranscriptData transcript) {
     final buffer = StringBuffer();
     buffer.writeln('WEBVTT');
     buffer.writeln();
-    
+
     int cueIndex = 0;
     for (final segment in transcript.segments) {
-      // Skip segments with invalid timestamps (start == end == 0)
-      // These are usually summaries, global summaries, etc.
       if (segment.start == 0 && segment.end == 0) continue;
-      
-      // Skip empty text
       if (segment.text.trim().isEmpty) continue;
-      
-      // Skip markup segments that don't contain text
       if (segment.markup == 'paragraphBreak') continue;
       if (segment.markup == 'chapterBreak') continue;
       if (segment.markup == 'heading') continue;
-      
+
       cueIndex++;
       buffer.writeln('$cueIndex');
-      
+
       final startTime = _formatVTTTimestamp(segment.start);
       final endTime = _formatVTTTimestamp(segment.end);
       buffer.writeln('$startTime --> $endTime');
-      
-      // Clean the text - remove any HTML tags
-      String cleanText = segment.text.replaceAll(RegExp(r'<[^>]+>'), '').trim();
+
+      final cleanText =
+          segment.text.replaceAll(RegExp(r'<[^>]+>'), '').trim();
       if (cleanText.isEmpty) continue;
-      
-      // Add speaker name if available
-      if (segment.speakerName != null && segment.speakerName!.isNotEmpty) {
-        // Remove any HTML from speaker name too
-        final cleanSpeaker = segment.speakerName!.replaceAll(RegExp(r'<[^>]+>'), '').trim();
+
+      if (segment.speakerName != null &&
+          segment.speakerName!.isNotEmpty) {
+        final cleanSpeaker = segment.speakerName!
+            .replaceAll(RegExp(r'<[^>]+>'), '')
+            .trim();
         buffer.writeln('<v $cleanSpeaker>$cleanText</v>');
       } else {
         buffer.writeln(cleanText);
       }
-      
+
       buffer.writeln();
     }
-    
+
     return buffer.toString();
   }
 
@@ -1114,15 +1083,20 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     final minutes = duration.inMinutes.remainder(60);
     final secs = duration.inSeconds.remainder(60);
     final millis = duration.inMilliseconds.remainder(1000);
-    
-    return '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}.${millis.toString().padLeft(3, '0')}';
+
+    return '${hours.toString().padLeft(2, '0')}:'
+        '${minutes.toString().padLeft(2, '0')}:'
+        '${secs.toString().padLeft(2, '0')}.'
+        '${millis.toString().padLeft(3, '0')}';
   }
 
   @override
   Widget build(BuildContext context) {
     final currentTranscript = _transcripts.firstWhere(
       (t) => t.language == _selectedLanguage,
-      orElse: () => _transcripts.isNotEmpty ? _transcripts.first : TranscriptData.empty(),
+      orElse: () => _transcripts.isNotEmpty
+          ? _transcripts.first
+          : TranscriptData.empty(),
     );
 
     return Scaffold(
@@ -1184,9 +1158,9 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             const Icon(Icons.error_outline, size: 64, color: Colors.red),
-            const SizedBox(height: 16),
+            SizedBox(height: _sectionGap(context)),
             Text(_errorMessage, textAlign: TextAlign.center),
-            const SizedBox(height: 16),
+            SizedBox(height: _sectionGap(context)),
             ElevatedButton(
               onPressed: _loadSessionData,
               child: const Text('Retry'),
@@ -1197,9 +1171,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     }
 
     if (_transcripts.isEmpty && _files.isEmpty) {
-      return const Center(
-        child: Text('No data available'),
-      );
+      return const Center(child: Text('No data available'));
     }
 
     final r = Responsive.of(context);
@@ -1208,13 +1180,12 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
     return Column(
       children: [
-                // ─── Video player ────────────────────────────────────────────
+        // ─── Video player ────────────────────────────────────────────
         Container(
           height: videoHeight,
           color: Colors.black,
           child: Stack(
             children: [
-              // Video player
               Center(
                 child: Container(
                   constraints: BoxConstraints(
@@ -1237,7 +1208,8 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
               ),
 
               // Subtitle overlay
-              if (_selectedSubtitle != null && _parsedSubtitles.isNotEmpty)
+              if (_selectedSubtitle != null &&
+                  _parsedSubtitles.isNotEmpty)
                 Positioned(
                   bottom: r.subtitleOverlayBottom,
                   left: r.spaceL,
@@ -1274,8 +1246,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                   ),
                 ),
 
-              // ─── Chapter strip — pinned to the bottom of the black
-              //     video pane, same 90 %-width as the video itself. ──
+              // Chapter strip pinned to the bottom of the video pane.
               if (_chapters.isNotEmpty && _isVideoReady)
                 Positioned(
                   bottom: 0,
@@ -1297,7 +1268,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           ),
         ),
 
-        
         // ─── File list OR transcript panel ───────────────────────────
         Expanded(
           child: _view == SessionView.files
@@ -1358,7 +1328,8 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                                         const EdgeInsets.only(right: 8),
                                     decoration: BoxDecoration(
                                       color: Colors.orange,
-                                      borderRadius: BorderRadius.circular(4),
+                                      borderRadius:
+                                          BorderRadius.circular(4),
                                     ),
                                     child: const Text(
                                       'EDITING',
@@ -1395,14 +1366,15 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                   ],
                 ),
         ),
-        // ─── Toolbar (moved out of the AppBar) ───────────────────────
+
+        // ─── Toolbar (bottom) ────────────────────────────────────────
         _buildToolbar(currentTranscript),
-        
       ],
     );
   }
 
-  Widget _buildEditableTranscriptView(TranscriptData transcript, TranscriptData currentTranscript) {
+  Widget _buildEditableTranscriptView(
+      TranscriptData transcript, TranscriptData currentTranscript) {
     if (_isEditingMode) {
       return _buildEditableTranscript(currentTranscript);
     } else {
@@ -1415,15 +1387,17 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   }
 
   Widget _buildEditableTranscript(TranscriptData transcript) {
-    final List<SegmentData> editableSegments = List.from(transcript.segments);
+    final List<SegmentData> editableSegments =
+        List.from(transcript.segments);
     final List<TextEditingController> textControllers = [];
     final List<FocusNode> focusNodes = [];
 
     for (int i = 0; i < editableSegments.length; i++) {
-      final controller = TextEditingController(text: editableSegments[i].text);
+      final controller =
+          TextEditingController(text: editableSegments[i].text);
       textControllers.add(controller);
       focusNodes.add(FocusNode());
-      
+
       final index = i;
       controller.addListener(() {
         editableSegments[index] = _copySegmentWithText(
@@ -1436,12 +1410,12 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     return Column(
       children: [
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          padding:
+              const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           color: Colors.grey.shade100,
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              // Language label — shrinks first
               Expanded(
                 child: Text(
                   'Editing: ${transcript.language}',
@@ -1454,7 +1428,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                 ),
               ),
               const SizedBox(width: 8),
-              // Buttons — scroll horizontally if they still don't fit
               Flexible(
                 child: SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
@@ -1487,7 +1460,8 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                                   segments: editableSegments,
                                   sender: transcript.sender,
                                 );
-                                await _saveEditedTranscript(updatedTranscript);
+                                await _saveEditedTranscript(
+                                    updatedTranscript);
                               },
                         icon: _isSaving
                             ? const SizedBox(
@@ -1499,7 +1473,8 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                                 ),
                               )
                             : const Icon(Icons.cloud_upload),
-                        label: Text(_isSaving ? 'Saving…' : 'Save to Server'),
+                        label:
+                            Text(_isSaving ? 'Saving…' : 'Save to Server'),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.green,
                           foregroundColor: Colors.white,
@@ -1516,7 +1491,8 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                                   segments: editableSegments,
                                   sender: transcript.sender,
                                 );
-                                await _saveAndDownloadVTT(updatedTranscript);
+                                await _saveAndDownloadVTT(
+                                    updatedTranscript);
                               },
                         icon: const Icon(Icons.download),
                         label: const Text('Download VTT'),
@@ -1531,22 +1507,26 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
             ],
           ),
         ),
-                Expanded(
+        Expanded(
           child: ListView.builder(
             controller: _scrollController,
-            padding: const EdgeInsets.all(16),
+            padding: EdgeInsets.all(_pagePadding(context)),
             itemCount: editableSegments.length,
             itemBuilder: (context, index) {
               final segment = editableSegments[index];
               final isHighlighted = index == _currentSegmentIndex;
-              
+
               return Container(
                 margin: const EdgeInsets.only(bottom: 8),
                 decoration: BoxDecoration(
-                  color: isHighlighted ? Colors.yellow.shade100 : Colors.white,
+                  color: isHighlighted
+                      ? Colors.yellow.shade100
+                      : Colors.white,
                   borderRadius: BorderRadius.circular(4),
                   border: Border.all(
-                    color: isHighlighted ? Colors.yellow.shade700 : Colors.grey.shade300,
+                    color: isHighlighted
+                        ? Colors.yellow.shade700
+                        : Colors.grey.shade300,
                     width: isHighlighted ? 2 : 1,
                   ),
                 ),
@@ -1565,7 +1545,8 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                       ),
                     ),
                     Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 8.0),
                       child: TextField(
                         controller: textControllers[index],
                         focusNode: focusNodes[index],
@@ -1583,40 +1564,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                         style: const TextStyle(fontSize: 14),
                       ),
                     ),
-                    Padding(
-                      padding: const EdgeInsets.all(8.0),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            'End: ${_formatTimestamp(segment.end)}',
-                            style: const TextStyle(
-                              fontSize: 10,
-                              color: Colors.grey,
-                              fontFamily: 'monospace',
-                            ),
-                          ),
-                          if (segment.markup != null)
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.blue.shade100,
-                                borderRadius: BorderRadius.circular(3),
-                              ),
-                              child: Text(
-                                segment.markup!,
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  color: Colors.blue.shade800,
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
+                    const SizedBox(height: 8),
                   ],
                 ),
               );
@@ -1633,11 +1581,16 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     final minutes = duration.inMinutes.remainder(60);
     final secs = duration.inSeconds.remainder(60);
     final millis = duration.inMilliseconds.remainder(1000);
-    
+
     if (hours > 0) {
-      return '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}.${millis.toString().padLeft(3, '0')}';
+      return '${hours.toString().padLeft(2, '0')}:'
+          '${minutes.toString().padLeft(2, '0')}:'
+          '${secs.toString().padLeft(2, '0')}.'
+          '${millis.toString().padLeft(3, '0')}';
     } else {
-      return '${minutes.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}.${millis.toString().padLeft(3, '0')}';
+      return '${minutes.toString().padLeft(2, '0')}:'
+          '${secs.toString().padLeft(2, '0')}.'
+          '${millis.toString().padLeft(3, '0')}';
     }
   }
 
@@ -1646,11 +1599,14 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     final size = r.iconLarge;
     if (filename.endsWith('.mp4') || filename.endsWith('.webm')) {
       return Icon(Icons.video_file, color: Colors.blue, size: size);
-    } else if (filename.endsWith('.wav') || filename.endsWith('.mp3')) {
+    } else if (filename.endsWith('.wav') ||
+        filename.endsWith('.mp3')) {
       return Icon(Icons.audio_file, color: Colors.green, size: size);
-    } else if (filename.endsWith('.vtt') || filename.endsWith('.srt')) {
+    } else if (filename.endsWith('.vtt') ||
+        filename.endsWith('.srt')) {
       return Icon(Icons.subtitles, color: Colors.orange, size: size);
-    } else if (filename.endsWith('.html') || filename.endsWith('.htm')) {
+    } else if (filename.endsWith('.html') ||
+        filename.endsWith('.htm')) {
       return Icon(Icons.html, color: Colors.purple, size: size);
     } else if (filename.endsWith('.zip')) {
       return Icon(Icons.folder_zip, color: Colors.brown, size: size);
@@ -1658,18 +1614,21 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       return Icon(Icons.code, color: Colors.teal, size: size);
     } else if (filename.endsWith('.rtf')) {
       return Icon(Icons.description, color: Colors.orange, size: size);
-    } else if (filename.endsWith('.docx') || filename.endsWith('.doc')) {
+    } else if (filename.endsWith('.docx') ||
+        filename.endsWith('.doc')) {
       return Icon(Icons.file_present, color: Colors.blue, size: size);
     } else if (filename.endsWith('.txt')) {
       return Icon(Icons.text_snippet, color: Colors.grey, size: size);
     } else if (filename == 'transcripts.json') {
-      return Icon(Icons.data_array, color: Colors.deepPurple, size: size);
+      return Icon(Icons.data_array,
+          color: Colors.deepPurple, size: size);
     } else if (filename == 'messages.json') {
       return Icon(Icons.message, color: Colors.indigo, size: size);
     } else if (filename == 'index.html') {
       return Icon(Icons.web, color: Colors.orange, size: size);
     } else {
-      return Icon(Icons.insert_drive_file, color: Colors.grey, size: size);
+      return Icon(Icons.insert_drive_file,
+          color: Colors.grey, size: size);
     }
   }
 
@@ -1734,7 +1693,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       final dateTime = DateTime.parse(isoDate);
       final now = DateTime.now();
       final difference = now.difference(dateTime);
-      
+
       if (difference.inHours < 24) {
         if (difference.inHours < 1) {
           if (difference.inMinutes < 1) {
@@ -1744,8 +1703,12 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         }
         return '${difference.inHours}h ago';
       }
-      
-      return '${dateTime.day.toString().padLeft(2, '0')}/${dateTime.month.toString().padLeft(2, '0')}/${dateTime.year} ${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}';
+
+      return '${dateTime.day.toString().padLeft(2, '0')}/'
+          '${dateTime.month.toString().padLeft(2, '0')}/'
+          '${dateTime.year} '
+          '${dateTime.hour.toString().padLeft(2, '0')}:'
+          '${dateTime.minute.toString().padLeft(2, '0')}';
     } catch (e) {
       return isoDate;
     }
@@ -1762,14 +1725,14 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       );
     }
 
-    // Honour the *chosen* languages instead of always taking the first two.
     final left = _transcripts.firstWhere(
       (t) => t.language == _selectedLanguage,
       orElse: () => _transcripts.first,
     );
     final right = _transcripts.firstWhere(
       (t) => t.language == _secondaryLanguage,
-      orElse: () => _transcripts.length > 1 ? _transcripts[1] : _transcripts.first,
+      orElse: () =>
+          _transcripts.length > 1 ? _transcripts[1] : _transcripts.first,
     );
 
     return Row(
@@ -1799,7 +1762,9 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
   String _formatFileSize(int bytes) {
     if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    }
     if (bytes < 1024 * 1024 * 1024) {
       return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
     }
@@ -1833,9 +1798,11 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                   label: Text('Split'),
                 ),
               ],
-              selected: {_view == SessionView.files
-                  ? SessionView.transcript
-                  : _view},
+              selected: {
+                _view == SessionView.files
+                    ? SessionView.transcript
+                    : _view
+              },
               onSelectionChanged: (selection) {
                 _setView(selection.first);
               },
@@ -1854,10 +1821,12 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
             const SizedBox(width: 8),
             IconButton(
               icon: Icon(_isEditingMode ? Icons.check : Icons.edit),
-              onPressed: currentTranscript.segments.isNotEmpty && !_isSaving
-                  ? _toggleEditingMode
-                  : null,
-              tooltip: _isEditingMode ? 'Save Changes' : 'Edit Transcript',
+              onPressed:
+                  currentTranscript.segments.isNotEmpty && !_isSaving
+                      ? _toggleEditingMode
+                      : null,
+              tooltip:
+                  _isEditingMode ? 'Save Changes' : 'Edit Transcript',
               color: _isEditingMode ? Colors.green : null,
             ),
             IconButton(

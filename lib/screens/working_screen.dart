@@ -4,6 +4,7 @@ import 'dart:async';
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:asr_live_translator/screens/session_detail_screen.dart';
+import 'package:asr_live_translator/theme/responsive.dart';
 import 'package:asr_live_translator/widgets/job_progress_panel.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -816,9 +817,9 @@ class _WorkingScreenState extends State<WorkingScreen> {
             Text('Duration: ${project.duration.toStringAsFixed(2)} s'),
             Text('FPS: ${project.fps.toStringAsFixed(1)}'),
             Text('File Size: ${_formatBytes(project.fileSize)}'),
-            Text('Uploaded: ${_formatDate(project.uploaded)}'),
+            Text('Uploaded: ${_formatJobTimestamp(project.uploaded)}'),
             if (project.lastOpened != null)
-              Text('Last Opened: ${_formatDate(project.lastOpened!)}'),
+              Text('Last Opened: ${_formatJobTimestamp(project.lastOpened!)}'),
             Text('Segments: ${project.segmentCount}'),
             Text('Green-screen: ${project.greenscreenStatus}'),
           ],
@@ -989,6 +990,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
   // ─── UI ───────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
+    final r = Responsive.of(context);
+
     return Scaffold(
       appBar: AppBar(
         title: const Text(appTitle),
@@ -1019,104 +1022,158 @@ class _WorkingScreenState extends State<WorkingScreen> {
           ? const Center(child: CircularProgressIndicator())
           : Column(
               children: [
+                // ─── Header: search / sort / upload ───────────────
                 Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          decoration: const InputDecoration(
-                            hintText: 'Search by name or file...',
-                            prefixIcon: Icon(Icons.search),
-                            border: OutlineInputBorder(),
-                          ),
-                          onChanged: (value) {
-                            setState(() => _searchQuery = value);
-                          },
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      DropdownButton<String>(
-                        value: _sortMode,
-                        items: const [
-                          DropdownMenuItem(
-                              value: 'newest', child: Text('Newest First')),
-                          DropdownMenuItem(
-                              value: 'oldest', child: Text('Oldest First')),
-                          DropdownMenuItem(
-                              value: 'last-opened',
-                              child: Text('Last Opened')),
-                          DropdownMenuItem(
-                              value: 'az', child: Text('Name A → Z')),
-                          DropdownMenuItem(
-                              value: 'za', child: Text('Name Z → A')),
-                        ],
-                        onChanged: (value) {
-                          if (value != null) setState(() => _sortMode = value);
-                        },
-                      ),
-                      const SizedBox(width: 8),
-                      ElevatedButton.icon(
-                        onPressed: _uploadVideo,
-                        icon: const Icon(Icons.upload),
-                        label: const Text('Upload'),
-                      ),
-                    ],
-                  ),
+                  padding: EdgeInsets.all(r.spaceL),
+                  child: _buildHeaderRow(r),
                 ),
+
+                // ─── Storage bar ──────────────────────────────────
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                  padding: EdgeInsets.symmetric(horizontal: r.spaceL),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Text(
-                            'Storage used (input videos)',
-                            style: TextStyle(
-                                fontSize: 13, color: Colors.grey[600]),
+                          Flexible(
+                            child: Text(
+                              'Storage used (input videos)',
+                              style: TextStyle(
+                                fontSize: r.fontBodySmall,
+                                color: Colors.grey[600],
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
                           ),
+                          const SizedBox(width: 8),
                           Text(
-                            '${_storageUsed.toStringAsFixed(2)} GB / $_storageLimit GB',
-                            style: const TextStyle(
-                                fontSize: 13, fontWeight: FontWeight.w600),
+                            '${_storageUsed.toStringAsFixed(2)} GB / '
+                            '${_storageLimit.toStringAsFixed(0)} GB',
+                            style: TextStyle(
+                              fontSize: r.fontBodySmall,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 4),
+                      SizedBox(height: r.spaceXS),
                       LinearProgressIndicator(
-                        value: _storageUsed / _storageLimit,
+                        value: _storageLimit > 0
+                            ? _storageUsed / _storageLimit
+                            : 0,
                         backgroundColor: Colors.grey[300],
                         valueColor:
                             const AlwaysStoppedAnimation(Colors.blue),
+                        minHeight: 4,
                       ),
                     ],
                   ),
                 ),
-                const SizedBox(height: 8),
+
+                SizedBox(height: r.spaceS),
                 Expanded(child: _buildGrid()),
               ],
             ),
     );
   }
 
+  /// Search field, sort dropdown and upload button. Wraps to two lines
+  /// on compact viewports so nothing gets crushed.
+  Widget _buildHeaderRow(Responsive r) {
+    final searchField = TextField(
+      style: TextStyle(fontSize: r.fontBody),
+      decoration: InputDecoration(
+        hintText: 'Search by name or file...',
+        prefixIcon: const Icon(Icons.search),
+        border: const OutlineInputBorder(),
+        isDense: true,
+        contentPadding: EdgeInsets.symmetric(
+          horizontal: r.spaceM,
+          vertical: r.spaceM,
+        ),
+      ),
+      onChanged: (value) {
+        setState(() => _searchQuery = value);
+      },
+    );
+
+    final sortDropdown = DropdownButton<String>(
+      value: _sortMode,
+      style: TextStyle(fontSize: r.fontBody, color: Colors.black87),
+      items: const [
+        DropdownMenuItem(value: 'newest', child: Text('Newest First')),
+        DropdownMenuItem(value: 'oldest', child: Text('Oldest First')),
+        DropdownMenuItem(value: 'last-opened', child: Text('Last Opened')),
+        DropdownMenuItem(value: 'az', child: Text('Name A → Z')),
+        DropdownMenuItem(value: 'za', child: Text('Name Z → A')),
+      ],
+      onChanged: (value) {
+        if (value != null) setState(() => _sortMode = value);
+      },
+    );
+
+    final uploadButton = ElevatedButton.icon(
+      onPressed: _uploadVideo,
+      icon: const Icon(Icons.upload),
+      label: const Text('Upload'),
+      style: ElevatedButton.styleFrom(
+        padding: EdgeInsets.symmetric(
+          horizontal: r.spaceM,
+          vertical: r.spaceM,
+        ),
+        textStyle: TextStyle(fontSize: r.fontBody),
+      ),
+    );
+
+    // Compact: search on its own line, sort+upload on a second line.
+    if (r.isCompact) {
+      return Column(
+        children: [
+          searchField,
+          SizedBox(height: r.spaceS),
+          Row(
+            children: [
+              Expanded(child: sortDropdown),
+              SizedBox(width: r.spaceS),
+              uploadButton,
+            ],
+          ),
+        ],
+      );
+    }
+
+    // Wide: one row.
+    return Row(
+      children: [
+        Expanded(child: searchField),
+        SizedBox(width: r.spaceS),
+        sortDropdown,
+        SizedBox(width: r.spaceS),
+        uploadButton,
+      ],
+    );
+  }
+
   Widget _buildGrid() {
+    final r = Responsive.of(context);
+
     if (_listError != null) {
       return Center(
         child: Padding(
-          padding: const EdgeInsets.all(32),
+          padding: EdgeInsets.all(r.spaceXL),
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 560),
+            constraints: BoxConstraints(maxWidth: r.width * 0.9),
             child: Card(
               elevation: 0,
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(r.spaceM),
                 side: BorderSide(color: Colors.orange.shade200),
               ),
               color: Colors.orange.shade50,
               child: Padding(
-                padding: const EdgeInsets.all(24),
+                padding: EdgeInsets.all(r.spaceL),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1124,37 +1181,39 @@ class _WorkingScreenState extends State<WorkingScreen> {
                     Row(
                       children: [
                         Icon(Icons.cloud_off,
-                            size: 32, color: Colors.orange.shade800),
-                        const SizedBox(width: 12),
-                        const Expanded(
+                            size: r.iconLarge,
+                            color: Colors.orange.shade800),
+                        SizedBox(width: r.spaceM),
+                        Expanded(
                           child: Text(
                             'Cannot load projects',
                             style: TextStyle(
-                              fontSize: 18,
+                              fontSize: r.fontSubtitle,
                               fontWeight: FontWeight.bold,
                             ),
                           ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 16),
+                    SizedBox(height: r.spaceM),
                     SelectableText(
                       _listError!,
-                      style: const TextStyle(
-                        fontSize: 13,
+                      style: TextStyle(
+                        fontSize: r.fontBody,
                         height: 1.45,
                         color: Colors.black87,
                       ),
                     ),
-                    const SizedBox(height: 20),
-                    Row(
+                    SizedBox(height: r.spaceL),
+                    Wrap(
+                      spacing: r.spaceM,
+                      runSpacing: r.spaceS,
                       children: [
                         FilledButton.icon(
                           onPressed: _fetchProjects,
                           icon: const Icon(Icons.refresh, size: 18),
                           label: const Text('Retry'),
                         ),
-                        const SizedBox(width: 12),
                         OutlinedButton.icon(
                           onPressed: _showBackendHelp,
                           icon: const Icon(Icons.help_outline, size: 18),
@@ -1197,27 +1256,33 @@ class _WorkingScreenState extends State<WorkingScreen> {
     });
 
     if (filtered.isEmpty) {
-      return const Center(
+      return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.folder_open, size: 80, color: Colors.grey),
-            SizedBox(height: 16),
-            Text('No projects found', style: TextStyle(fontSize: 18)),
-            Text('Upload a video to get started.',
-                style: TextStyle(color: Colors.grey)),
+            Icon(Icons.folder_open, size: r.iconExtraLarge, color: Colors.grey),
+            SizedBox(height: r.spaceL),
+            Text('No projects found',
+                style: TextStyle(fontSize: r.fontSubtitle)),
+            Text(
+              'Upload a video to get started.',
+              style: TextStyle(fontSize: r.fontBody, color: Colors.grey),
+            ),
           ],
         ),
       );
     }
 
+    final columns = r.gridColumns();
+    final cardWidth = (r.width - r.spaceL * 2) / columns;
+
     return GridView.builder(
-      padding: const EdgeInsets.all(16),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 4,
-        childAspectRatio: 0.5,
-        crossAxisSpacing: 12,
-        mainAxisSpacing: 12,
+      padding: EdgeInsets.all(r.spaceL),
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: columns,
+        childAspectRatio: r.gridCardAspectRatio(columnWidth: cardWidth),
+        crossAxisSpacing: r.spaceM,
+        mainAxisSpacing: r.spaceM,
       ),
       itemCount: filtered.length,
       itemBuilder: (context, index) => _buildCard(filtered[index]),
@@ -1225,134 +1290,154 @@ class _WorkingScreenState extends State<WorkingScreen> {
   }
 
   Widget _buildCard(VideoProject project) {
+    final r = Responsive.of(context);
+
     return GestureDetector(
       onLongPress: () => _showContextMenu(context, project),
       onTap: () => _openSessionDetail(project.key),
       child: Card(
         elevation: 2,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        clipBehavior: Clip.antiAlias,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(r.spaceS),
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Expanded(
-              flex: 2,
-              child: ClipRRect(
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(8)),
-                child: project.thumbnailUrl != null &&
-                        project.thumbnailUrl!.isNotEmpty
-                    ? Image.network(
-                        project.thumbnailUrl!,
-                        fit: BoxFit.cover,
-                        width: double.infinity,
-                        errorBuilder: (context, error, stackTrace) =>
-                            _buildThumbnailPlaceholder(project),
-                        loadingBuilder: (context, child, loadingProgress) {
-                          if (loadingProgress == null) return child;
-                          return Container(
-                            color: Colors.grey[300],
-                            child: Center(
-                              child: CircularProgressIndicator(
-                                value: loadingProgress.expectedTotalBytes !=
-                                        null
-                                    ? loadingProgress.cumulativeBytesLoaded /
-                                        loadingProgress.expectedTotalBytes!
-                                    : null,
-                              ),
+            // ── Thumbnail: fixed 16:9 ──────────────────────────────
+            AspectRatio(
+              aspectRatio: 16 / 9,
+              child: project.thumbnailUrl != null &&
+                      project.thumbnailUrl!.isNotEmpty
+                  ? Image.network(
+                      project.thumbnailUrl!,
+                      fit: BoxFit.cover,
+                      width: double.infinity,
+                      errorBuilder: (context, error, stackTrace) =>
+                          _buildThumbnailPlaceholder(project),
+                      loadingBuilder: (context, child, loadingProgress) {
+                        if (loadingProgress == null) return child;
+                        return Container(
+                          color: Colors.grey[300],
+                          child: Center(
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              value: loadingProgress.expectedTotalBytes != null
+                                  ? loadingProgress.cumulativeBytesLoaded /
+                                      loadingProgress.expectedTotalBytes!
+                                  : null,
                             ),
-                          );
-                        },
-                      )
-                    : _buildThumbnailPlaceholder(project),
-              ),
+                          ),
+                        );
+                      },
+                    )
+                  : _buildThumbnailPlaceholder(project),
             ),
-            Expanded(
-              flex: 2,
-              child: Padding(
-                padding: const EdgeInsets.all(6.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    GestureDetector(
-                      onTap: () => _editProjectName(project),
-                      child: Text(
-                        project.name,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 11,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    Text(
-                      project.fileName,
+
+            // ── Metadata ───────────────────────────────────────────
+            Padding(
+              padding: EdgeInsets.fromLTRB(
+                r.spaceS, r.spaceXS, r.spaceS, 0,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  GestureDetector(
+                    onTap: () => _editProjectName(project),
+                    child: Text(
+                      project.name,
                       style: TextStyle(
-                        fontSize: 9,
-                        color: Colors.grey[600],
+                        fontWeight: FontWeight.bold,
+                        fontSize: r.fontBodySmall,
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
-                    Row(
-                      children: [
-                        Text(
-                          _formatDuration(project.duration),
-                          style: TextStyle(
-                            fontSize: 9,
-                            color: Colors.grey[500],
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          '• ${project.segmentCount} segs',
-                          style: TextStyle(
-                            fontSize: 9,
-                            color: Colors.grey[500],
-                          ),
-                        ),
-                      ],
+                  ),
+                  Text(
+                    project.fileName,
+                    style: TextStyle(
+                      fontSize: r.fontCaption,
+                      color: Colors.grey[600],
                     ),
-                    Text(
-                      _formatDate(project.uploaded),
-                      style: TextStyle(
-                        fontSize: 8,
-                        color: Colors.grey[400],
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  SizedBox(height: r.spaceXS / 2),
+                  Row(
+                    children: [
+                      Text(
+                        _formatDuration(project.duration),
+                        style: TextStyle(
+                          fontSize: r.fontCaption,
+                          color: Colors.grey[500],
+                        ),
                       ),
-                    ),
-                    _buildPipelineStatus(project),
-                    const Spacer(),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        IconButton(
-                          onPressed: () => _deleteProject(project.key),
-                          icon: const Icon(Icons.delete_outline,
-                              color: Colors.red, size: 18),
-                          tooltip: 'Delete',
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(
-                            minWidth: 26,
-                            minHeight: 26,
-                          ),
+                      SizedBox(width: r.spaceXS),
+                      Text(
+                        '• ${project.segmentCount} segs',
+                        style: TextStyle(
+                          fontSize: r.fontCaption,
+                          color: Colors.grey[500],
                         ),
-                        ElevatedButton(
-                          onPressed: () => _openSessionDetail(project.key),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.blue,
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 10, vertical: 3),
-                            textStyle: const TextStyle(fontSize: 9),
-                            minimumSize: const Size(0, 26),
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                          child: const Text('Open'),
+                      ),
+                      const Spacer(),
+                      Text(
+                        _formatJobTimestamp(project.uploaded),
+                        style: TextStyle(
+                          fontSize: r.fontCaption,
+                          color: Colors.grey[400],
                         ),
-                      ],
+                      ),
+                    ],
+                  ),
+                  SizedBox(height: r.spaceXS / 2),
+                  _buildPipelineStatus(project),
+                ],
+              ),
+            ),
+
+            // ── Action row ─────────────────────────────────────────
+            Padding(
+              padding: EdgeInsets.fromLTRB(
+                r.spaceXS, 0, r.spaceS, r.spaceXS,
+              ),
+              child: Row(
+                children: [
+                  IconButton(
+                    onPressed: () => _deleteProject(project.key),
+                    icon: Icon(
+                      Icons.delete_outline,
+                      color: Colors.red,
+                      size: r.iconSmall,
                     ),
-                  ],
-                ),
+                    tooltip: 'Delete',
+                    padding: EdgeInsets.zero,
+                    constraints: BoxConstraints(
+                      minWidth: r.spaceXL,
+                      minHeight: r.spaceXL,
+                    ),
+                  ),
+                  const Spacer(),
+                  SizedBox(
+                    height: r.iconMedium + r.spaceS,
+                    child: ElevatedButton(
+                      onPressed: () => _openSessionDetail(project.key),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue,
+                        foregroundColor: Colors.white,
+                        padding: EdgeInsets.symmetric(
+                          horizontal: r.spaceM,
+                        ),
+                        textStyle: TextStyle(fontSize: r.fontCaption),
+                        minimumSize: Size(0, r.iconMedium + r.spaceS),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      child: const Text('Open'),
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
@@ -1362,6 +1447,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
   }
 
   Widget _buildThumbnailPlaceholder(VideoProject project) {
+    final r = Responsive.of(context);
+
     return Container(
       color: Colors.grey[800],
       child: Stack(
@@ -1382,22 +1469,24 @@ class _WorkingScreenState extends State<WorkingScreen> {
               children: [
                 Icon(
                   Icons.play_circle_outline,
-                  size: 36,
+                  size: r.iconLarge + r.spaceS,
                   color: Colors.white.withValues(alpha: 0.7),
                 ),
-                const SizedBox(height: 4),
+                SizedBox(height: r.spaceXS),
                 Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  padding: EdgeInsets.symmetric(
+                    horizontal: r.spaceS,
+                    vertical: r.spaceXS / 2,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.black.withValues(alpha: 0.6),
-                    borderRadius: BorderRadius.circular(4),
+                    borderRadius: BorderRadius.circular(r.spaceXS),
                   ),
                   child: Text(
                     _formatDuration(project.duration),
-                    style: const TextStyle(
+                    style: TextStyle(
                       color: Colors.white,
-                      fontSize: 10,
+                      fontSize: r.fontCaption,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
@@ -1406,18 +1495,23 @@ class _WorkingScreenState extends State<WorkingScreen> {
             ),
           ),
           Positioned(
-            bottom: 6,
-            right: 6,
+            bottom: r.spaceS,
+            right: r.spaceS,
             child: Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+              padding: EdgeInsets.symmetric(
+                horizontal: r.spaceXS,
+                vertical: 1,
+              ),
               decoration: BoxDecoration(
                 color: Colors.black.withValues(alpha: 0.6),
-                borderRadius: BorderRadius.circular(3),
+                borderRadius: BorderRadius.circular(r.spaceXS / 2),
               ),
               child: Text(
                 project.fileName.split('.').last.toUpperCase(),
-                style: const TextStyle(color: Colors.white, fontSize: 8),
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: r.fontCaption - 1,
+                ),
               ),
             ),
           ),
@@ -1427,77 +1521,106 @@ class _WorkingScreenState extends State<WorkingScreen> {
   }
 
   Widget _buildPipelineStatus(VideoProject project) {
+    final r = Responsive.of(context);
+    final iconSize = r.fontSmall;
+    final labelStyle = TextStyle(
+      fontSize: r.fontCaption,
+      color: Colors.green,
+    );
+
     final gs = project.greenscreenStatus;
 
     if (gs == 'ready') {
-      return const Row(
+      return Row(
         children: [
-          Icon(Icons.check_circle, color: Colors.green, size: 11),
-          SizedBox(width: 2),
-          Text('Green-screen ready',
-              style: TextStyle(fontSize: 8, color: Colors.green)),
+          Icon(Icons.check_circle, color: Colors.green, size: iconSize),
+          SizedBox(width: r.spaceXS / 2),
+          Text('Green-screen ready', style: labelStyle),
         ],
       );
     }
+
     if (gs == 'building') {
       final pct = project.greenscreenProgress;
       return Row(
         children: [
           SizedBox(
-            width: 10,
-            height: 10,
+            width: iconSize,
+            height: iconSize,
             child: CircularProgressIndicator(
               strokeWidth: 2,
               value: pct > 0 ? pct / 100.0 : null,
             ),
           ),
-          const SizedBox(width: 2),
+          SizedBox(width: r.spaceXS / 2),
           Text(
             pct > 0 ? 'Preparing $pct%' : 'Preparing…',
-            style: const TextStyle(fontSize: 8, color: Colors.blue),
+            style: TextStyle(fontSize: r.fontCaption, color: Colors.blue),
           ),
         ],
       );
     }
+
     if (gs == 'failed') {
-      return const Row(
+      return Row(
         children: [
-          Icon(Icons.error_outline, color: Colors.orange, size: 11),
-          SizedBox(width: 2),
-          Text('Prep failed',
-              style: TextStyle(fontSize: 8, color: Colors.orange)),
+          Icon(Icons.error_outline,
+              color: Colors.orange, size: iconSize),
+          SizedBox(width: r.spaceXS / 2),
+          Text(
+            'Prep failed',
+            style: TextStyle(fontSize: r.fontCaption, color: Colors.orange),
+          ),
         ],
       );
     }
 
-    // Fall back to the old segmentation-based indicator when the
-    // backend hasn't told us anything yet.
     if (project.segmentationDone) {
-      return const Row(
+      return Row(
         children: [
-          Icon(Icons.check_circle, color: Colors.green, size: 11),
-          SizedBox(width: 2),
-          Text('Done', style: TextStyle(fontSize: 8, color: Colors.green)),
+          Icon(Icons.check_circle, color: Colors.green, size: iconSize),
+          SizedBox(width: r.spaceXS / 2),
+          Text('Done', style: labelStyle),
         ],
       );
     }
-    return const Row(
+
+    return Row(
       children: [
-        Icon(Icons.hourglass_empty, color: Colors.grey, size: 11),
-        SizedBox(width: 2),
-        Text('Not prepared',
-            style: TextStyle(fontSize: 8, color: Colors.grey)),
+        Icon(Icons.hourglass_empty, color: Colors.grey, size: iconSize),
+        SizedBox(width: r.spaceXS / 2),
+        Text(
+          'Not prepared',
+          style: TextStyle(fontSize: r.fontCaption, color: Colors.grey),
+        ),
       ],
     );
   }
 
-  String _formatDate(DateTime dt) {
+  /// Formats a job-history timestamp:
+  ///
+  ///   < 7 days     → "25/08/2026 08:14"   (date + time)
+  ///   < 30 days    → "25/08/2026"          (date only)
+  ///   ≥ 30 days    → "2026"                (year only)
+  ///
+  /// `dt` is expected in local time. Convert UTC first if needed.
+  String _formatJobTimestamp(DateTime dt) {
     final now = DateTime.now();
     final diff = now.difference(dt);
-    if (diff.inDays == 0) return 'Today';
-    if (diff.inDays == 1) return 'Yesterday';
-    if (diff.inDays < 7) return '${diff.inDays} days ago';
-    return '${dt.day}/${dt.month}/${dt.year}';
+
+    final hh = dt.hour.toString().padLeft(2, '0');
+    final mm = dt.minute.toString().padLeft(2, '0');
+    final dd = dt.day.toString().padLeft(2, '0');
+    final mo = dt.month.toString().padLeft(2, '0');
+    final yyyy = dt.year.toString();
+
+    if (diff.inDays < 7) {
+      return '$dd/$mo/$yyyy $hh:$mm';
+    }
+    if (diff.inDays < 30) {
+      return '$dd/$mo/$yyyy';
+    }
+    return yyyy;
   }
 
   String _formatDuration(double seconds) {
