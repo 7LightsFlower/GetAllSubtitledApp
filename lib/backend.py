@@ -67,6 +67,12 @@ CORS(
     expose_headers=["Location", "Content-Disposition"],
 )
 
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
 
 @app.after_request
 def add_no_cache_for_api(response):
@@ -506,7 +512,12 @@ _SESSION_ID_PATTERNS = [
     re.compile(r'content=["\'][^"\']*url=([^"\']+)["\']', re.IGNORECASE),
     # window.location = "/archivesession/XYZ"  (or .href = …)
     re.compile(
-        r'(?:window\.location(?:\.href)?|location\.assign\(|location\.replace\()\s*[=("]\s*["\']([^"\']+)["\']'
+        r'''
+        (?:window\.location(?:\.href)?|location\.assign\(|location\.replace\()
+        \s*[=("]\s*
+        ["\']([^"\']+)["\']
+        ''',
+        re.VERBOSE,
     ),
     # <form action="/something">  → we'll resolve this to a session id later
     re.compile(r'<form[^>]*action=["\']([^"\']+)["\']', re.IGNORECASE),
@@ -631,6 +642,7 @@ def _short_sid(session_id: str | None, keep: int = 8) -> str:
     if not session_id:
         return "<none>"
     return session_id[:keep] + "…"
+
 
 def _ensure_greenscreen_fields(project: dict) -> dict:
     """Make sure every project carries the green-screen bookkeeping fields.
@@ -3959,6 +3971,19 @@ def update_video_subtitles(session_id):
     if not os.path.isdir(session_dir):
         return jsonify({"error": "Session not found"}), 404
 
+    # NEW: which tracks the user ticked in the dialog. `None` means the
+    # caller didn't send a selection (older clients) — in that case we
+    # keep the previous behaviour and embed everything.
+    payload = request.get_json(silent=True) or {}
+    include = payload.get("include")
+    if include is not None:
+        if not isinstance(include, list):
+            return jsonify({
+                "error": "bad_include",
+                "message": "'include' must be a list of VTT filenames.",
+            }), 400
+        include = {str(x) for x in include}
+
     # Same preference order as get_session_file():
     #   1. already-subtitled video (incremental re-edits)
     #   2. original full-quality video
@@ -4001,6 +4026,34 @@ def update_video_subtitles(session_id):
                         "size": os.path.getsize(file_path),
                         "modified": os.path.getmtime(file_path),
                     }
+                )
+
+        # ── NEW: honour the caller's selection ────────────────────
+        # `include` is the set of VTT filenames the user ticked in the
+        # dialog. `None` means an older client that didn't send a
+        # selection — keep the previous behaviour and embed everything.
+        if include is not None:
+            before = len(vtt_files)
+            vtt_files = [v for v in vtt_files if v["filename"] in include]
+            logging.info(
+                "update_video_subtitles: filtered %d VTT(s) down to %d "
+                "based on client selection: %s",
+                before,
+                len(vtt_files),
+                [v["filename"] for v in vtt_files],
+            )
+            if not vtt_files:
+                return (
+                    jsonify(
+                        {
+                            "error": "no_matching_tracks",
+                            "message": (
+                                "None of the selected subtitle tracks "
+                                "exist for this session."
+                            ),
+                        }
+                    ),
+                    400,
                 )
 
         if not vtt_files:
@@ -4328,6 +4381,10 @@ def update_video_subtitles(session_id):
             )
 
         # --- 7. Save state ---
+        # Remember the choice so a retry after a 423 lock doesn't make
+        # the user re-pick the same tracks.
+        if include is not None:
+            sessions.setdefault(session_id, {})["embedded_languages"] = sorted(include)
         save_state()
 
         logging.info("Successfully updated video subtitles for session %s", session_id)
@@ -5238,19 +5295,26 @@ def extract_audio_from_video(video_path: str, output_dir: str | None = None):
     # 32 kbps mono Opus: ~8 MB for a 42-minute lecture. Perfectly fine
     # for speech recognition. Switch to AAC if the internal server
     # turns out to reject .webm — see `codec` below.
-    codec = "libopus"        # or "aac" for .m4a
-    ext   = ".webm"          # or ".m4a" for AAC
+    codec = "libopus"  # or "aac" for .m4a
+    ext = ".webm"  # or ".m4a" for AAC
     audio_path = os.path.join(output_dir, f"{safe}_{uuid.uuid4().hex[:8]}{ext}")
 
     cmd = [
-        "ffmpeg", "-y",
-        "-i", video_path,
+        "ffmpeg",
+        "-y",
+        "-i",
+        video_path,
         "-vn",
-        "-map", "0:a:0",
-        "-ac", "1",              # mono
-        "-ar", "16000",          # 16 kHz — enough for speech
-        "-c:a", codec,
-        "-b:a", "32k",
+        "-map",
+        "0:a:0",
+        "-ac",
+        "1",  # mono
+        "-ar",
+        "16000",  # 16 kHz — enough for speech
+        "-c:a",
+        codec,
+        "-b:a",
+        "32k",
         audio_path,
     ]
     try:
@@ -5382,7 +5446,8 @@ def prepare_upload_source(original_video_path: str) -> tuple[str, str, list[str]
 
 
 def prepare_upload_source_cached(
-    original_video_path: str, video_key: str | None,
+    original_video_path: str,
+    video_key: str | None,
 ) -> tuple[str, str, list[str]]:
     """Like prepare_upload_source, but reuses a pre-built green-screen
     if one exists on disk for this project.
@@ -5392,9 +5457,7 @@ def prepare_upload_source_cached(
     and contains the temp files when generation happened on the fly.
     """
     if video_key:
-        project = next(
-            (v for v in videos if v.get("key") == video_key), None
-        )
+        project = next((v for v in videos if v.get("key") == video_key), None)
         if project is not None:
             _ensure_greenscreen_fields(project)
             gs_name = project.get("greenscreen_file_name")
@@ -5460,13 +5523,9 @@ def _build_greenscreen_for_project(video_key: str) -> bool:
 
     audio_path = None
     try:
-        audio_path, duration = extract_audio_from_video(
-            original_path, UPLOAD_FOLDER
-        )
+        audio_path, duration = extract_audio_from_video(original_path, UPLOAD_FOLDER)
         if audio_path is None:
-            logging.warning(
-                "greenscreen: audio extraction failed for %s", video_key
-            )
+            logging.warning("greenscreen: audio extraction failed for %s", video_key)
             project["greenscreen_status"] = "failed"
             save_state()
             return False
@@ -5475,9 +5534,7 @@ def _build_greenscreen_for_project(video_key: str) -> bool:
         save_state()
 
         if not create_green_screen_video(audio_path, gs_path, duration):
-            logging.warning(
-                "greenscreen: mux failed for %s", video_key
-            )
+            logging.warning("greenscreen: mux failed for %s", video_key)
             project["greenscreen_status"] = "failed"
             save_state()
             return False
@@ -5564,9 +5621,7 @@ def prepare_greenscreen(video_key):
                 {
                     "success": True,
                     "status": "ready",
-                    "greenscreen_file_name": project.get(
-                        "greenscreen_file_name"
-                    ),
+                    "greenscreen_file_name": project.get("greenscreen_file_name"),
                 }
             ),
             200,
@@ -5597,7 +5652,7 @@ def get_videos():
     """Return the list of uploaded videos with storage usage info."""
 
     for video in videos:
-        _ensure_greenscreen_fields(video)    
+        _ensure_greenscreen_fields(video)
     # ============ DEDUPLICATION LOGIC ============
     # Group videos by filename (without UUID prefix)
     video_groups = {}
@@ -5885,19 +5940,13 @@ def delete_video(video_key):
             logging.warning("Could not delete %s %s: %s", what, path, e)
 
     if file_name:
-        _safe_unlink(
-            os.path.join(UPLOAD_FOLDER, file_name), "original video"
-        )
+        _safe_unlink(os.path.join(UPLOAD_FOLDER, file_name), "original video")
         # The thumbnail is named after the original.
         thumb_name = f"{os.path.splitext(file_name)[0]}_thumb.jpg"
-        _safe_unlink(
-            os.path.join(UPLOAD_FOLDER, thumb_name), "thumbnail"
-        )
+        _safe_unlink(os.path.join(UPLOAD_FOLDER, thumb_name), "thumbnail")
 
     if gs_name:
-        _safe_unlink(
-            os.path.join(UPLOAD_FOLDER, gs_name), "green-screen"
-        )
+        _safe_unlink(os.path.join(UPLOAD_FOLDER, gs_name), "green-screen")
 
     # Belt-and-braces: also try the deterministic green-screen name in
     # case the field was never populated (e.g. an interrupted build).
@@ -5911,8 +5960,7 @@ def delete_video(video_key):
     # A project can have any number of sessions (re-uploads of the
     # same file). Every one of them owns a directory.
     session_ids = [
-        sid for sid, s in sessions.items()
-        if s.get("video_key") == video_key
+        sid for sid, s in sessions.items() if s.get("video_key") == video_key
     ]
     for sid in session_ids:
         session_dir = os.path.join(SESSION_FOLDER, sid)
@@ -5921,16 +5969,11 @@ def delete_video(video_key):
                 shutil.rmtree(session_dir)
                 logging.info("🗑️ Deleted session dir: %s", session_dir)
             except OSError as e:
-                logging.warning(
-                    "Could not delete session dir %s: %s", session_dir, e
-                )
+                logging.warning("Could not delete session dir %s: %s", session_dir, e)
         sessions.pop(sid, None)
 
     # ── 3. Jobs (in-memory and persisted) ─────────────────────────
-    job_ids = [
-        jid for jid, j in jobs.items()
-        if j.get("video_key") == video_key
-    ]
+    job_ids = [jid for jid, j in jobs.items() if j.get("video_key") == video_key]
     for jid in job_ids:
         jobs.pop(jid, None)
 
@@ -5942,16 +5985,18 @@ def delete_video(video_key):
     # considered it.
 
     # ── 5. Chunk buffer (if the user re-uploaded this project) ────
-    # chunk_storage is keyed by filename; drop any matching entries.
     if file_name:
         # The exact key used by /upload-chunk is whatever the client
         # sent as `filename`, which is typically the original name.
         chunk_storage.pop(file_name, None)
-        # Also sweep anything else that shares the cleaned base name.
-        base = os.path.splitext(file_name)[0]
-        for key in [k for k in chunk_storage.keys() if base in k]:
-            chunk_storage.pop(key, None)
 
+        # Also sweep anything else that shares the cleaned base name.
+        # Match on a real boundary: "cat" should match "cat.part1"
+        # but not "certificate" or "bobcat_session_42".
+        base = os.path.splitext(file_name)[0]
+        prefix = base + "."
+        for key in [k for k in chunk_storage if k == base or k.startswith(prefix)]:
+            del chunk_storage[key]
     # ── 6. The project entry itself ───────────────────────────────
     videos.remove(target)
     save_state()
@@ -6131,7 +6176,10 @@ def get_session_output(session_id):
                 "total_files": len(files),
                 "session_url": f"{INTERNAL_SERVER_URL}/archivesession/{session_id}",
                 "status": status,
-                "job": job_snapshot,  # 👈 new
+                "job": job_snapshot,
+                "embedded_languages": (sessions.get(session_id) or {}).get(
+                    "embedded_languages"
+                ),
             }
         ),
         200,
@@ -6234,13 +6282,14 @@ def get_youtube_video_info(youtube_url):
             return {"success": False, "error": "Could not extract video ID"}
 
         # Configure yt-dlp options
+
         ydl_opts = {
             "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "quiet": True,
             "no_warnings": True,
             "extract_flat": False,
             "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "User-Agent": _USER_AGENT,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-us,en;q=0.5",
                 "Sec-Fetch-Mode": "navigate",
@@ -6583,13 +6632,14 @@ def session_resync(session_id):
     download_session_files(session_id, token)
     return jsonify({"success": True, "session_id": session_id}), 200
 
+
 def _post_multipart_with_retries(
     target_url: str,
     body_file,
     headers: dict,
     cookies: dict,
     *,
-    total_size: int,           # NEW — for the error log
+    total_size: int,  # NEW — for the error log
     max_attempts: int = 3,
     base_delay: float = 5.0,
 ):
@@ -6610,7 +6660,8 @@ def _post_multipart_with_retries(
             if attempt > 1:
                 logging.info(
                     "internal_upload: succeeded on attempt %d/%d",
-                    attempt, max_attempts,
+                    attempt,
+                    max_attempts,
                 )
             return resp
 
@@ -6626,9 +6677,7 @@ def _post_multipart_with_retries(
             last_exc = e
             if attempt < max_attempts:
                 delay = base_delay * (2 ** (attempt - 1))
-                logging.info(
-                    "internal_upload: retrying in %.1fs", delay
-                )
+                logging.info("internal_upload: retrying in %.1fs", delay)
                 time.sleep(delay)
         # ───────────────────────────────────────────────────────────
     raise last_exc
@@ -7287,8 +7336,9 @@ def _upload_to_internal_server_and_register(
 
     try:
         # ── 1. Decide what to send ────────────────────────────────
-        upload_source_path, upload_filename_used, gs_cleanup = \
+        upload_source_path, upload_filename_used, gs_cleanup = (
             prepare_upload_source_cached(local_path, video_key)
+        )
 
         if upload_source_path != local_path:
             logging.info(
@@ -7299,9 +7349,7 @@ def _upload_to_internal_server_and_register(
             )
 
         logging.info("internal_upload: posting to %s", target_url)
-        logging.info(
-            "internal_upload: form keys = %s", sorted(form_data.keys())
-        )
+        logging.info("internal_upload: form keys = %s", sorted(form_data.keys()))
 
         # ── 2. Build the multipart body in a temp file ────────────
         # We build it explicitly so we can send an explicit
@@ -7323,7 +7371,7 @@ def _upload_to_internal_server_and_register(
                     for v in value:
                         part = (
                             f"--{boundary}\r\n"
-                            f'Content-Disposition: form-data; '
+                            f"Content-Disposition: form-data; "
                             f'name="{key}"\r\n\r\n'
                             f"{v}\r\n"
                         ).encode("utf-8")
@@ -7332,7 +7380,7 @@ def _upload_to_internal_server_and_register(
                 else:
                     part = (
                         f"--{boundary}\r\n"
-                        f'Content-Disposition: form-data; '
+                        f"Content-Disposition: form-data; "
                         f'name="{key}"\r\n\r\n'
                         f"{value}\r\n"
                     ).encode("utf-8")
@@ -7342,9 +7390,7 @@ def _upload_to_internal_server_and_register(
             upload_filename = upload_filename_used
             if not upload_filename.lower().endswith(".mp4"):
                 upload_filename = f"{upload_filename}.mp4"
-            mimetype = (
-                mimetypes.guess_type(upload_filename)[0] or "video/mp4"
-            )
+            mimetype = mimetypes.guess_type(upload_filename)[0] or "video/mp4"
             file_header = (
                 f"--{boundary}\r\n"
                 f'Content-Disposition: form-data; name="videofile"; '
@@ -7366,9 +7412,7 @@ def _upload_to_internal_server_and_register(
             temp_multipart.write(trailer)
             total_size += len(trailer)
 
-        logging.info(
-            "internal_upload: multipart body prepared (%d bytes)", total_size
-        )
+        logging.info("internal_upload: multipart body prepared (%d bytes)", total_size)
 
         # ── 3. POST to the KIT server ─────────────────────────────
         headers = {
@@ -7414,9 +7458,7 @@ def _upload_to_internal_server_and_register(
         # ── 4. Extract the session id ─────────────────────────────
         session_id = _extract_session_id(resp)
         if session_id:
-            logging.info(
-                "internal_upload: session id from response: %s", session_id
-            )
+            logging.info("internal_upload: session id from response: %s", session_id)
 
         # Fallback: KIT's upload endpoint returns a generic "Success"
         # page with no id. Its session ids follow a fixed convention —
@@ -7426,9 +7468,7 @@ def _upload_to_internal_server_and_register(
             user_email = user_email.strip("/").split("/")[-1]
             path = f"/home/{user_email}/{session_name}"
             session_id = base64.b64encode(path.encode()).decode()
-            logging.info(
-                "internal_upload: generated session id: %s", session_id
-            )
+            logging.info("internal_upload: generated session id: %s", session_id)
 
         if not session_id:
             logging.error(
@@ -7459,9 +7499,7 @@ def _upload_to_internal_server_and_register(
                         stale_dir,
                     )
                 except OSError as e:
-                    logging.warning(
-                        "Could not clear %s: %s", stale_dir, e
-                    )
+                    logging.warning("Could not clear %s: %s", stale_dir, e)
             with job_progress_lock:
                 _job_progress_store.pop(session_id, None)
 
@@ -7567,6 +7605,7 @@ def _upload_to_internal_server_and_register(
             except OSError:
                 pass
 
+
 @app.route("/upload", methods=["POST", "OPTIONS"])
 def upload_to_internal():
     """Send a video to the internal KIT server and register the session.
@@ -7604,9 +7643,7 @@ def upload_to_internal():
         token = (data_in.get("token") or "").strip()
         if not token:
             token = (
-                request.headers.get("Authorization", "")
-                .replace("Bearer ", "")
-                .strip()
+                request.headers.get("Authorization", "").replace("Bearer ", "").strip()
             )
     if not token:
         return jsonify({"error": "Missing token"}), 400
@@ -7624,9 +7661,7 @@ def upload_to_internal():
 
         original_filename = file_storage.filename
         if not original_filename.lower().endswith(".mp4"):
-            original_filename = (
-                f"{os.path.splitext(original_filename)[0]}.mp4"
-            )
+            original_filename = f"{os.path.splitext(original_filename)[0]}.mp4"
             logging.info("📹 Added .mp4 extension: %s", original_filename)
 
         existing = next(
@@ -7641,7 +7676,8 @@ def upload_to_internal():
             project = existing
             logging.info(
                 "📹 Using existing video: %s (key: %s)",
-                original_filename, video_key,
+                original_filename,
+                video_key,
             )
             if not os.path.exists(local_path):
                 file_storage.save(local_path)
@@ -7652,9 +7688,7 @@ def upload_to_internal():
             counter = 1
             while os.path.exists(local_path):
                 local_filename = f"{base_name}_{counter}{ext}"
-                local_path = os.path.join(
-                    UPLOAD_FOLDER, local_filename
-                )
+                local_path = os.path.join(UPLOAD_FOLDER, local_filename)
                 counter += 1
             file_storage.save(local_path)
             logging.info("✅ New video saved: %s", local_filename)
@@ -7698,9 +7732,7 @@ def upload_to_internal():
         if not video_key:
             return jsonify({"error": "video_key is required"}), 400
 
-        project = next(
-            (v for v in videos if v.get("key") == video_key), None
-        )
+        project = next((v for v in videos if v.get("key") == video_key), None)
         if project is None:
             return (
                 jsonify({"error": "Video not found", "video_key": video_key}),
@@ -7755,19 +7787,14 @@ def upload_to_internal():
             "save_profile": "1",
         }
 
-        expected_mt = (
-            data_in.get("mtLanguage")
-            or data_in.get("mt_languages")
-            or ["de"]
-        )
+        expected_mt = data_in.get("mtLanguage") or data_in.get("mt_languages") or ["de"]
         if isinstance(expected_mt, str):
             expected_mt = [expected_mt]
 
         target_url = _resolve_target_url(
-            data_in.get("targetServer")
-            or request.headers.get("X-Target-Server")
+            data_in.get("targetServer") or request.headers.get("X-Target-Server")
         )
-        clear_stale = True   # forward mode always resets stale state
+        clear_stale = True  # forward mode always resets stale state
 
     # ── Delegate to the shared worker ─────────────────────────────
     base_url = target_url.rsplit("/upload_lecture", 1)[0]
@@ -7786,6 +7813,7 @@ def upload_to_internal():
         clear_stale_session=clear_stale,
     )
     return jsonify(body), status
+
 
 @app.route("/check-session", methods=["GET"])
 def check_session():
@@ -7906,9 +7934,7 @@ def clear_videos():
                 os.remove(full)
                 removed_files += 1
             except OSError as e:
-                logging.warning(
-                    "clear-videos: could not remove %s: %s", full, e
-                )
+                logging.warning("clear-videos: could not remove %s: %s", full, e)
 
     # Session folders are directories, so handle them separately.
     removed_sessions = 0
@@ -7923,7 +7949,8 @@ def clear_videos():
             except OSError as e:
                 logging.warning(
                     "clear-videos: could not remove session dir %s: %s",
-                    full, e,
+                    full,
+                    e,
                 )
 
     # ── 2. In-memory state ────────────────────────────────────────

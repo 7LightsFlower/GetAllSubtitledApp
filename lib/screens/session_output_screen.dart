@@ -79,8 +79,11 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   List<SubtitleTrack> _subtitleTracks = const [];
   String? _selectedSubtitle;
   Map<String, List<VTTCue>> _parsedSubtitles = const {};
-
+  // Last saved selection from the backend, or null if the user has
+  // never picked. Drives the initial checkbox state in the dialog.
+  List<String>? _embeddedLanguages;
   // Used by _downloadAllFiles to prevent double-tap.
+
   bool _isDownloadingAll = false;
 
   @override
@@ -336,44 +339,151 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   }
 
   Future<void> _updateVideoSubtitles() async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Update Video Subtitles'),
-        content: const Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('This will:',
-                style: TextStyle(fontWeight: FontWeight.bold)),
-            SizedBox(height: 8),
-            Text('• Embed edited VTT subtitles into the video file'),
-            Text('• Update messages.json with the edited content'),
-            Text('• Keep all your changes in sync'),
-            SizedBox(height: 12),
-            Text('This may take a few moments. Continue?',
-                style: TextStyle(fontWeight: FontWeight.w500)),
-          ],
+    // ── Step 1: choose which subtitle tracks to embed ──────────────
+    // Same filter the old Save Subtitles dialog used: every VTT
+    // except the generic "subtitles.vtt" alias (a duplicate of the
+    // ASR track).
+    final vttFiles = _files
+        .where((f) => f.name.endsWith('.vtt') && f.name != 'subtitles.vtt')
+        .toList();
+
+    if (vttFiles.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No subtitle files available to embed'),
+          backgroundColor: Colors.orange,
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.orange,
-              foregroundColor: Colors.white,
-            ),
-            child: const Text('Update Now'),
-          ),
-        ],
-      ),
+      );
+      return;
+    }
+
+    // Seed the checkboxes from the last saved choice, if any.
+    //   null      → never chosen → check everything
+    //   []        → chosen none  → check nothing
+    //   [a, b]    → check exactly those
+    final previouslyChosen = _embeddedLanguages?.toSet();
+    final selected = <String, bool>{
+      for (final f in vttFiles)
+        f.name: previouslyChosen == null || previouslyChosen.contains(f.name),
+    };
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            final selectedCount = selected.values.where((v) => v).length;
+            final allSelected = selectedCount == vttFiles.length;
+
+            return AlertDialog(
+              title: const Text('Choose Subtitles to Embed'),
+              content: SizedBox(
+                width: 480,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Select which subtitle tracks should be embedded '
+                      'into video_subtitled.mp4:',
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        TextButton(
+                          onPressed: () {
+                            setDialogState(() {
+                              for (final k in selected.keys) {
+                                selected[k] = !allSelected;
+                              }
+                            });
+                          },
+                          child: Text(
+                            allSelected ? 'Deselect all' : 'Select all',
+                          ),
+                        ),
+                        const Spacer(),
+                        Text(
+                          '$selectedCount / ${vttFiles.length}',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const Divider(height: 1),
+                    Flexible(
+                      child: SingleChildScrollView(
+                        child: Column(
+                          children: vttFiles.map((f) {
+                            final language =
+                                _extractLanguageFromFilename(f.name);
+                            return CheckboxListTile(
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                              controlAffinity:
+                                  ListTileControlAffinity.leading,
+                              title: Text(
+                                _getLanguageLabel(language),
+                                style: const TextStyle(fontSize: 14),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              subtitle: Text(
+                                '${f.name}  •  '
+                                '${_formatFileSize(f.size)}',
+                                style: const TextStyle(fontSize: 11),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              value: selected[f.name] ?? false,
+                              onChanged: (v) {
+                                setDialogState(() {
+                                  selected[f.name] = v ?? false;
+                                });
+                              },
+                            );
+                          }).toList(),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton.icon(
+                  onPressed: selectedCount > 0
+                      ? () => Navigator.pop(context, true)
+                      : null,
+                  icon: const Icon(Icons.video_settings),
+                  label: Text('Embed ($selectedCount)'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.orange,
+                    foregroundColor: Colors.white,
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
 
-    if (confirm != true) return;
+    if (confirmed != true) return;
 
+    final selectedFilenames = vttFiles
+        .where((f) => selected[f.name] == true)
+        .map((f) => f.name)
+        .toList();
+
+    if (selectedFilenames.isEmpty) return;
+
+    // ── Step 2: run the embed ──────────────────────────────────────
     setState(() => _isLoading = true);
 
     try {
@@ -383,7 +493,11 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
       final response = await http.post(
         Uri.parse(url),
-        headers: {'Authorization': 'Bearer ${token ?? ''}'},
+        headers: {
+          'Authorization': 'Bearer ${token ?? ''}',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({'include': selectedFilenames}),
       );
 
       if (response.statusCode == 200) {
@@ -395,13 +509,32 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
-                  '✅ ${data['message']}\nEmbedded: $subtitleCount tracks, '
-                  'Updated: $messagesUpdated messages'),
+                '✅ ${data['message'] ?? 'Updated'}\n'
+                'Embedded: $subtitleCount tracks, '
+                'Updated: $messagesUpdated messages',
+              ),
               backgroundColor: Colors.green,
               duration: const Duration(seconds: 5),
             ),
           );
           await _loadSessionData();
+        }
+      } else if (response.statusCode == 423) {
+        // Backend returns 423 when video_subtitled.mp4 is being played
+        // in another tab and can't be replaced.
+        String msg = 'Video is being played in another tab.';
+        try {
+          final data = jsonDecode(response.body);
+          msg = data['message'] ?? msg;
+        } catch (_) {}
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('🔒 $msg'),
+              backgroundColor: Colors.orange,
+              duration: const Duration(seconds: 8),
+            ),
+          );
         }
       } else {
         throw Exception('Failed to update video: ${response.statusCode}');
@@ -422,7 +555,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       }
     }
   }
-
   // ─── END OF VTT PARSING ─────────────────────────────────────────────
 
   Future<void> _loadSessionData() async {
@@ -454,6 +586,10 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       final outputData = jsonDecode(outputResponse.body);
       final filesData = outputData['files'] as List? ?? [];
       _files = filesData.map((f) => SessionFile.fromJson(f)).toList();
+
+      // Seed the dialog's initial checkbox state on the next open.
+      _embeddedLanguages =
+          (outputData['embedded_languages'] as List?)?.cast<String>();
 
       _files.sort((a, b) {
         if (a.modified == null && b.modified == null) return 0;
@@ -789,6 +925,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       if (mounted) setState(() => _isDownloadingAll = false);
     }
   }
+
 
   void _showExportDialog() {
     showDialog(
@@ -1781,81 +1918,97 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           bottom: BorderSide(color: Colors.grey.shade300),
         ),
       ),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            SegmentedButton<SessionView>(
-              segments: const [
-                ButtonSegment<SessionView>(
-                  value: SessionView.transcript,
-                  icon: Icon(Icons.description, size: 18),
-                  label: Text('Transcript'),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          return SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: ConstrainedBox(
+              // Force the row to be at least as wide as the screen so
+              // spaceEvenly can distribute the children symmetrically.
+              // On narrow screens, natural width wins and the outer
+              // scroll view takes over.
+              constraints: BoxConstraints(minWidth: constraints.maxWidth),
+              child: IntrinsicWidth(
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    // ── Left group ──────────────────────────────────
+                    IconButton(
+                      icon: Icon(
+                        _isEditingMode ? Icons.check : Icons.edit,
+                      ),
+                      onPressed: currentTranscript.segments.isNotEmpty &&
+                              !_isSaving
+                          ? _toggleEditingMode
+                          : null,
+                      tooltip: _isEditingMode
+                          ? 'Save Changes'
+                          : 'Edit Transcript',
+                      color: _isEditingMode ? Colors.green : null,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.download),
+                      onPressed: _showExportDialog,
+                      tooltip: 'Export Transcript',
+                    ),
+
+                    // ── Centre: view mode ───────────────────────────
+                    const SizedBox(width: 12),
+                    Container(
+                      width: 1,
+                      height: 28,
+                      color: Colors.grey.shade300,
+                    ),
+                    const SizedBox(width: 12),
+                    SegmentedButton<SessionView>(
+                      segments: const [
+                        ButtonSegment<SessionView>(
+                          value: SessionView.transcript,
+                          icon: Icon(Icons.description, size: 18),
+                          label: Text('Transcript'),
+                        ),
+                        ButtonSegment<SessionView>(
+                          value: SessionView.split,
+                          icon: Icon(Icons.view_column, size: 18),
+                          label: Text('Split'),
+                        ),
+                      ],
+                      selected: {
+                        _view == SessionView.files
+                            ? SessionView.transcript
+                            : _view
+                      },
+                      onSelectionChanged: (selection) {
+                        _setView(selection.first);
+                      },
+                      showSelectedIcon: false,
+                      style: const ButtonStyle(
+                        visualDensity: VisualDensity.compact,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Container(
+                      width: 1,
+                      height: 28,
+                      color: Colors.grey.shade300,
+                    ),
+                    const SizedBox(width: 12),
+
+                    // ── Right group ─────────────────────────────────
+                    IconButton(
+                      icon: const Icon(Icons.video_settings),
+                      onPressed: _updateVideoSubtitles,
+                      tooltip: 'Update Video Subtitles',
+                    ),
+                  ],
                 ),
-                ButtonSegment<SessionView>(
-                  value: SessionView.split,
-                  icon: Icon(Icons.view_column, size: 18),
-                  label: Text('Split'),
-                ),
-              ],
-              selected: {
-                _view == SessionView.files
-                    ? SessionView.transcript
-                    : _view
-              },
-              onSelectionChanged: (selection) {
-                _setView(selection.first);
-              },
-              showSelectedIcon: false,
-              style: const ButtonStyle(
-                visualDensity: VisualDensity.compact,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
             ),
-            const SizedBox(width: 16),
-            Container(
-              width: 1,
-              height: 28,
-              color: Colors.grey.shade300,
-            ),
-            const SizedBox(width: 8),
-            IconButton(
-              icon: Icon(_isEditingMode ? Icons.check : Icons.edit),
-              onPressed:
-                  currentTranscript.segments.isNotEmpty && !_isSaving
-                      ? _toggleEditingMode
-                      : null,
-              tooltip:
-                  _isEditingMode ? 'Save Changes' : 'Edit Transcript',
-              color: _isEditingMode ? Colors.green : null,
-            ),
-            IconButton(
-              icon: const Icon(Icons.download),
-              onPressed: _showExportDialog,
-              tooltip: 'Export Transcript',
-            ),
-            IconButton(
-              icon: const Icon(Icons.subtitles_off),
-              onPressed: () async {
-                await _loadSubtitleTracks();
-                if (!mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('🔄 Subtitles reloaded'),
-                    duration: Duration(seconds: 1),
-                  ),
-                );
-              },
-              tooltip: 'Reload Subtitles',
-            ),
-            IconButton(
-              icon: const Icon(Icons.video_settings),
-              onPressed: _updateVideoSubtitles,
-              tooltip: 'Update Video Subtitles',
-            ),
-          ],
-        ),
+          );
+        },
       ),
     );
   }
+
 }
