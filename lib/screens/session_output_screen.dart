@@ -78,12 +78,21 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   // Subtitle related variables - properly initialized
   List<SubtitleTrack> _subtitleTracks = const [];
   String? _selectedSubtitle;
+  // VTT cues so the overlay doesn't flicker on pause or boundary sits.
+  String? _lastCueText;
   Map<String, List<VTTCue>> _parsedSubtitles = const {};
   // Last saved selection from the backend, or null if the user has
   // never picked. Drives the initial checkbox state in the dialog.
   List<String>? _embeddedLanguages;
-  // Used by _downloadAllFiles to prevent double-tap.
 
+  // Editing state. Owned by the State, not by build(), so
+  // _buildEditableTranscript can be called on every rebuild without
+  // leaking controllers.
+  List<TextEditingController> _editTextControllers = [];
+  List<FocusNode> _editFocusNodes = [];
+  List<SegmentData> _editSegments = [];
+  
+  // Used by _downloadAllFiles to prevent double-tap.
   bool _isDownloadingAll = false;
 
   @override
@@ -98,6 +107,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     _videoController?.dispose();
     _scrollController.dispose();
     _secondaryScrollController.dispose();
+    _disposeEditControllers(); 
     super.dispose();
   }
 
@@ -224,17 +234,37 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     return 0.0;
   }
 
-  /// Get subtitle text at a specific time.
-  String? _getSubtitleAtTime(double time) {
-    if (_selectedSubtitle == null) return null;
-    final cues = _parsedSubtitles[_selectedSubtitle];
-    if (cues == null || cues.isEmpty) return null;
-    for (final cue in cues) {
-      if (time >= cue.start && time <= cue.end) {
+  /// Binary-search a sorted cue list for the cue that contains [time].
+  /// Returns the cue's text, or null if [time] falls in a gap.
+  String? _binarySearchCue(List<VTTCue> cues, double time) {
+    int lo = 0;
+    int hi = cues.length - 1;
+    while (lo <= hi) {
+      final mid = (lo + hi) ~/ 2;
+      final cue = cues[mid];
+      if (time < cue.start) {
+        hi = mid - 1;
+      } else if (time > cue.end) {
+        lo = mid + 1;
+      } else {
         return cue.text;
       }
     }
     return null;
+  }
+
+  /// Get subtitle text at a specific time.
+    String? _getSubtitleAtTime(double time) {
+    if (_selectedSubtitle == null) return null;
+    final cues = _parsedSubtitles[_selectedSubtitle];
+    if (cues == null || cues.isEmpty) return null;
+
+    final found = _binarySearchCue(cues, time);
+    if (found != null) {
+      _lastCueText = found;
+      return found;
+    }
+    return _lastCueText;
   }
 
   Future<void> _loadSubtitleTracks() async {
@@ -335,7 +365,10 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
   /// Called by VideoPlayerWidget when the user picks a different subtitle track.
   void _onSubtitleChanged(String? language) {
-    setState(() => _selectedSubtitle = language);
+    setState(() {
+      _selectedSubtitle = language;
+      _lastCueText = null;
+    });
   }
 
   Future<void> _updateVideoSubtitles() async {
@@ -762,8 +795,46 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     });
   }
 
-  void _toggleEditingMode() {
-    setState(() => _isEditingMode = !_isEditingMode);
+
+  void _enterEditMode(TranscriptData transcript) {
+    // Defensive: if a previous edit session is still around, clean it.
+    _disposeEditControllers();
+
+    _editSegments = List.from(transcript.segments);
+    for (int i = 0; i < _editSegments.length; i++) {
+      final c = TextEditingController(text: _editSegments[i].text);
+      final index = i;
+      c.addListener(() {
+        _editSegments[index] =
+            _copySegmentWithText(_editSegments[index], c.text);
+      });
+      _editTextControllers.add(c);
+      _editFocusNodes.add(FocusNode());
+    }
+
+    setState(() {
+      _isEditingMode = true;
+    });
+  }
+
+  void _exitEditMode() {
+    _disposeEditControllers();
+    setState(() {
+      _isEditingMode = false;
+    });
+  }
+
+  /// Tear down controllers/focus nodes. Safe to call repeatedly.
+  void _disposeEditControllers() {
+    for (final c in _editTextControllers) {
+      c.dispose();
+    }
+    for (final f in _editFocusNodes) {
+      f.dispose();
+    }
+    _editTextControllers = [];
+    _editFocusNodes = [];
+    _editSegments = [];
   }
 
   void _selectLanguage(String language) {
@@ -793,6 +864,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         !_videoController!.value.isInitialized) {
       return;
     }
+    _lastCueText = null;
     _videoController!
         .seekTo(Duration(milliseconds: (seconds * 1000).toInt()));
   }
@@ -1082,10 +1154,8 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       await _downloadVTT(editedTranscript);
     } finally {
       if (mounted) {
-        setState(() {
-          _isSaving = false;
-          _isEditingMode = false;
-        });
+        setState(() => _isSaving = false);
+        _exitEditMode();                 // ← disposes + flips _isEditingMode
       }
     }
   }
@@ -1138,40 +1208,26 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     }
   }
 
-  Future<void> _saveAndDownloadVTT(TranscriptData editedTranscript) async {
-    try {
-      await _downloadVTT(editedTranscript);
+  Future<void> _downloadCurrentVtt() async {
+    final TranscriptData transcript;
 
-      final index = _transcripts
-          .indexWhere((t) => t.language == editedTranscript.language);
-
-      if (index != -1) {
-        setState(() {
-          _transcripts[index] = editedTranscript;
-        });
-      }
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('✅ VTT downloaded for '
-                '${editedTranscript.language}'),
-            backgroundColor: Colors.green,
-            duration: const Duration(seconds: 2),
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('❌ Failed to download VTT: $e'),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
+    if (_isEditingMode && _editSegments.isNotEmpty) {
+      transcript = TranscriptData(
+        language: _selectedLanguage,
+        text: _editSegments.map((s) => s.text).join(' '),
+        segments: List.from(_editSegments),
+        sender: '',
+      );
+    } else {
+      transcript = _transcripts.firstWhere(
+        (t) => t.language == _selectedLanguage,
+        orElse: () => _transcripts.isNotEmpty
+            ? _transcripts.first
+            : TranscriptData.empty(),
+      );
     }
+
+    await _downloadVTT(transcript);
   }
 
   String _generateVTTContent(TranscriptData transcript) {
@@ -1524,25 +1580,12 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   }
 
   Widget _buildEditableTranscript(TranscriptData transcript) {
-    final List<SegmentData> editableSegments =
-        List.from(transcript.segments);
-    final List<TextEditingController> textControllers = [];
-    final List<FocusNode> focusNodes = [];
-
-    for (int i = 0; i < editableSegments.length; i++) {
-      final controller =
-          TextEditingController(text: editableSegments[i].text);
-      textControllers.add(controller);
-      focusNodes.add(FocusNode());
-
-      final index = i;
-      controller.addListener(() {
-        editableSegments[index] = _copySegmentWithText(
-          editableSegments[index],
-          controller.text,
-        );
-      });
-    }
+    // Controllers and segment list are owned by the State (see
+    // _enterEditMode). build() only reads them, so a rebuild during
+    // playback doesn't allocate anything new.
+    final textControllers = _editTextControllers;
+    final focusNodes = _editFocusNodes;
+    final editableSegments = _editSegments;
 
     return Column(
       children: [
@@ -1552,19 +1595,8 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           color: Colors.grey.shade100,
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
+            mainAxisAlignment: MainAxisAlignment.end,
             children: [
-              Expanded(
-                child: Text(
-                  'Editing: ${transcript.language}',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    color: Colors.orange,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              const SizedBox(width: 8),
               Flexible(
                 child: SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
@@ -1573,17 +1605,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       TextButton(
-                        onPressed: _isSaving
-                            ? null
-                            : () {
-                                for (final c in textControllers) {
-                                  c.dispose();
-                                }
-                                for (final f in focusNodes) {
-                                  f.dispose();
-                                }
-                                setState(() => _isEditingMode = false);
-                              },
+                        onPressed: _isSaving ? null : _exitEditMode,
                         child: const Text('Cancel'),
                       ),
                       const SizedBox(width: 8),
@@ -1615,26 +1637,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.green,
                           foregroundColor: Colors.white,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      OutlinedButton.icon(
-                        onPressed: _isSaving
-                            ? null
-                            : () async {
-                                final updatedTranscript = TranscriptData(
-                                  language: transcript.language,
-                                  text: transcript.text,
-                                  segments: editableSegments,
-                                  sender: transcript.sender,
-                                );
-                                await _saveAndDownloadVTT(
-                                    updatedTranscript);
-                              },
-                        icon: const Icon(Icons.download),
-                        label: const Text('Download VTT'),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: Colors.blue,
                         ),
                       ),
                     ],
@@ -1933,23 +1935,27 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
                     // ── Left group ──────────────────────────────────
-                    IconButton(
-                      icon: Icon(
-                        _isEditingMode ? Icons.check : Icons.edit,
+                    // Only show the edit toggle when NOT already editing.
+                    // Entering edit mode stays in the toolbar; leaving it is handled
+                    // by the Cancel / Save to Server buttons in the editor header.
+                    if (!_isEditingMode)
+                      IconButton(
+                        icon: const Icon(Icons.edit),
+                        onPressed: currentTranscript.segments.isNotEmpty && !_isSaving
+                            ? () => _enterEditMode(currentTranscript)
+                            : null,
+                        tooltip: 'Edit Transcript',
                       ),
-                      onPressed: currentTranscript.segments.isNotEmpty &&
-                              !_isSaving
-                          ? _toggleEditingMode
-                          : null,
-                      tooltip: _isEditingMode
-                          ? 'Save Changes'
-                          : 'Edit Transcript',
-                      color: _isEditingMode ? Colors.green : null,
-                    ),
                     IconButton(
                       icon: const Icon(Icons.download),
                       onPressed: _showExportDialog,
                       tooltip: 'Export Transcript',
+                    ),
+                                        IconButton(
+                      icon: const Icon(Icons.subtitles),
+                      onPressed:
+                          _isSaving ? null : _downloadCurrentVtt,
+                      tooltip: 'Download VTT',
                     ),
 
                     // ── Centre: view mode ───────────────────────────
