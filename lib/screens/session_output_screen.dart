@@ -1587,130 +1587,66 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     final focusNodes = _editFocusNodes;
     final editableSegments = _editSegments;
 
-    return Column(
-      children: [
-        Container(
-          padding:
-              const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          color: Colors.grey.shade100,
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            mainAxisAlignment: MainAxisAlignment.end,
+    return ListView.builder(
+      controller: _scrollController,
+      padding: EdgeInsets.all(_pagePadding(context)),
+      itemCount: editableSegments.length,
+      itemBuilder: (context, index) {
+        final segment = editableSegments[index];
+        final isHighlighted = index == _currentSegmentIndex;
+
+        return Container(
+          margin: const EdgeInsets.only(bottom: 8),
+          decoration: BoxDecoration(
+            color: isHighlighted
+                ? Colors.yellow.shade100
+                : Colors.white,
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(
+              color: isHighlighted
+                  ? Colors.yellow.shade700
+                  : Colors.grey.shade300,
+              width: isHighlighted ? 2 : 1,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Flexible(
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  reverse: true,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      TextButton(
-                        onPressed: _isSaving ? null : _exitEditMode,
-                        child: const Text('Cancel'),
-                      ),
-                      const SizedBox(width: 8),
-                      ElevatedButton.icon(
-                        onPressed: _isSaving
-                            ? null
-                            : () async {
-                                final updatedTranscript = TranscriptData(
-                                  language: transcript.language,
-                                  text: transcript.text,
-                                  segments: editableSegments,
-                                  sender: transcript.sender,
-                                );
-                                await _saveEditedTranscript(
-                                    updatedTranscript);
-                              },
-                        icon: _isSaving
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              )
-                            : const Icon(Icons.cloud_upload),
-                        label:
-                            Text(_isSaving ? 'Saving…' : 'Save to Server'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.green,
-                          foregroundColor: Colors.white,
-                        ),
-                      ),
-                    ],
+              Padding(
+                padding: const EdgeInsets.all(8.0),
+                child: Text(
+                  _formatTimestamp(segment.start),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey,
+                    fontFamily: 'monospace',
                   ),
                 ),
               ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                child: TextField(
+                  controller: textControllers[index],
+                  focusNode: focusNodes[index],
+                  maxLines: null,
+                  enabled: !_isSaving,
+                  decoration: const InputDecoration(
+                    border: InputBorder.none,
+                    hintText: 'Edit segment text...',
+                    isDense: true,
+                    contentPadding: EdgeInsets.symmetric(
+                      vertical: 8,
+                      horizontal: 4,
+                    ),
+                  ),
+                  style: const TextStyle(fontSize: 14),
+                ),
+              ),
+              const SizedBox(height: 8),
             ],
           ),
-        ),
-        Expanded(
-          child: ListView.builder(
-            controller: _scrollController,
-            padding: EdgeInsets.all(_pagePadding(context)),
-            itemCount: editableSegments.length,
-            itemBuilder: (context, index) {
-              final segment = editableSegments[index];
-              final isHighlighted = index == _currentSegmentIndex;
-
-              return Container(
-                margin: const EdgeInsets.only(bottom: 8),
-                decoration: BoxDecoration(
-                  color: isHighlighted
-                      ? Colors.yellow.shade100
-                      : Colors.white,
-                  borderRadius: BorderRadius.circular(4),
-                  border: Border.all(
-                    color: isHighlighted
-                        ? Colors.yellow.shade700
-                        : Colors.grey.shade300,
-                    width: isHighlighted ? 2 : 1,
-                  ),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.all(8.0),
-                      child: Text(
-                        _formatTimestamp(segment.start),
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey,
-                          fontFamily: 'monospace',
-                        ),
-                      ),
-                    ),
-                    Padding(
-                      padding:
-                          const EdgeInsets.symmetric(horizontal: 8.0),
-                      child: TextField(
-                        controller: textControllers[index],
-                        focusNode: focusNodes[index],
-                        maxLines: null,
-                        enabled: !_isSaving,
-                        decoration: const InputDecoration(
-                          border: InputBorder.none,
-                          hintText: 'Edit segment text...',
-                          isDense: true,
-                          contentPadding: EdgeInsets.symmetric(
-                            vertical: 8,
-                            horizontal: 4,
-                          ),
-                        ),
-                        style: const TextStyle(fontSize: 14),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                  ],
-                ),
-              );
-            },
-          ),
-        ),
-      ],
+        );
+      },
     );
   }
 
@@ -1877,23 +1813,46 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     return Row(
       children: [
         Expanded(
-          child: _isEditingMode
-              ? _buildEditableTranscript(left)
-              : TranscriptView(
-                  transcript: left,
-                  highlightedIndex: _currentSegmentIndex,
-                  scrollController: _scrollController,
-                ),
+          child: TranscriptView(
+            transcript: left,
+            highlightedIndex: _currentSegmentIndex,
+            scrollController: _scrollController,
+          ),
         ),
         const VerticalDivider(width: 1),
         Expanded(
-          child: _isEditingMode
-              ? _buildEditableTranscript(right)
-              : TranscriptView(
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: TranscriptView(
                   transcript: right,
                   highlightedIndex: _currentSegmentIndex,
                   scrollController: _secondaryScrollController,
                 ),
+              ),
+              // Close the second panel and go back to single view.
+              Positioned(
+                top: 4,
+                right: 4,
+                child: Material(
+                  color: Colors.black.withValues(alpha: 0.45),
+                  shape: const CircleBorder(),
+                  child: InkWell(
+                    customBorder: const CircleBorder(),
+                    onTap: () => _setView(SessionView.transcript),
+                    child: const Padding(
+                      padding: EdgeInsets.all(6),
+                      child: Icon(
+                        Icons.close,
+                        size: 16,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ],
     );
@@ -1920,101 +1879,137 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           bottom: BorderSide(color: Colors.grey.shade300),
         ),
       ),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          return SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: ConstrainedBox(
-              // Force the row to be at least as wide as the screen so
-              // spaceEvenly can distribute the children symmetrically.
-              // On narrow screens, natural width wins and the outer
-              // scroll view takes over.
-              constraints: BoxConstraints(minWidth: constraints.maxWidth),
-              child: IntrinsicWidth(
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    // ── Left group ──────────────────────────────────
-                    // Only show the edit toggle when NOT already editing.
-                    // Entering edit mode stays in the toolbar; leaving it is handled
-                    // by the Cancel / Save to Server buttons in the editor header.
-                    if (!_isEditingMode)
-                      IconButton(
-                        icon: const Icon(Icons.edit),
-                        onPressed: currentTranscript.segments.isNotEmpty && !_isSaving
-                            ? () => _enterEditMode(currentTranscript)
-                            : null,
-                        tooltip: 'Edit Transcript',
-                      ),
-                    IconButton(
-                      icon: const Icon(Icons.download),
-                      onPressed: _showExportDialog,
-                      tooltip: 'Export Transcript',
-                    ),
-                                        IconButton(
-                      icon: const Icon(Icons.subtitles),
-                      onPressed:
-                          _isSaving ? null : _downloadCurrentVtt,
-                      tooltip: 'Download VTT',
-                    ),
-
-                    // ── Centre: view mode ───────────────────────────
-                    const SizedBox(width: 12),
-                    Container(
-                      width: 1,
-                      height: 28,
-                      color: Colors.grey.shade300,
-                    ),
-                    const SizedBox(width: 12),
-                    SegmentedButton<SessionView>(
-                      segments: const [
-                        ButtonSegment<SessionView>(
-                          value: SessionView.transcript,
-                          icon: Icon(Icons.description, size: 18),
-                          label: Text('Transcript'),
-                        ),
-                        ButtonSegment<SessionView>(
-                          value: SessionView.split,
-                          icon: Icon(Icons.view_column, size: 18),
-                          label: Text('Split'),
-                        ),
-                      ],
-                      selected: {
-                        _view == SessionView.files
-                            ? SessionView.transcript
-                            : _view
-                      },
-                      onSelectionChanged: (selection) {
-                        _setView(selection.first);
-                      },
-                      showSelectedIcon: false,
-                      style: const ButtonStyle(
-                        visualDensity: VisualDensity.compact,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Container(
-                      width: 1,
-                      height: 28,
-                      color: Colors.grey.shade300,
-                    ),
-                    const SizedBox(width: 12),
-
-                    // ── Right group ─────────────────────────────────
-                    IconButton(
-                      icon: const Icon(Icons.video_settings),
-                      onPressed: _updateVideoSubtitles,
-                      tooltip: 'Update Video Subtitles',
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          );
-        },
-      ),
+      child: _isEditingMode
+          ? _buildEditingToolbar(currentTranscript)
+          : _buildNormalToolbar(currentTranscript),
     );
   }
 
+  /// Cancel on the left, actions on the right. Only shown while the
+  /// transcript editor is open.
+  Widget _buildEditingToolbar(TranscriptData transcript) {
+    return Row(
+      children: [
+        TextButton.icon(
+          onPressed: _isSaving ? null : _exitEditMode,
+          icon: const Icon(Icons.close, size: 18),
+          label: const Text('Cancel'),
+        ),
+        const Spacer(),
+        OutlinedButton.icon(
+          onPressed: _isSaving ? null : _downloadCurrentVtt,
+          icon: const Icon(Icons.download, size: 18),
+          label: const Text('Download VTT'),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: Colors.blue,
+          ),
+        ),
+        const SizedBox(width: 8),
+        ElevatedButton.icon(
+          onPressed: _isSaving
+              ? null
+              : () async {
+                  final updated = TranscriptData(
+                    language: transcript.language,
+                    text: transcript.text,
+                    segments: _editSegments,
+                    sender: transcript.sender,
+                  );
+                  await _saveEditedTranscript(updated);
+                },
+          icon: _isSaving
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                )
+              : const Icon(Icons.cloud_upload, size: 18),
+          label: Text(_isSaving ? 'Saving…' : 'Save to Server'),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.green,
+            foregroundColor: Colors.white,
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Default toolbar. The old SegmentedButton is replaced by a "+" that
+  /// opens the second panel; the matching "×" lives on the second panel
+  /// itself (see _buildSplitTranscriptView).
+  Widget _buildNormalToolbar(TranscriptData currentTranscript) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minWidth: constraints.maxWidth),
+            child: IntrinsicWidth(
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  // ── Left group ────────────────────────────────
+                  IconButton(
+                    icon: const Icon(Icons.edit),
+                    onPressed:
+                        currentTranscript.segments.isNotEmpty && !_isSaving
+                            ? () => _enterEditMode(currentTranscript)
+                            : null,
+                    tooltip: 'Edit Transcript',
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.download),
+                    onPressed: _showExportDialog,
+                    tooltip: 'Export Transcript',
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.subtitles),
+                    onPressed: _isSaving ? null : _downloadCurrentVtt,
+                    tooltip: 'Download VTT',
+                  ),
+
+                  // ── Centre: + to add the second panel ─────────
+                  const SizedBox(width: 12),
+                  Container(
+                    width: 1,
+                    height: 28,
+                    color: Colors.grey.shade300,
+                  ),
+                  const SizedBox(width: 12),
+                  if (_view == SessionView.transcript)
+                    IconButton(
+                      icon: const Icon(Icons.add),
+                      onPressed: () => _setView(SessionView.split),
+                      tooltip: 'Add second panel',
+                    )
+                  else
+                    // Reserve the space so the layout doesn't jump when
+                    // the + disappears in split / files view.
+                    const SizedBox(width: 48),
+
+                  const SizedBox(width: 12),
+                  Container(
+                    width: 1,
+                    height: 28,
+                    color: Colors.grey.shade300,
+                  ),
+                  const SizedBox(width: 12),
+
+                  // ── Right group ───────────────────────────────
+                  IconButton(
+                    icon: const Icon(Icons.video_settings),
+                    onPressed: _updateVideoSubtitles,
+                    tooltip: 'Update Video Subtitles',
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
 }
