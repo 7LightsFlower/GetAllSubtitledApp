@@ -35,6 +35,11 @@ class SessionDetail {
   final String? thumbnailUrl;
   final String? videoUrl;
   final List<Segment> segments;
+  
+  // Green-screen metadata (populated once the backend has built one).
+  final int greenscreenFileSize;      // 0 until ready
+  final DateTime? greenscreenCreatedAt;  // null until ready
+  final String greenscreenStatus;     // pending | building | ready | failed
 
   SessionDetail({
     required this.key,
@@ -50,6 +55,9 @@ class SessionDetail {
     this.thumbnailUrl,
     this.videoUrl,
     required this.segments,
+    this.greenscreenFileSize = 0,
+    this.greenscreenCreatedAt,
+    this.greenscreenStatus = 'pending',
   });
 
   factory SessionDetail.fromJson(Map<String, dynamic> json) {
@@ -73,6 +81,12 @@ class SessionDetail {
       thumbnailUrl: json['thumbnail_url'] as String?,
       videoUrl: json['video_url'] as String?,
       segments: segments,
+            greenscreenFileSize: json['greenscreen_file_size'] as int? ?? 0,
+      greenscreenCreatedAt: json['greenscreen_created_at'] != null
+          ? DateTime.tryParse(json['greenscreen_created_at'] as String)
+          : null,
+      greenscreenStatus:
+          json['greenscreen_status'] as String? ?? 'pending',
     );
   }
 }
@@ -164,13 +178,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     return 20;
   }
 
-  /// Detail-section heading ("Languages", "Segments").
-  double _sectionTitleSize(BuildContext c) {
-    if (_isNarrow(c)) return 15;
-    if (_isMedium(c)) return 16;
-    return 18;
-  }
-
   // ─── Session detail state ────────────────────────────────────────
   SessionDetail? _detail;
   bool _isLoadingDetail = true;
@@ -218,9 +225,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   bool _isConnected = false;
   bool _isConnecting = false;
 
-  // Settings panel collapsed state
-  bool _settingsExpanded = false;
-
   // Manual token state
   bool _showTokenInput = false;
   final TextEditingController _tokenController = TextEditingController();
@@ -249,6 +253,13 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   List<Map<String, dynamic>> _jobHistory = [];
   bool _isLoadingHistory = false;
 
+  // Controllers so we can collapse the Job History / Job Settings
+  // ExpansionTiles from a button at the bottom of their content, not
+  // just by tapping the header.
+  final ExpansibleController _jobHistoryTileController =
+      ExpansibleController();
+  final ExpansibleController _jobSettingsTileController =
+      ExpansibleController();
   // ─── Constants ───────────────────────────────────────────────────
   static const List<String> _availabilityOptions = [
     'private',
@@ -1627,12 +1638,271 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     }
   }
 
-  String _formatDate(DateTime dt) {
-    final now = DateTime.now();
-    final diff = now.difference(dt);
-    if (diff.inDays == 0) return 'Today';
-    if (diff.inDays == 1) return 'Yesterday';
-    return '${dt.day}/${dt.month}/${dt.year}';
+  // ═══════════════════════════════════════════════════════════════════
+  //  GREEN VIDEO INFO PANEL
+  // ═══════════════════════════════════════════════════════════════════
+
+  /// Full date + exact time, e.g. `2025-06-14 15:32:08`.
+  String _formatDateTimeExact(DateTime dt) {
+    return '${dt.year}-'
+        '${dt.month.toString().padLeft(2, '0')}-'
+        '${dt.day.toString().padLeft(2, '0')} '
+        '${dt.hour.toString().padLeft(2, '0')}:'
+        '${dt.minute.toString().padLeft(2, '0')}:'
+        '${dt.second.toString().padLeft(2, '0')}';
+  }
+
+  /// One labelled cell inside a green panel section.
+  Widget _greenInfoCell({
+    required IconData icon,
+    required String label,
+    required String value,
+  }) {
+    final narrow = _isNarrow(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 14, color: Colors.green.shade700),
+              const SizedBox(width: 4),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: narrow ? 11 : 12,
+                  color: Colors.green.shade800,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.2,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: narrow ? 13 : 14,
+              fontWeight: FontWeight.bold,
+              color: Colors.green.shade900,
+              fontFamily: 'monospace',
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// A row of up to three cells, stacked vertically on narrow screens.
+  Widget _greenInfoRow({
+    required bool narrow,
+    required List<Widget> cells,
+  }) {
+    if (narrow) {
+      final widgets = <Widget>[];
+      for (int i = 0; i < cells.length; i++) {
+        if (i > 0) widgets.add(const SizedBox(height: 10));
+        widgets.add(cells[i]);
+      }
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: widgets,
+      );
+    }
+
+    final expanded = <Widget>[];
+    for (int i = 0; i < cells.length; i++) {
+      if (i > 0) {
+        expanded.add(VerticalDivider(
+          width: 1,
+          thickness: 1,
+          color: Colors.green.shade200,
+        ));
+      }
+      expanded.add(Expanded(child: cells[i]));
+    }
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: expanded,
+      ),
+    );
+  }
+
+  /// Small all-caps subheading inside the green panel.
+  Widget _greenSectionLabel(String text, bool narrow) {
+    return Text(
+      text.toUpperCase(),
+      style: TextStyle(
+        fontSize: narrow ? 10 : 11,
+        fontWeight: FontWeight.w700,
+        color: Colors.green.shade700,
+        letterSpacing: 0.8,
+      ),
+    );
+  }
+
+
+  /// Green panel under the video player: original file stats, the
+  /// green-screen stand-in that the backend built for processing, and
+  /// the available transcript languages.
+  Widget _buildGreenVideoInfo(SessionDetail detail) {
+    final narrow = _isNarrow(context);
+
+    final hasGreenscreen = detail.greenscreenFileSize > 0 ||
+        detail.greenscreenCreatedAt != null ||
+        detail.greenscreenStatus == 'ready';
+
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.all(narrow ? 12 : 16),
+      decoration: BoxDecoration(
+        color: Colors.green.shade50,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.green.shade300, width: 1.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ── Header ───────────────────────────────────────────────
+          Row(
+            children: [
+              Icon(Icons.movie_filter,
+                  color: Colors.green.shade700, size: 20),
+              const SizedBox(width: 8),
+              Text(
+                'Video Information',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Colors.green.shade800,
+                  fontSize: narrow ? 14 : 16,
+                ),
+              ),
+            ],
+          ),
+          SizedBox(height: narrow ? 10 : 12),
+
+          // ── Original section, row 1 ──────────────────────────────
+          _greenSectionLabel('Original', narrow),
+          const SizedBox(height: 6),
+          _greenInfoRow(
+            narrow: narrow,
+            cells: [
+              _greenInfoCell(
+                icon: Icons.storage,
+                label: 'File Size',
+                value: _formatBytes(detail.fileSize),
+              ),
+              _greenInfoCell(
+                icon: Icons.access_time,
+                label: 'Uploaded At',
+                value: _formatDateTimeExact(detail.uploaded),
+              ),
+              _greenInfoCell(
+                icon: Icons.timer_outlined,
+                label: 'Duration',
+                value: _formatDuration(detail.duration),
+              ),
+            ],
+          ),
+
+          // ── Original section, row 2 ──────────────────────────────
+          const SizedBox(height: 10),
+          _greenInfoRow(
+            narrow: narrow,
+            cells: [
+              _greenInfoCell(
+                icon: Icons.speed,
+                label: 'FPS',
+                value: detail.fps.toStringAsFixed(1),
+              ),
+              _greenInfoCell(
+                icon: Icons.layers,
+                label: 'Segments',
+                value: detail.segmentCount.toString(),
+              ),
+              _greenInfoCell(
+                icon: Icons.history,
+                label: 'Last Opened',
+                value: detail.lastOpened != null
+                    ? _formatDateTimeExact(detail.lastOpened!)
+                    : '—',
+              ),
+            ],
+          ),
+                    // ── Languages section (only when non-empty) ──────────────
+          if (detail.languages.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            Divider(color: Colors.green.shade200, height: 1),
+            const SizedBox(height: 10),
+            _greenSectionLabel('Languages', narrow),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: detail.languages
+                  .map(
+                    (lang) => Chip(
+                      label: Text(
+                        lang,
+                        style: TextStyle(
+                          fontSize: narrow ? 11 : 13,
+                          color: Colors.green.shade900,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      backgroundColor: Colors.green.shade100,
+                      side: BorderSide(color: Colors.green.shade300),
+                      visualDensity: narrow
+                          ? VisualDensity.compact
+                          : VisualDensity.standard,
+                    ),
+                  )
+                  .toList(),
+            ),
+          ],
+
+
+          // ── Green-screen section (only when one exists) ──────────
+          if (hasGreenscreen) ...[
+            const SizedBox(height: 14),
+            Divider(color: Colors.green.shade200, height: 1),
+            const SizedBox(height: 10),
+            _greenSectionLabel(
+              'Green-screen (uploaded for processing)',
+              narrow,
+            ),
+            const SizedBox(height: 6),
+            _greenInfoRow(
+              narrow: narrow,
+              cells: [
+                _greenInfoCell(
+                  icon: Icons.storage,
+                  label: 'File Size',
+                  value: detail.greenscreenFileSize > 0
+                      ? _formatBytes(detail.greenscreenFileSize)
+                      : '—',
+                ),
+                _greenInfoCell(
+                  icon: Icons.access_time,
+                  label: 'Created At',
+                  value: detail.greenscreenCreatedAt != null
+                      ? _formatDateTimeExact(detail.greenscreenCreatedAt!)
+                      : '—',
+                ),
+                _greenInfoCell(
+                  icon: Icons.check_circle_outline,
+                  label: 'Status',
+                  value: detail.greenscreenStatus,
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
   }
 
   String _stripHtmlTags(String html) {
@@ -1666,41 +1936,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   // ═══════════════════════════════════════════════════════════════════
   //  WIDGET BUILDERS – DETAIL SECTION
   // ═══════════════════════════════════════════════════════════════════
-
-    Widget _infoChip(IconData icon, String label, String value, BuildContext c) {
-    final narrow = _isNarrow(c);
-    return Container(
-      padding: EdgeInsets.symmetric(
-        horizontal: narrow ? 8 : 12,
-        vertical: narrow ? 4 : 6,
-      ),
-      decoration: BoxDecoration(
-        color: Colors.grey.shade100,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: narrow ? 14 : 16, color: Colors.grey.shade700),
-          const SizedBox(width: 4),
-          Text(
-            '$label: ',
-            style: TextStyle(
-              fontWeight: FontWeight.w500,
-              fontSize: narrow ? 11 : 13,
-            ),
-          ),
-          Text(
-            value,
-            style: TextStyle(
-              fontWeight: FontWeight.normal,
-              fontSize: narrow ? 11 : 13,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 
   Widget _buildDetailHeader() {
     if (_isLoadingDetail) {
@@ -1737,7 +1972,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-                // ─── Video player (same size as session_output_screen) ─────
+        // ─── Video player (same size as session_output_screen) ─────
         Center(
           child: SizedBox(
             width: double.infinity,
@@ -1794,46 +2029,8 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           maxLines: 2,
         ),
         const SizedBox(height: 16),
-
-        // Metadata chips
-        Wrap(
-          spacing: _isNarrow(context) ? 6 : 8,
-          runSpacing: _isNarrow(context) ? 6 : 8,
-          children: [
-            _infoChip(Icons.calendar_today, 'Uploaded',
-                _formatDate(detail.uploaded), context),
-            _infoChip(Icons.timer, 'Duration',
-                _formatDuration(detail.duration), context),
-            _infoChip(Icons.speed, 'FPS',
-                detail.fps.toStringAsFixed(1), context),
-            _infoChip(Icons.storage, 'Size',
-                _formatBytes(detail.fileSize), context),
-            _infoChip(Icons.layers, 'Segments',
-                detail.segmentCount.toString(), context),
-            if (detail.lastOpened != null)
-              _infoChip(Icons.history, 'Last opened',
-                  _formatDate(detail.lastOpened!), context),
-          ],
-        ),
-
-        // Languages
-        if (detail.languages.isNotEmpty) ...[
-          const SizedBox(height: 16),
-          Text(
-            'Languages',
-            style: TextStyle(
-              fontSize: _sectionTitleSize(context),
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            children: detail.languages
-                .map((lang) => Chip(label: Text(lang)))
-                .toList(),
-          ),
-        ],
+        // ─── Green video info panel (size / upload time / duration) ───
+        _buildGreenVideoInfo(detail),
 
         // Segments (collapsible)
         if (detail.segments.isNotEmpty) ...[
@@ -3245,8 +3442,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   // ═══════════════════════════════════════════════════════════════════
   //  MAIN BUILD
   // ═══════════════════════════════════════════════════════════════════
-
-  @override
+    @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
@@ -3264,129 +3460,21 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       body: Form(
         key: _formKey,
         child: SingleChildScrollView(
-          padding: EdgeInsets.all(_pagePadding(context)),
+          // Asymmetric padding: normal top/sides, but extra bottom so
+          // floating SnackBars (they anchor to the bottom of the screen)
+          // don't sit on top of the green Start Processing button or
+          // any other interactive control near the end of the form.
+          padding: EdgeInsets.only(
+            top: _pagePadding(context),
+            left: _pagePadding(context),
+            right: _pagePadding(context),
+            bottom: 160,
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               // ─── Session detail header (thumbnail, title, meta) ───
               _buildDetailHeader(),
-              SizedBox(height: _sectionGap(context)),
-              // ─── Job History card ───
-              Card(
-                elevation: 2,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Theme(
-                  data: Theme.of(context)
-                      .copyWith(dividerColor: Colors.transparent),
-                  child: ExpansionTile(
-                    leading: Icon(
-                      Icons.history,
-                      color: _jobHistory.isNotEmpty
-                          ? Colors.blue
-                          : Colors.grey,
-                    ),
-                    title: Row(
-                      children: [
-                        const Text(
-                          'Job History',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 16,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        if (_jobHistory.isNotEmpty)
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: Colors.blue.shade100,
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Text(
-                              '${_jobHistory.length}',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.blue.shade700,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                    initiallyExpanded: _jobHistory.isNotEmpty,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: _isLoadingHistory
-                            ? const Center(
-                                child: CircularProgressIndicator())
-                            : _buildJobHistory(),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              SizedBox(height: _sectionGap(context)),
-
-              // ─── Job Settings (expandable) ───
-              Card(
-                elevation: 2,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Theme(
-                  data: Theme.of(context)
-                      .copyWith(dividerColor: Colors.transparent),
-                  child: ExpansionTile(
-                    leading: const Icon(Icons.settings, color: Colors.blue),
-                    title: Row(
-                      children: [
-                        const Text(
-                          'Job Settings',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 16,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: Colors.blue.shade100,
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Text(
-                            '${_inputLanguages.length} in · '
-                            '${_outputLanguages.length} out · '
-                            '${_audioLanguages.length} audio',
-                            style: TextStyle(
-                              fontSize: 10,
-                              color: Colors.blue.shade700,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    initiallyExpanded: _settingsExpanded,
-                    onExpansionChanged: (expanded) {
-                      setState(() {
-                        _settingsExpanded = expanded;
-                      });
-                    },
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: _buildSettingsPanel(),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
               SizedBox(height: _sectionGap(context)),
 
               // ─── Server picker ───
@@ -3410,15 +3498,23 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                         Row(
                           children: [
                             Icon(
-                              _isConnected ? Icons.check_circle : Icons.info_outline,
-                              color: _isConnected ? Colors.green : Colors.grey,
+                              _isConnected
+                                  ? Icons.check_circle
+                                  : Icons.info_outline,
+                              color: _isConnected
+                                  ? Colors.green
+                                  : Colors.grey,
                             ),
                             const SizedBox(width: 8),
                             Text(
-                              _isConnected ? 'Connected' : 'Not connected — required for processing',
+                              _isConnected
+                                  ? 'Connected'
+                                  : 'Not connected — required for processing',
                               style: TextStyle(
                                 fontWeight: FontWeight.w500,
-                                color: _isConnected ? Colors.green : Colors.grey.shade700,
+                                color: _isConnected
+                                    ? Colors.green
+                                    : Colors.grey.shade700,
                               ),
                             ),
                           ],
@@ -3451,10 +3547,10 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                             ),
                             const SizedBox(width: 4),
                             IconButton(
-                              onPressed: _isConnecting
-                                  ? null
-                                  : _connectToInternal,
-                              tooltip: _isConnected ? 'Reconnect' : 'Connect',
+                              onPressed:
+                                  _isConnecting ? null : _connectToInternal,
+                              tooltip:
+                                  _isConnected ? 'Reconnect' : 'Connect',
                               icon: _isConnecting
                                   ? const SizedBox(
                                       width: 20,
@@ -3523,7 +3619,8 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                               const TextStyle(color: Colors.green),
                           suffixIcon: _tokenController.text.isNotEmpty
                               ? IconButton(
-                                  icon: const Icon(Icons.clear, size: 18),
+                                  icon:
+                                      const Icon(Icons.clear, size: 18),
                                   onPressed: () => setState(
                                       () => _tokenController.clear()),
                                 )
@@ -3545,7 +3642,8 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                           Expanded(
                             child: OutlinedButton.icon(
                               onPressed: _openTokenPage,
-                              icon: const Icon(Icons.open_in_new, size: 18),
+                              icon: const Icon(Icons.open_in_new,
+                                  size: 18),
                               label: const Text('Get Token'),
                               style: OutlinedButton.styleFrom(
                                 foregroundColor: Colors.blue,
@@ -3702,7 +3800,149 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                 ),
               ),
               SizedBox(height: _sectionGap(context)),
+              // ─── 1st: Job History (collapsible) ──────────────────
+              Card(
+                elevation: 2,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Theme(
+                  data: Theme.of(context)
+                      .copyWith(dividerColor: Colors.transparent),
+                  child: ExpansionTile(
+                    controller: _jobHistoryTileController,
+                    leading: Icon(
+                      Icons.history,
+                      color: _jobHistory.isNotEmpty
+                          ? Colors.blue
+                          : Colors.grey,
+                    ),
+                    title: Row(
+                      children: [
+                        const Text(
+                          'Job History',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 16,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        if (_jobHistory.isNotEmpty)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.blue.shade100,
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(
+                              '${_jobHistory.length}',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.blue.shade700,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    initiallyExpanded: false,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: _isLoadingHistory
+                            ? const Center(
+                                child: CircularProgressIndicator())
+                            : _buildJobHistory(),
+                      ),
+                      // ─── Collapse from the bottom ───────────────
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                        child: Align(
+                          alignment: Alignment.centerRight,
+                          child: TextButton.icon(
+                            onPressed: () =>
+                                _jobHistoryTileController.collapse(),
+                            icon: const Icon(
+                                Icons.keyboard_arrow_up, size: 18),
+                            label: const Text('Collapse'),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              SizedBox(height: _sectionGap(context)),
 
+              // ─── 2nd: Job Settings (collapsible) ─────────────────
+              Card(
+                elevation: 2,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Theme(
+                  data: Theme.of(context)
+                      .copyWith(dividerColor: Colors.transparent),
+                  child: ExpansionTile(
+                    controller: _jobSettingsTileController,
+                    leading:
+                        const Icon(Icons.settings, color: Colors.blue),
+                    title: Row(
+                      children: [
+                        const Text(
+                          'Job Settings',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 16,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.shade100,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            '${_inputLanguages.length} in · '
+                            '${_outputLanguages.length} out · '
+                            '${_audioLanguages.length} audio',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Colors.blue.shade700,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    initiallyExpanded: false,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: _buildSettingsPanel(),
+                      ),
+                      // ─── Collapse from the bottom ───────────────
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                        child: Align(
+                          alignment: Alignment.centerRight,
+                          child: TextButton.icon(
+                            onPressed: () =>
+                                _jobSettingsTileController.collapse(),
+                            icon: const Icon(
+                                Icons.keyboard_arrow_up, size: 18),
+                            label: const Text('Collapse'),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              SizedBox(height: _sectionGap(context)),
               // ─── Start Processing ───
               ElevatedButton(
                 onPressed: _isSubmitting ? null : _submitJob,
@@ -3726,6 +3966,8 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
               // ─── Response display ───
               _buildResponseDisplay(),
+
+              SizedBox(height: _sectionGap(context)),
             ],
           ),
         ),

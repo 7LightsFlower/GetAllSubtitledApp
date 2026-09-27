@@ -14,7 +14,6 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  
   final TextEditingController _emailController =
       TextEditingController(text: dummyEmail);
   final TextEditingController _passwordController =
@@ -122,9 +121,9 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                       const SizedBox(height: 24),
 
-                      // Demo credentials info card
+                      // Demo credentials info card (collapsed by default)
                       _buildDevInfoCard(),
-                      if (isDevelopment) const SizedBox(height: 20),
+                      const SizedBox(height: 20),
 
                       // Form fields in a Card for better web appearance
                       Card(
@@ -238,34 +237,44 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  /// Info card showing the prefilled dev credentials so testers can see them.
+  /// Foldable info card showing the prefilled dev credentials.
+  /// Collapsed by default so it doesn't clutter the login form.
   Widget _buildDevInfoCard() {
     return Card(
       color: Colors.amber.shade50,
+      clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(8),
         side: BorderSide(color: Colors.amber.shade300),
       ),
-      child: Padding(
-        padding: const EdgeInsets.all(12.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.info_outline,
-                    size: 18, color: Colors.amber.shade800),
-                const SizedBox(width: 6),
-                Text(
+      child: Theme(
+        // Hide the default ExpansionTile divider lines so the amber
+        // background stays uniform when expanded.
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          initiallyExpanded: false,
+          tilePadding: const EdgeInsets.symmetric(horizontal: 12.0),
+          childrenPadding: const EdgeInsets.fromLTRB(12.0, 0, 12.0, 12.0),
+          expandedCrossAxisAlignment: CrossAxisAlignment.start,
+          iconColor: Colors.amber.shade900,
+          collapsedIconColor: Colors.amber.shade900,
+          title: Row(
+            children: [
+              Icon(Icons.info_outline,
+                  size: 18, color: Colors.amber.shade800),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
                   'Demo Credentials',
                   style: TextStyle(
                     fontWeight: FontWeight.bold,
                     color: Colors.amber.shade900,
                   ),
                 ),
-              ],
-            ),
-            const SizedBox(height: 6),
+              ),
+            ],
+          ),
+          children: [
             Text(
               'Prefilled credentials (tap to copy):',
               style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
@@ -327,11 +336,6 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   void _copyToClipboard(String text, String label) {
-    // Clipboard.setData requires services import; using a simple approach
-    // to avoid extra imports if not already there.
-    // ignore: deprecated_member_use
-    // Note: replace with Clipboard.setData(ClipboardData(text: text)) if
-    // you prefer and add `import 'package:flutter/services.dart';`
     Clipboard.setData(ClipboardData(text: text));
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
