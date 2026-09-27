@@ -492,40 +492,46 @@ class _WorkingScreenState extends State<WorkingScreen> {
   void _showYouTubeImportDialog() {
     final controller = TextEditingController();
 
+    bool submitted = false;
+
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Download YouTube Video'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text('Enter the YouTube video URL:'),
-            const SizedBox(height: 8),
-            TextField(
-              controller: controller,
-              decoration: const InputDecoration(
-                hintText: 'https://youtube.com/watch?v=...',
-                border: OutlineInputBorder(),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) => AlertDialog(
+          title: const Text('Download YouTube Video'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Enter the YouTube video URL:'),
+              const SizedBox(height: 8),
+              TextField(
+                controller: controller,
+                decoration: const InputDecoration(
+                  hintText: 'https://youtube.com/watch?v=...',
+                  border: OutlineInputBorder(),
+                ),
               ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: submitted ? null : () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: submitted
+                  ? null
+                  : () {
+                      final url = controller.text.trim();
+                      if (url.isEmpty) return;
+                      setState(() => submitted = true);
+                      Navigator.pop(ctx);
+                      _importYouTubeDirectly(url);
+                    },
+              child: const Text('Download & Import'),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              final url = controller.text.trim();
-              if (url.isNotEmpty) {
-                Navigator.pop(ctx);
-                _importYouTubeDirectly(url);
-              }
-            },
-            child: const Text('Download & Import'),
-          ),
-        ],
       ),
     );
   }
@@ -2204,6 +2210,8 @@ class _YouTubeDownloadDialogState extends State<_YouTubeDownloadDialog> {
   bool _finished = false;
   String? _error;
 
+  bool _pollInFlight = false;
+
   @override
   void initState() {
     super.initState();
@@ -2218,6 +2226,7 @@ class _YouTubeDownloadDialogState extends State<_YouTubeDownloadDialog> {
   @override
   void dispose() {
     _pollTimer?.cancel();
+    _pollTimer = null;
     _scrollController.dispose();
     super.dispose();
   }
@@ -2241,6 +2250,7 @@ class _YouTubeDownloadDialogState extends State<_YouTubeDownloadDialog> {
             _finished = true;
             _progressValue = 1.0;
             _stage = 'done';
+            _stopPolling();
           });
           widget.onComplete();
         } else {
@@ -2248,6 +2258,7 @@ class _YouTubeDownloadDialogState extends State<_YouTubeDownloadDialog> {
           setState(() {
             _finished = true;
             _error = msg;
+            _stopPolling();
           });
           widget.onError(msg);
         }
@@ -2256,6 +2267,7 @@ class _YouTubeDownloadDialogState extends State<_YouTubeDownloadDialog> {
         setState(() {
           _finished = true;
           _error = msg;
+          _stopPolling();
         });
         widget.onError(msg);
       }
@@ -2264,13 +2276,23 @@ class _YouTubeDownloadDialogState extends State<_YouTubeDownloadDialog> {
       setState(() {
         _finished = true;
         _error = 'Network error: $e';
+        _stopPolling();
       });
       widget.onError('Network error: $e');
     }
   }
 
+  void _stopPolling() {
+    _pollTimer?.cancel();
+    _pollTimer = null;
+  }
+
   Future<void> _poll() async {
-    if (!mounted) return;
+    // Skip if the widget is gone, a previous poll is still running, or
+    // the download has already finished (no point asking again).
+    if (!mounted || _pollInFlight || _finished) return;
+
+    _pollInFlight = true;
     try {
       final resp = await http.get(
         Uri.parse('$flaskServerUrl/api/download-progress/$_downloadId'),
@@ -2290,6 +2312,13 @@ class _YouTubeDownloadDialogState extends State<_YouTubeDownloadDialog> {
         _message = data['message']?.toString() ?? _message;
       });
 
+      // Once the server says we're done, stop the timer. The dialog
+      // stays open until the user closes it; we just stop polling.
+      if (data['done'] == true) {
+        _pollTimer?.cancel();
+        _pollTimer = null;
+      }
+
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_scrollController.hasClients) {
           _scrollController
@@ -2298,6 +2327,8 @@ class _YouTubeDownloadDialogState extends State<_YouTubeDownloadDialog> {
       });
     } catch (_) {
       // ignore transient polling errors
+    } finally {
+      _pollInFlight = false;
     }
   }
 
