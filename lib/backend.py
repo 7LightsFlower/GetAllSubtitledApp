@@ -366,7 +366,7 @@ def cleanup_orphaned_data():
             )
 
             # Also remove session files if they exist
-            session_dir = os.path.join(SESSION_FOLDER, session_id)
+            session_dir = _session_dir(session_id)
             if os.path.exists(session_dir):
                 try:
                     shutil.rmtree(session_dir)
@@ -512,11 +512,11 @@ _SESSION_ID_PATTERNS = [
     re.compile(r'content=["\'][^"\']*url=([^"\']+)["\']', re.IGNORECASE),
     # window.location = "/archivesession/XYZ"  (or .href = …)
     re.compile(
-        r'''
+        r"""
         (?:window\.location(?:\.href)?|location\.assign\(|location\.replace\()
         \s*[=("]\s*
         ["\']([^"\']+)["\']
-        ''',
+        """,
         re.VERBOSE,
     ),
     # <form action="/something">  → we'll resolve this to a session id later
@@ -642,6 +642,52 @@ def _short_sid(session_id: str | None, keep: int = 8) -> str:
     if not session_id:
         return "<none>"
     return session_id[:keep] + "…"
+
+
+def _safe_local_name(name: str) -> str:
+    """Turn a session name into a filesystem-safe folder name.
+
+    Handles the characters that are illegal on Windows or awkward on
+    POSIX (``/ \\ : * ? " < > |``), strips trailing dots/spaces, and
+    caps the length so we stay well clear of PATH_MAX.
+    """
+    if not name:
+        return ""
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
+    safe = re.sub(r"\s+", " ", safe).strip(". ")
+    if len(safe) > 150:
+        safe = safe[:150].rstrip(". ")
+    return safe
+
+
+def _unique_local_name(name: str) -> str:
+    """Pick a filesystem-safe folder name for a new session.
+
+    If two sessions would otherwise share a name (the same lecture
+    uploaded twice, say), the second one gets a ``_2`` suffix.
+    """
+    base = _safe_local_name(name) or "session"
+    taken = {s.get("local_name") for s in sessions.values() if s.get("local_name")}
+    if base not in taken:
+        return base
+    counter = 2
+    while f"{base}_{counter}" in taken:
+        counter += 1
+    return f"{base}_{counter}"
+
+
+def _session_dir(session_id: str) -> str:
+    """On-disk directory holding a session's downloaded files.
+
+    Prefers the human-readable ``local_name`` recorded on the session
+    dict; falls back to the raw session id for sessions saved before
+    ``local_name`` existed (i.e. any pre-existing state file).
+    """
+    sess = sessions.get(session_id) or {}
+    local_name = sess.get("local_name")
+    if local_name:
+        return os.path.join(SESSION_FOLDER, local_name)
+    return os.path.join(SESSION_FOLDER, session_id)
 
 
 def _ensure_greenscreen_fields(project: dict) -> dict:
@@ -1153,7 +1199,7 @@ def job_progress(session_id):
     _job_cleanup()
 
     # ── 1. Disk state ─────────────────────────────────────────────
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     disk_files = []
     if os.path.exists(session_dir):
         disk_files = [
@@ -1692,7 +1738,7 @@ def download_session_files(session_id, token, server_url=None):
         return True
 
     try:
-        session_dir = os.path.join(SESSION_FOLDER, session_id)
+        session_dir = _session_dir(session_id)
         if not _session_files_look_incomplete(session_dir):
             logging.info(
                 "download_session_files: %s is already complete, skipping",
@@ -1706,7 +1752,7 @@ def download_session_files(session_id, token, server_url=None):
 
 def _download_session_files_locked(session_id, token, server_url):
     """Download the media files and transcripts associated with a session."""
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     os.makedirs(session_dir, exist_ok=True)
 
     server_url = (server_url or INTERNAL_SERVER_URL).rstrip("/")
@@ -3309,7 +3355,7 @@ def _resolve_export_language_name(session_dir, language):
 @app.route("/session-export-txt/<path:session_id>", methods=["GET"])
 def session_export_txt(session_id):
     """Export all session data as structured plain text matching the window view."""
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     if not os.path.exists(session_dir):
         return jsonify({"error": "Session not found"}), 404
 
@@ -3978,10 +4024,15 @@ def update_video_subtitles(session_id):
     include = payload.get("include")
     if include is not None:
         if not isinstance(include, list):
-            return jsonify({
-                "error": "bad_include",
-                "message": "'include' must be a list of VTT filenames.",
-            }), 400
+            return (
+                jsonify(
+                    {
+                        "error": "bad_include",
+                        "message": "'include' must be a list of VTT filenames.",
+                    }
+                ),
+                400,
+            )
         include = {str(x) for x in include}
 
     # Same preference order as get_session_file():
@@ -5773,10 +5824,33 @@ def video_detail(video_key):
     """Return details for a specific video by its key."""
     for project in videos:
         if project["key"] == video_key:
+            _ensure_greenscreen_fields(project)
             detail = project.copy()
             detail["thumbnail_url"] = _thumbnail_absolute_url(project)
             detail["segments"] = detail.get("segments", [])
             detail["video_url"] = None
+
+            # ── Green-screen metadata (size + creation time) ──
+            # The green-screen is a tiny audio-bearing stand-in built
+            # from the original video. It is what actually gets sent to
+            # the internal processing server, so the client shows its
+            # size and creation timestamp next to the original's.
+            gs_name = project.get("greenscreen_file_name")
+            gs_size = 0
+            gs_created_at = None
+            if gs_name:
+                gs_path = os.path.join(UPLOAD_FOLDER, gs_name)
+                if os.path.exists(gs_path):
+                    try:
+                        gs_size = os.path.getsize(gs_path)
+                        gs_created_at = datetime.datetime.fromtimestamp(
+                            os.path.getmtime(gs_path)
+                        ).isoformat()
+                    except OSError:
+                        pass
+            detail["greenscreen_file_size"] = gs_size
+            detail["greenscreen_created_at"] = gs_created_at
+
             return jsonify(detail), 200
     return jsonify({"error": "Video not found"}), 404
 
@@ -7460,15 +7534,16 @@ def _upload_to_internal_server_and_register(
         if session_id:
             logging.info("internal_upload: session id from response: %s", session_id)
 
-        # Fallback: KIT's upload endpoint returns a generic "Success"
-        # page with no id. Its session ids follow a fixed convention —
-        # base64 of the filesystem path "/home/<user>/<session_name>".
+        # Fallback: KIT LT's upload endpoint returned a generic "Success"
+        # page with no id. Encode only the session name itself rather
+        # than the full "/home/<user>/<session_name>" path, so the id
+        # stays short and human-recognisable in logs and URLs.
         if not session_id and session_name:
-            user_email = form_data.get("path", "/home/admin@example.com")
-            user_email = user_email.strip("/").split("/")[-1]
-            path = f"/home/{user_email}/{session_name}"
-            session_id = base64.b64encode(path.encode()).decode()
-            logging.info("internal_upload: generated session id: %s", session_id)
+            session_id = base64.b64encode(session_name.encode("utf-8")).decode("ascii")
+            logging.info(
+                "internal_upload: generated short session id (base64 of name): %s",
+                session_id,
+            )
 
         if not session_id:
             logging.error(
@@ -7490,7 +7565,7 @@ def _upload_to_internal_server_and_register(
 
         # ── 5. Optionally clear stale local state ─────────────────
         if clear_stale_session:
-            stale_dir = os.path.join(SESSION_FOLDER, session_id)
+            stale_dir = _session_dir(session_id)
             if os.path.exists(stale_dir):
                 try:
                     shutil.rmtree(stale_dir)
@@ -7512,6 +7587,9 @@ def _upload_to_internal_server_and_register(
         sessions[session_id] = {
             "id": session_id,
             "name": session_name,
+            # Human-readable folder name under sessions/ — this is what
+            # the user sees on disk instead of the encoded id.
+            "local_name": _unique_local_name(session_name),
             "video_key": video_key,
             "created_at": utc_now_iso(),
             "url": f"{base_url}/archivesession/{session_id}",
@@ -8016,7 +8094,7 @@ if __name__ == "__main__":
     _KEEP_VIDEO_FILES = {"video.mp4", "video_subtitled.mp4"}
 
     for sess_id in list(sessions.keys()):
-        sess_dir = os.path.join(SESSION_FOLDER, sess_id)
+        sess_dir = _session_dir(sess_id)
         if not os.path.isdir(sess_dir):
             continue
         for sess_filename in os.listdir(sess_dir):
