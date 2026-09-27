@@ -15,7 +15,9 @@ services:
       context: .
       target: backend
     volumes:
-      - data:/app/lib/sessions
+      - sessions:/app/lib/sessions
+      - uploads:/app/lib/uploads
+      - state:/app/lib/state
     healthcheck:
       test: ["CMD", "curl", "-fs", "http://localhost:5000/videos"]
       interval: 5s
@@ -23,4 +25,5 @@ services:
       retries: 12
 
 volumes:
-  data: {}
+  sessions: {}
+  uploads: {}

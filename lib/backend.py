@@ -133,7 +133,7 @@ TARGET_URL = f"{INTERNAL_SERVER_URL}/upload_lecture"
 BASE_URL = INTERNAL_SERVER_URL
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
 SESSION_FOLDER = os.path.join(os.path.dirname(__file__), "sessions")
-STATE_FILE = os.path.join(os.path.dirname(__file__), "server_state.pkl")
+STATE_FILE = os.path.join(os.path.dirname(__file__), "state", "server_state.pkl")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(SESSION_FOLDER, exist_ok=True)
 
