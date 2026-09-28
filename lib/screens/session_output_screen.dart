@@ -78,8 +78,20 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   // Subtitle related variables - properly initialized
   List<SubtitleTrack> _subtitleTracks = const [];
   String? _selectedSubtitle;
+  // VTT cues so the overlay doesn't flicker on pause or boundary sits.
+  String? _lastCueText;
   Map<String, List<VTTCue>> _parsedSubtitles = const {};
+  // Last saved selection from the backend, or null if the user has
+  // never picked. Drives the initial checkbox state in the dialog.
+  List<String>? _embeddedLanguages;
 
+  // Editing state. Owned by the State, not by build(), so
+  // _buildEditableTranscript can be called on every rebuild without
+  // leaking controllers.
+  List<TextEditingController> _editTextControllers = [];
+  List<FocusNode> _editFocusNodes = [];
+  List<SegmentData> _editSegments = [];
+  
   // Used by _downloadAllFiles to prevent double-tap.
   bool _isDownloadingAll = false;
 
@@ -95,6 +107,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     _videoController?.dispose();
     _scrollController.dispose();
     _secondaryScrollController.dispose();
+    _disposeEditControllers(); 
     super.dispose();
   }
 
@@ -221,17 +234,37 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     return 0.0;
   }
 
-  /// Get subtitle text at a specific time.
-  String? _getSubtitleAtTime(double time) {
-    if (_selectedSubtitle == null) return null;
-    final cues = _parsedSubtitles[_selectedSubtitle];
-    if (cues == null || cues.isEmpty) return null;
-    for (final cue in cues) {
-      if (time >= cue.start && time <= cue.end) {
+  /// Binary-search a sorted cue list for the cue that contains [time].
+  /// Returns the cue's text, or null if [time] falls in a gap.
+  String? _binarySearchCue(List<VTTCue> cues, double time) {
+    int lo = 0;
+    int hi = cues.length - 1;
+    while (lo <= hi) {
+      final mid = (lo + hi) ~/ 2;
+      final cue = cues[mid];
+      if (time < cue.start) {
+        hi = mid - 1;
+      } else if (time > cue.end) {
+        lo = mid + 1;
+      } else {
         return cue.text;
       }
     }
     return null;
+  }
+
+  /// Get subtitle text at a specific time.
+    String? _getSubtitleAtTime(double time) {
+    if (_selectedSubtitle == null) return null;
+    final cues = _parsedSubtitles[_selectedSubtitle];
+    if (cues == null || cues.isEmpty) return null;
+
+    final found = _binarySearchCue(cues, time);
+    if (found != null) {
+      _lastCueText = found;
+      return found;
+    }
+    return _lastCueText;
   }
 
   Future<void> _loadSubtitleTracks() async {
@@ -332,48 +365,158 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
   /// Called by VideoPlayerWidget when the user picks a different subtitle track.
   void _onSubtitleChanged(String? language) {
-    setState(() => _selectedSubtitle = language);
+    setState(() {
+      _selectedSubtitle = language;
+      _lastCueText = null;
+    });
   }
 
   Future<void> _updateVideoSubtitles() async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Update Video Subtitles'),
-        content: const Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('This will:',
-                style: TextStyle(fontWeight: FontWeight.bold)),
-            SizedBox(height: 8),
-            Text('• Embed edited VTT subtitles into the video file'),
-            Text('• Update messages.json with the edited content'),
-            Text('• Keep all your changes in sync'),
-            SizedBox(height: 12),
-            Text('This may take a few moments. Continue?',
-                style: TextStyle(fontWeight: FontWeight.w500)),
-          ],
+    // ── Step 1: choose which subtitle tracks to embed ──────────────
+    // Same filter the old Save Subtitles dialog used: every VTT
+    // except the generic "subtitles.vtt" alias (a duplicate of the
+    // ASR track).
+    final vttFiles = _files
+        .where((f) => f.name.endsWith('.vtt') && f.name != 'subtitles.vtt')
+        .toList();
+
+    if (vttFiles.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No subtitle files available to embed'),
+          backgroundColor: Colors.orange,
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.orange,
-              foregroundColor: Colors.white,
-            ),
-            child: const Text('Update Now'),
-          ),
-        ],
-      ),
+      );
+      return;
+    }
+
+    // Seed the checkboxes from the last saved choice, if any.
+    //   null      → never chosen → check everything
+    //   []        → chosen none  → check nothing
+    //   [a, b]    → check exactly those
+    final previouslyChosen = _embeddedLanguages?.toSet();
+    final selected = <String, bool>{
+      for (final f in vttFiles)
+        f.name: previouslyChosen == null || previouslyChosen.contains(f.name),
+    };
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            final selectedCount = selected.values.where((v) => v).length;
+            final allSelected = selectedCount == vttFiles.length;
+
+            return AlertDialog(
+              title: const Text('Choose Subtitles to Embed'),
+              content: SizedBox(
+                width: 480,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Select which subtitle tracks should be embedded '
+                      'into video_subtitled.mp4:',
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        TextButton(
+                          onPressed: () {
+                            setDialogState(() {
+                              for (final k in selected.keys) {
+                                selected[k] = !allSelected;
+                              }
+                            });
+                          },
+                          child: Text(
+                            allSelected ? 'Deselect all' : 'Select all',
+                          ),
+                        ),
+                        const Spacer(),
+                        Text(
+                          '$selectedCount / ${vttFiles.length}',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const Divider(height: 1),
+                    Flexible(
+                      child: SingleChildScrollView(
+                        child: Column(
+                          children: vttFiles.map((f) {
+                            final language =
+                                _extractLanguageFromFilename(f.name);
+                            return CheckboxListTile(
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                              controlAffinity:
+                                  ListTileControlAffinity.leading,
+                              title: Text(
+                                _getLanguageLabel(language),
+                                style: const TextStyle(fontSize: 14),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              subtitle: Text(
+                                '${f.name}  •  '
+                                '${_formatFileSize(f.size)}',
+                                style: const TextStyle(fontSize: 11),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              value: selected[f.name] ?? false,
+                              onChanged: (v) {
+                                setDialogState(() {
+                                  selected[f.name] = v ?? false;
+                                });
+                              },
+                            );
+                          }).toList(),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton.icon(
+                  onPressed: selectedCount > 0
+                      ? () => Navigator.pop(context, true)
+                      : null,
+                  icon: const Icon(Icons.video_settings),
+                  label: Text('Embed ($selectedCount)'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.orange,
+                    foregroundColor: Colors.white,
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
 
-    if (confirm != true) return;
+    if (confirmed != true) return;
 
+    final selectedFilenames = vttFiles
+        .where((f) => selected[f.name] == true)
+        .map((f) => f.name)
+        .toList();
+
+    if (selectedFilenames.isEmpty) return;
+
+    // ── Step 2: run the embed ──────────────────────────────────────
     setState(() => _isLoading = true);
 
     try {
@@ -383,7 +526,11 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
       final response = await http.post(
         Uri.parse(url),
-        headers: {'Authorization': 'Bearer ${token ?? ''}'},
+        headers: {
+          'Authorization': 'Bearer ${token ?? ''}',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({'include': selectedFilenames}),
       );
 
       if (response.statusCode == 200) {
@@ -395,13 +542,32 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
-                  '✅ ${data['message']}\nEmbedded: $subtitleCount tracks, '
-                  'Updated: $messagesUpdated messages'),
+                '✅ ${data['message'] ?? 'Updated'}\n'
+                'Embedded: $subtitleCount tracks, '
+                'Updated: $messagesUpdated messages',
+              ),
               backgroundColor: Colors.green,
               duration: const Duration(seconds: 5),
             ),
           );
           await _loadSessionData();
+        }
+      } else if (response.statusCode == 423) {
+        // Backend returns 423 when video_subtitled.mp4 is being played
+        // in another tab and can't be replaced.
+        String msg = 'Video is being played in another tab.';
+        try {
+          final data = jsonDecode(response.body);
+          msg = data['message'] ?? msg;
+        } catch (_) {}
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('🔒 $msg'),
+              backgroundColor: Colors.orange,
+              duration: const Duration(seconds: 8),
+            ),
+          );
         }
       } else {
         throw Exception('Failed to update video: ${response.statusCode}');
@@ -422,7 +588,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       }
     }
   }
-
   // ─── END OF VTT PARSING ─────────────────────────────────────────────
 
   Future<void> _loadSessionData() async {
@@ -454,6 +619,10 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       final outputData = jsonDecode(outputResponse.body);
       final filesData = outputData['files'] as List? ?? [];
       _files = filesData.map((f) => SessionFile.fromJson(f)).toList();
+
+      // Seed the dialog's initial checkbox state on the next open.
+      _embeddedLanguages =
+          (outputData['embedded_languages'] as List?)?.cast<String>();
 
       _files.sort((a, b) {
         if (a.modified == null && b.modified == null) return 0;
@@ -626,8 +795,46 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     });
   }
 
-  void _toggleEditingMode() {
-    setState(() => _isEditingMode = !_isEditingMode);
+
+  void _enterEditMode(TranscriptData transcript) {
+    // Defensive: if a previous edit session is still around, clean it.
+    _disposeEditControllers();
+
+    _editSegments = List.from(transcript.segments);
+    for (int i = 0; i < _editSegments.length; i++) {
+      final c = TextEditingController(text: _editSegments[i].text);
+      final index = i;
+      c.addListener(() {
+        _editSegments[index] =
+            _copySegmentWithText(_editSegments[index], c.text);
+      });
+      _editTextControllers.add(c);
+      _editFocusNodes.add(FocusNode());
+    }
+
+    setState(() {
+      _isEditingMode = true;
+    });
+  }
+
+  void _exitEditMode() {
+    _disposeEditControllers();
+    setState(() {
+      _isEditingMode = false;
+    });
+  }
+
+  /// Tear down controllers/focus nodes. Safe to call repeatedly.
+  void _disposeEditControllers() {
+    for (final c in _editTextControllers) {
+      c.dispose();
+    }
+    for (final f in _editFocusNodes) {
+      f.dispose();
+    }
+    _editTextControllers = [];
+    _editFocusNodes = [];
+    _editSegments = [];
   }
 
   void _selectLanguage(String language) {
@@ -657,6 +864,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         !_videoController!.value.isInitialized) {
       return;
     }
+    _lastCueText = null;
     _videoController!
         .seekTo(Duration(milliseconds: (seconds * 1000).toInt()));
   }
@@ -789,6 +997,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       if (mounted) setState(() => _isDownloadingAll = false);
     }
   }
+
 
   void _showExportDialog() {
     showDialog(
@@ -945,10 +1154,8 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       await _downloadVTT(editedTranscript);
     } finally {
       if (mounted) {
-        setState(() {
-          _isSaving = false;
-          _isEditingMode = false;
-        });
+        setState(() => _isSaving = false);
+        _exitEditMode();                 // ← disposes + flips _isEditingMode
       }
     }
   }
@@ -1001,40 +1208,26 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     }
   }
 
-  Future<void> _saveAndDownloadVTT(TranscriptData editedTranscript) async {
-    try {
-      await _downloadVTT(editedTranscript);
+  Future<void> _downloadCurrentVtt() async {
+    final TranscriptData transcript;
 
-      final index = _transcripts
-          .indexWhere((t) => t.language == editedTranscript.language);
-
-      if (index != -1) {
-        setState(() {
-          _transcripts[index] = editedTranscript;
-        });
-      }
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('✅ VTT downloaded for '
-                '${editedTranscript.language}'),
-            backgroundColor: Colors.green,
-            duration: const Duration(seconds: 2),
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('❌ Failed to download VTT: $e'),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
+    if (_isEditingMode && _editSegments.isNotEmpty) {
+      transcript = TranscriptData(
+        language: _selectedLanguage,
+        text: _editSegments.map((s) => s.text).join(' '),
+        segments: List.from(_editSegments),
+        sender: '',
+      );
+    } else {
+      transcript = _transcripts.firstWhere(
+        (t) => t.language == _selectedLanguage,
+        orElse: () => _transcripts.isNotEmpty
+            ? _transcripts.first
+            : TranscriptData.empty(),
+      );
     }
+
+    await _downloadVTT(transcript);
   }
 
   String _generateVTTContent(TranscriptData transcript) {
@@ -1387,191 +1580,73 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   }
 
   Widget _buildEditableTranscript(TranscriptData transcript) {
-    final List<SegmentData> editableSegments =
-        List.from(transcript.segments);
-    final List<TextEditingController> textControllers = [];
-    final List<FocusNode> focusNodes = [];
+    // Controllers and segment list are owned by the State (see
+    // _enterEditMode). build() only reads them, so a rebuild during
+    // playback doesn't allocate anything new.
+    final textControllers = _editTextControllers;
+    final focusNodes = _editFocusNodes;
+    final editableSegments = _editSegments;
 
-    for (int i = 0; i < editableSegments.length; i++) {
-      final controller =
-          TextEditingController(text: editableSegments[i].text);
-      textControllers.add(controller);
-      focusNodes.add(FocusNode());
+    return ListView.builder(
+      controller: _scrollController,
+      padding: EdgeInsets.all(_pagePadding(context)),
+      itemCount: editableSegments.length,
+      itemBuilder: (context, index) {
+        final segment = editableSegments[index];
+        final isHighlighted = index == _currentSegmentIndex;
 
-      final index = i;
-      controller.addListener(() {
-        editableSegments[index] = _copySegmentWithText(
-          editableSegments[index],
-          controller.text,
-        );
-      });
-    }
-
-    return Column(
-      children: [
-        Container(
-          padding:
-              const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          color: Colors.grey.shade100,
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
+        return Container(
+          margin: const EdgeInsets.only(bottom: 8),
+          decoration: BoxDecoration(
+            color: isHighlighted
+                ? Colors.yellow.shade100
+                : Colors.white,
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(
+              color: isHighlighted
+                  ? Colors.yellow.shade700
+                  : Colors.grey.shade300,
+              width: isHighlighted ? 2 : 1,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(
+              Padding(
+                padding: const EdgeInsets.all(8.0),
                 child: Text(
-                  'Editing: ${transcript.language}',
+                  _formatTimestamp(segment.start),
                   style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    color: Colors.orange,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Flexible(
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  reverse: true,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      TextButton(
-                        onPressed: _isSaving
-                            ? null
-                            : () {
-                                for (final c in textControllers) {
-                                  c.dispose();
-                                }
-                                for (final f in focusNodes) {
-                                  f.dispose();
-                                }
-                                setState(() => _isEditingMode = false);
-                              },
-                        child: const Text('Cancel'),
-                      ),
-                      const SizedBox(width: 8),
-                      ElevatedButton.icon(
-                        onPressed: _isSaving
-                            ? null
-                            : () async {
-                                final updatedTranscript = TranscriptData(
-                                  language: transcript.language,
-                                  text: transcript.text,
-                                  segments: editableSegments,
-                                  sender: transcript.sender,
-                                );
-                                await _saveEditedTranscript(
-                                    updatedTranscript);
-                              },
-                        icon: _isSaving
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              )
-                            : const Icon(Icons.cloud_upload),
-                        label:
-                            Text(_isSaving ? 'Saving…' : 'Save to Server'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.green,
-                          foregroundColor: Colors.white,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      OutlinedButton.icon(
-                        onPressed: _isSaving
-                            ? null
-                            : () async {
-                                final updatedTranscript = TranscriptData(
-                                  language: transcript.language,
-                                  text: transcript.text,
-                                  segments: editableSegments,
-                                  sender: transcript.sender,
-                                );
-                                await _saveAndDownloadVTT(
-                                    updatedTranscript);
-                              },
-                        icon: const Icon(Icons.download),
-                        label: const Text('Download VTT'),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: Colors.blue,
-                        ),
-                      ),
-                    ],
+                    fontSize: 12,
+                    color: Colors.grey,
+                    fontFamily: 'monospace',
                   ),
                 ),
               ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                child: TextField(
+                  controller: textControllers[index],
+                  focusNode: focusNodes[index],
+                  maxLines: null,
+                  enabled: !_isSaving,
+                  decoration: const InputDecoration(
+                    border: InputBorder.none,
+                    hintText: 'Edit segment text...',
+                    isDense: true,
+                    contentPadding: EdgeInsets.symmetric(
+                      vertical: 8,
+                      horizontal: 4,
+                    ),
+                  ),
+                  style: const TextStyle(fontSize: 14),
+                ),
+              ),
+              const SizedBox(height: 8),
             ],
           ),
-        ),
-        Expanded(
-          child: ListView.builder(
-            controller: _scrollController,
-            padding: EdgeInsets.all(_pagePadding(context)),
-            itemCount: editableSegments.length,
-            itemBuilder: (context, index) {
-              final segment = editableSegments[index];
-              final isHighlighted = index == _currentSegmentIndex;
-
-              return Container(
-                margin: const EdgeInsets.only(bottom: 8),
-                decoration: BoxDecoration(
-                  color: isHighlighted
-                      ? Colors.yellow.shade100
-                      : Colors.white,
-                  borderRadius: BorderRadius.circular(4),
-                  border: Border.all(
-                    color: isHighlighted
-                        ? Colors.yellow.shade700
-                        : Colors.grey.shade300,
-                    width: isHighlighted ? 2 : 1,
-                  ),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.all(8.0),
-                      child: Text(
-                        _formatTimestamp(segment.start),
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey,
-                          fontFamily: 'monospace',
-                        ),
-                      ),
-                    ),
-                    Padding(
-                      padding:
-                          const EdgeInsets.symmetric(horizontal: 8.0),
-                      child: TextField(
-                        controller: textControllers[index],
-                        focusNode: focusNodes[index],
-                        maxLines: null,
-                        enabled: !_isSaving,
-                        decoration: const InputDecoration(
-                          border: InputBorder.none,
-                          hintText: 'Edit segment text...',
-                          isDense: true,
-                          contentPadding: EdgeInsets.symmetric(
-                            vertical: 8,
-                            horizontal: 4,
-                          ),
-                        ),
-                        style: const TextStyle(fontSize: 14),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                  ],
-                ),
-              );
-            },
-          ),
-        ),
-      ],
+        );
+      },
     );
   }
 
@@ -1738,23 +1813,46 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     return Row(
       children: [
         Expanded(
-          child: _isEditingMode
-              ? _buildEditableTranscript(left)
-              : TranscriptView(
-                  transcript: left,
-                  highlightedIndex: _currentSegmentIndex,
-                  scrollController: _scrollController,
-                ),
+          child: TranscriptView(
+            transcript: left,
+            highlightedIndex: _currentSegmentIndex,
+            scrollController: _scrollController,
+          ),
         ),
         const VerticalDivider(width: 1),
         Expanded(
-          child: _isEditingMode
-              ? _buildEditableTranscript(right)
-              : TranscriptView(
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: TranscriptView(
                   transcript: right,
                   highlightedIndex: _currentSegmentIndex,
                   scrollController: _secondaryScrollController,
                 ),
+              ),
+              // Close the second panel and go back to single view.
+              Positioned(
+                top: 4,
+                right: 4,
+                child: Material(
+                  color: Colors.black.withValues(alpha: 0.45),
+                  shape: const CircleBorder(),
+                  child: InkWell(
+                    customBorder: const CircleBorder(),
+                    onTap: () => _setView(SessionView.transcript),
+                    child: const Padding(
+                      padding: EdgeInsets.all(6),
+                      child: Icon(
+                        Icons.close,
+                        size: 16,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ],
     );
@@ -1781,81 +1879,137 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           bottom: BorderSide(color: Colors.grey.shade300),
         ),
       ),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            SegmentedButton<SessionView>(
-              segments: const [
-                ButtonSegment<SessionView>(
-                  value: SessionView.transcript,
-                  icon: Icon(Icons.description, size: 18),
-                  label: Text('Transcript'),
-                ),
-                ButtonSegment<SessionView>(
-                  value: SessionView.split,
-                  icon: Icon(Icons.view_column, size: 18),
-                  label: Text('Split'),
-                ),
-              ],
-              selected: {
-                _view == SessionView.files
-                    ? SessionView.transcript
-                    : _view
-              },
-              onSelectionChanged: (selection) {
-                _setView(selection.first);
-              },
-              showSelectedIcon: false,
-              style: const ButtonStyle(
-                visualDensity: VisualDensity.compact,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      child: _isEditingMode
+          ? _buildEditingToolbar(currentTranscript)
+          : _buildNormalToolbar(currentTranscript),
+    );
+  }
+
+  /// Cancel on the left, actions on the right. Only shown while the
+  /// transcript editor is open.
+  Widget _buildEditingToolbar(TranscriptData transcript) {
+    return Row(
+      children: [
+        TextButton.icon(
+          onPressed: _isSaving ? null : _exitEditMode,
+          icon: const Icon(Icons.close, size: 18),
+          label: const Text('Cancel'),
+        ),
+        const Spacer(),
+        OutlinedButton.icon(
+          onPressed: _isSaving ? null : _downloadCurrentVtt,
+          icon: const Icon(Icons.download, size: 18),
+          label: const Text('Download VTT'),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: Colors.blue,
+          ),
+        ),
+        const SizedBox(width: 8),
+        ElevatedButton.icon(
+          onPressed: _isSaving
+              ? null
+              : () async {
+                  final updated = TranscriptData(
+                    language: transcript.language,
+                    text: transcript.text,
+                    segments: _editSegments,
+                    sender: transcript.sender,
+                  );
+                  await _saveEditedTranscript(updated);
+                },
+          icon: _isSaving
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                )
+              : const Icon(Icons.cloud_upload, size: 18),
+          label: Text(_isSaving ? 'Saving…' : 'Save to Server'),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.green,
+            foregroundColor: Colors.white,
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Default toolbar. The old SegmentedButton is replaced by a "+" that
+  /// opens the second panel; the matching "×" lives on the second panel
+  /// itself (see _buildSplitTranscriptView).
+  Widget _buildNormalToolbar(TranscriptData currentTranscript) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minWidth: constraints.maxWidth),
+            child: IntrinsicWidth(
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  // ── Left group ────────────────────────────────
+                  IconButton(
+                    icon: const Icon(Icons.edit),
+                    onPressed:
+                        currentTranscript.segments.isNotEmpty && !_isSaving
+                            ? () => _enterEditMode(currentTranscript)
+                            : null,
+                    tooltip: 'Edit Transcript',
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.download),
+                    onPressed: _showExportDialog,
+                    tooltip: 'Export Transcript',
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.subtitles),
+                    onPressed: _isSaving ? null : _downloadCurrentVtt,
+                    tooltip: 'Download VTT',
+                  ),
+
+                  // ── Centre: + to add the second panel ─────────
+                  const SizedBox(width: 12),
+                  Container(
+                    width: 1,
+                    height: 28,
+                    color: Colors.grey.shade300,
+                  ),
+                  const SizedBox(width: 12),
+                  if (_view == SessionView.transcript)
+                    IconButton(
+                      icon: const Icon(Icons.add),
+                      onPressed: () => _setView(SessionView.split),
+                      tooltip: 'Add second panel',
+                    )
+                  else
+                    // Reserve the space so the layout doesn't jump when
+                    // the + disappears in split / files view.
+                    const SizedBox(width: 48),
+
+                  const SizedBox(width: 12),
+                  Container(
+                    width: 1,
+                    height: 28,
+                    color: Colors.grey.shade300,
+                  ),
+                  const SizedBox(width: 12),
+
+                  // ── Right group ───────────────────────────────
+                  IconButton(
+                    icon: const Icon(Icons.video_settings),
+                    onPressed: _updateVideoSubtitles,
+                    tooltip: 'Update Video Subtitles',
+                  ),
+                ],
               ),
             ),
-            const SizedBox(width: 16),
-            Container(
-              width: 1,
-              height: 28,
-              color: Colors.grey.shade300,
-            ),
-            const SizedBox(width: 8),
-            IconButton(
-              icon: Icon(_isEditingMode ? Icons.check : Icons.edit),
-              onPressed:
-                  currentTranscript.segments.isNotEmpty && !_isSaving
-                      ? _toggleEditingMode
-                      : null,
-              tooltip:
-                  _isEditingMode ? 'Save Changes' : 'Edit Transcript',
-              color: _isEditingMode ? Colors.green : null,
-            ),
-            IconButton(
-              icon: const Icon(Icons.download),
-              onPressed: _showExportDialog,
-              tooltip: 'Export Transcript',
-            ),
-            IconButton(
-              icon: const Icon(Icons.subtitles_off),
-              onPressed: () async {
-                await _loadSubtitleTracks();
-                if (!mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('🔄 Subtitles reloaded'),
-                    duration: Duration(seconds: 1),
-                  ),
-                );
-              },
-              tooltip: 'Reload Subtitles',
-            ),
-            IconButton(
-              icon: const Icon(Icons.video_settings),
-              onPressed: _updateVideoSubtitles,
-              tooltip: 'Update Video Subtitles',
-            ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 }

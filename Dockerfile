@@ -50,8 +50,6 @@ RUN flutter build web --release --no-wasm-dry-run \
 # ─────────────────────────────────────────────────────────────────────────────
 FROM python:3-slim AS backend
 
-# ffmpeg/ffprobe: thumbnail generation + video metadata;
-# curl: downloads from the internal server + container healthcheck
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg curl \
     && rm -rf /var/lib/apt/lists/*
@@ -64,8 +62,12 @@ WORKDIR /app
 COPY . /app/
 RUN rm -rf /app/web
 
-# Single worker: users/videos/jobs/chunk_storage live in process memory,
-# so multiple workers would see different state.
+# Directories the backend writes to at runtime. Creating them here means
+# the named volumes in docker-compose.yaml have a valid mountpoint even
+# on a completely fresh volume, and their ownership matches the process
+# that will write into them.
+RUN mkdir -p /app/lib/sessions /app/lib/uploads /app/lib/state
+
 CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "8", "lib.backend:app"]
 
 # ─────────────────────────────────────────────────────────────────────────────
