@@ -136,6 +136,7 @@ SESSION_FOLDER = os.path.join(os.path.dirname(__file__), "sessions")
 STATE_FILE = os.path.join(os.path.dirname(__file__), "state", "server_state.pkl")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(SESSION_FOLDER, exist_ok=True)
+os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
 
 users = {}
 videos = []
@@ -1059,8 +1060,17 @@ def _clear_cancel(session_id: str) -> None:
 
 
 def _job_start(session_id: str, video_key: str | None, session_name: str | None):
-    """Create a fresh job-progress entry for a session."""
+    """Create a job-progress entry for a session.
+
+    Idempotent: if an entry for this session already exists it is left
+    alone. That matters because the upload handler pre-creates the entry
+    before returning (so the panel's first poll finds it), and the
+    background worker also calls this — the second call must not wipe
+    events the first one may have written in between.
+    """
     with job_progress_lock:
+        if session_id in _job_progress_store:
+            return
         _job_progress_store[session_id] = {
             "session_id": session_id,
             "video_key": video_key,
@@ -1255,47 +1265,54 @@ def job_progress(session_id):
     # the worker thread was almost certainly killed by a server restart.
     # Restart it once, using the bearer token the panel is sending.
     persisted = jobs.get(session_id)
-    if (
-        persisted is not None
-        and persisted.get("status") == "processing"
-        and not persisted.get("_recovery_started")
-    ):
+    if persisted is not None and persisted.get("status") == "processing":
         token = request.headers.get("Authorization", "").replace("Bearer ", "")
         if token:
-            persisted["_recovery_started"] = True
-            video_key = persisted.get("video_key")
-            server_url = (
-                sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
-            )
-            expected_mt = sessions.get(session_id, {}).get("expected_mt")
-            logging.info(
-                "♻️ Restarting background worker for %s on %s "
-                "(waiting for translations: %s)",
-                _short_sid(session_id),
-                server_url,
-                expected_mt or "any",
-            )
-            threading.Thread(
-                target=process_session_in_background,
-                args=(session_id, token, video_key, server_url),
-                daemon=True,
-            ).start()
-            return (
-                jsonify(
-                    {
-                        "session_id": session_id,
-                        "stage": "starting",
-                        "progress": 0.0,
-                        "done": False,
-                        "error": None,
-                        "message": "Resuming after server restart…",
-                        "files": disk_files,
-                        "total_files": len(disk_files),
-                        "events": [],
-                    }
-                ),
-                200,
-            )
+            # Atomically claim the recovery slot. Without this, two
+            # concurrent polls can both see `_recovery_started == False`
+            # and both spawn a worker.
+            with job_progress_lock:
+                claimed = not persisted.get("_recovery_started")
+                if claimed:
+                    persisted["_recovery_started"] = True
+
+            if claimed:
+                video_key = persisted.get("video_key")
+                server_url = (
+                    sessions.get(session_id, {}).get("server")
+                    or INTERNAL_SERVER_URL
+                )
+                expected_mt = sessions.get(session_id, {}).get("expected_mt")
+                logging.info(
+                    "♻️ Restarting background worker for %s on %s "
+                    "(waiting for translations: %s)",
+                    _short_sid(session_id),
+                    server_url,
+                    expected_mt or "any",
+                )
+                threading.Thread(
+                    target=process_session_in_background,
+                    args=(session_id, token, video_key, server_url),
+                    daemon=True,
+                ).start()
+                return (
+                    jsonify(
+                        {
+                            "session_id": session_id,
+                            "stage": "starting",
+                            "progress": 0.0,
+                            "done": False,
+                            "error": None,
+                            "message": "Resuming after server restart…",
+                            "files": disk_files,
+                            "total_files": len(disk_files),
+                            "events": [],
+                        }
+                    ),
+                    200,
+                )
+            # else: another request already claimed recovery. Fall
+            # through to the "resuming" response below.
 
     # ── 5. Truly unknown — stop the panel from polling forever ───
     # Either a stale session id, or the persisted job already finished.
@@ -3385,7 +3402,7 @@ def session_export_txt(session_id):
 @app.route("/session-export-docx/<path:session_id>", methods=["GET"])
 def session_export_docx(session_id):
     """Export session as a structured DOCX file matching the window view."""
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     if not os.path.exists(session_dir):
         return jsonify({"error": "Session not found"}), 404
 
@@ -3437,7 +3454,7 @@ def session_export_docx(session_id):
 @app.route("/session-export-rtf/<path:session_id>", methods=["GET"])
 def session_export_rtf(session_id):
     """Export all session data as a structured RTF document."""
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     if not os.path.exists(session_dir):
         return jsonify({"error": "Session not found"}), 404
 
@@ -3484,7 +3501,7 @@ def get_available_languages(session_dir):
 @app.route("/session-export/<path:session_id>", methods=["GET"])
 def session_export(session_id):
     """Export all session data as a formatted DOCX document."""
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     if not os.path.exists(session_dir):
         return jsonify({"error": "Session not found"}), 404
 
@@ -3520,7 +3537,7 @@ def session_export(session_id):
 @app.route("/session-export-structured-json/<path:session_id>", methods=["GET"])
 def session_export_structured_json(session_id):
     """Export session as structured JSON with all metadata."""
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     if not os.path.exists(session_dir):
         return jsonify({"error": "Session not found"}), 404
 
@@ -3574,7 +3591,7 @@ def session_export_structured_json(session_id):
 @app.route("/session-export-all-languages/<path:session_id>", methods=["GET"])
 def session_export_all_languages(session_id):
     """Export all languages as separate files in a ZIP archive."""
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     if not os.path.exists(session_dir):
         return jsonify({"error": "Session not found"}), 404
 
@@ -3640,7 +3657,7 @@ def session_export_all_languages(session_id):
 @app.route("/session-languages/<path:session_id>", methods=["GET"])
 def session_languages(session_id):
     """Get list of available languages for a session."""
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     if not os.path.exists(session_dir):
         return jsonify({"error": "Session not found"}), 404
 
@@ -3651,7 +3668,7 @@ def session_languages(session_id):
 @app.route("/session-transcript-json/<path:session_id>", methods=["GET"])
 def session_transcript_json(session_id):
     """Export session transcripts as JSON."""
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     if not os.path.exists(session_dir):
         return jsonify({"error": "Session not found"}), 404
 
@@ -3667,7 +3684,7 @@ def session_transcript_json(session_id):
 @app.route("/session-messages-json/<path:session_id>", methods=["GET"])
 def session_messages_json(session_id):
     """Download the raw messages.json file from the session."""
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     if not os.path.exists(session_dir):
         return jsonify({"error": "Session not found"}), 404
 
@@ -3698,7 +3715,7 @@ def session_messages_json(session_id):
 @app.route("/session-zip/<path:session_id>", methods=["GET"])
 def download_session_zip(session_id):
     """Download all files from a session as a ZIP archive."""
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     if not os.path.exists(session_dir):
         return jsonify({"error": "Session not found"}), 404
 
@@ -3755,7 +3772,7 @@ def session_transcript_save_vtt(session_id):
       - Any other language   -> subtitles_<SimpleName>.vtt
       - Explicit `filename` in the payload always wins.
     """
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     if not os.path.exists(session_dir):
         return jsonify({"error": "Session not found"}), 404
 
@@ -4013,7 +4030,7 @@ def update_video_subtitles(session_id):
     Update the embedded subtitles in video.mp4 with the edited VTT files.
     Also updates messages.json to reflect the changes.
     """
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     if not os.path.isdir(session_dir):
         return jsonify({"error": "Session not found"}), 404
 
@@ -4881,7 +4898,7 @@ def _count_messages(raw: bytes) -> int:
 # How often to re-fetch messages.json purely to refresh the progress
 # bar. The stability check already fetches it occasionally; this adds
 # a periodic tick so the bar moves even while the file is growing.
-_PROGRESS_FETCH_INTERVAL = 60.0  # was 30.0
+_PROGRESS_FETCH_INTERVAL = 30.0  # was 30.0
 
 # If neither the file size nor the ASR/MT second counts have moved for
 # this long, emit one short heartbeat line so the panel doesn't look
@@ -5190,7 +5207,7 @@ def process_session_in_background(
 @app.route("/extract-video-subtitles/<path:session_id>", methods=["GET"])
 def extract_video_subtitles(session_id):
     """Extract embedded subtitles from video.mp4 to VTT files."""
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     video_path = os.path.join(session_dir, "video.mp4")
 
     if not os.path.exists(video_path):
@@ -6037,7 +6054,7 @@ def delete_video(video_key):
         sid for sid, s in sessions.items() if s.get("video_key") == video_key
     ]
     for sid in session_ids:
-        session_dir = os.path.join(SESSION_FOLDER, sid)
+        session_dir = _session_dir(sid)
         if os.path.isdir(session_dir):
             try:
                 shutil.rmtree(session_dir)
@@ -6188,21 +6205,27 @@ def _is_meaningful_file(path: str) -> bool:
 @app.route("/session-output/<path:session_id>", methods=["GET"])
 def get_session_output(session_id):
     """Get the session output as a JSON response with file URLs."""
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
 
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
         token = request.cookies.get("_forward_auth", "")
 
-    # Only download if files don't exist or are very small
-    server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
-    if token and _session_files_look_incomplete(session_dir):
-        logging.info(
-            "Session %s looks incomplete — re-downloading from %s",
-            _short_sid(session_id),
-            server_url,
-        )
-        download_session_files(session_id, token, server_url)
+    # ONLY download if the directory is empty or doesn't exist.
+    # The background worker is responsible for fetching the session's
+    # contents; this endpoint is just a read view.
+    if not os.path.isdir(session_dir) or not os.listdir(session_dir):
+        server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
+        if token:
+            logging.info(
+                "Session %s has no local files — triggering download from %s",
+                _short_sid(session_id),
+                server_url,
+            )
+            try:
+                download_session_files(session_id, token, server_url)
+            except _JobCancelled:
+                pass
 
     files = []
     if os.path.exists(session_dir):
@@ -6263,7 +6286,7 @@ def get_session_output(session_id):
 @app.route("/session-file/<path:session_id>/<filename>", methods=["GET"])
 def get_session_file(session_id, filename):
     """Download a specific file from the session."""
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     file_path = os.path.join(session_dir, filename)
 
     # Check if file exists
@@ -6684,7 +6707,7 @@ def session_refresh(session_id):
     if not token:
         return jsonify({"error": "No token provided"}), 401
 
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     if os.path.exists(session_dir):
         shutil.rmtree(session_dir)
     os.makedirs(session_dir, exist_ok=True)
@@ -6699,7 +6722,7 @@ def session_resync(session_id):
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
         return jsonify({"error": "No token"}), 401
-    session_dir = os.path.join(SESSION_FOLDER, session_id)
+    session_dir = _session_dir(session_id)
     if os.path.exists(session_dir):
         shutil.rmtree(session_dir)
     os.makedirs(session_dir, exist_ok=True)
@@ -7544,13 +7567,17 @@ def _upload_to_internal_server_and_register(
             logging.info("internal_upload: session id from response: %s", session_id)
 
         # Fallback: KIT LT's upload endpoint returned a generic "Success"
-        # page with no id. Encode only the session name itself rather
-        # than the full "/home/<user>/<session_name>" path, so the id
-        # stays short and human-recognisable in logs and URLs.
+        # page with no id. The real KIT deployment uses base64 of the
+        # full "/home/<user>/<session_name>" path as the session id —
+        # encoding only the session name produces a plausible-looking id
+        # that 404s on every subsequent poll.
         if not session_id and session_name:
-            session_id = base64.b64encode(session_name.encode("utf-8")).decode("ascii")
+            home_path = form_data.get("path") or "/home/admin@example.com"
+            full_path = f"{home_path.rstrip('/')}/{session_name}"
+            session_id = base64.b64encode(full_path.encode("utf-8")).decode("ascii")
             logging.info(
-                "internal_upload: generated short session id (base64 of name): %s",
+                "internal_upload: generated session id from path: %s → %s",
+                full_path,
                 session_id,
             )
 
@@ -7616,6 +7643,13 @@ def _upload_to_internal_server_and_register(
             "config": {"source": "internal_upload"},
             "expected_mt": expected_mt,
         }
+
+        # Pre-create the in-memory progress entry *before* returning.
+        # The client starts polling /job-progress the instant it receives
+        # the session id. Without this the first poll can beat the
+        # background worker to _job_start(), fall through to the
+        # "recover after restart" branch and spawn a duplicate worker.
+        _job_start(session_id, video_key, session_name)
 
         threading.Thread(
             target=process_session_in_background,

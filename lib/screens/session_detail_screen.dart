@@ -303,6 +303,8 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       ");"
       "})();";
 
+  Timer? _autoCheckTimer;
+
   // ─── Init ─────────────────────────────────────────────────────────
   @override
   void initState() {
@@ -317,6 +319,19 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     _loadJobHistory();
     _loadSavedSessionId();
     _fetchDetail();
+
+    // Poll the job status every 30 s while any job is still "Processing".
+    _autoCheckTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (!mounted) return;
+      final idx = _jobHistory
+          .indexWhere((j) => j['session_id'] == _savedSessionId);
+      if (idx == -1) return;
+      final status = _jobHistory[idx]['status'] as String? ?? '';
+      final hasOutput = _jobHistory[idx]['has_output'] as bool? ?? false;
+      if (!hasOutput && status.contains('Processing')) {
+        _checkOutput();
+      }
+    });
   }
 
   Future<void> _initServerConfig() async {
@@ -413,6 +428,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
   @override
   void dispose() {
+    _autoCheckTimer?.cancel();
     _saveJobSettings();
     _videoController?.removeListener(_onVideoProgress);
     _videoController?.dispose();
@@ -961,23 +977,31 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           final jobIndex = _jobHistory
               .indexWhere((job) => job['session_id'] == _savedSessionId);
 
-          if (jobIndex != -1) {
-            setState(() {
+          setState(() {
+            if (jobIndex != -1) {
               _jobHistory[jobIndex]['has_output'] = true;
               _jobHistory[jobIndex]['status'] = 'Completed ✅';
               _jobHistory[jobIndex]['output_files'] = totalFiles;
-            });
-            await _saveJobHistoryToPrefs();
-          } else {
-            await _saveJobToHistory(
-              sessionId: _savedSessionId,
-              sessionUrl: _savedSessionUrl,
-              sessionName: _sessionNameController.text.trim(),
-              status: 'Completed ✅',
-              hasOutput: true,
-              outputFiles: totalFiles,
-            );
-          }
+            } else {
+              // Entry missing — create it.
+              _jobHistory.insert(0, {
+                'session_id': _savedSessionId,
+                'session_url': _savedSessionUrl,
+                'session_name': _sessionNameController.text.trim(),
+                'timestamp': DateTime.now().toIso8601String(),
+                'date': _date,
+                'status': 'Completed ✅',
+                'has_output': true,
+                'output_files': totalFiles,
+                'input_languages': _inputLanguages.join(','),
+                'output_languages': _outputLanguages.join(','),
+                'availability': _availability,
+              });
+            }
+            _isCheckingOutput = false;
+            _outputStatus = '✅ Output is ready! Found $totalFiles files.';
+          });
+          await _saveJobHistoryToPrefs();
 
           if (mounted) {
             setState(() {
