@@ -6762,14 +6762,23 @@ def youtube_download_and_upload():
                 title = info.get("title", "youtube_video")
                 duration = info.get("duration", 0)
 
-            clean_title = re.sub(r'[\\/*?:"<>|]+', "_", title).strip()
-            clean_title = re.sub(r"\s+", "_", clean_title)  # spaces → _
-            filename = f"{clean_title}.mp4"
+            # Human-readable project name: keep spaces, only strip characters
+            # that are invalid in filenames.
+            display_title = re.sub(r'[\\/*?:"<>|]+', "", title).strip()
+            display_title = re.sub(r"\s+", " ", display_title)
+            display_title = display_title or "youtube_video"
+
+            # Safe on-disk filename: still uses underscores instead of spaces.
+            safe_title = re.sub(r'[\\/*?:"<>|]+', "_", title).strip()
+            safe_title = re.sub(r"\s+", "_", safe_title)
+            safe_title = safe_title or "youtube_video"
+
+            filename = f"{safe_title}.mp4"
             if len(filename) > 200:
                 name, ext = os.path.splitext(filename)
                 filename = f"{name[:195]}{ext}"
 
-            logging.info("📹 Video: %s", title)
+            logging.info("📹 Video: %s", display_title)
             logging.info("📹 Duration: %s seconds", duration)
             logging.info("📹 Filename: %s", filename)
 
@@ -6779,7 +6788,7 @@ def youtube_download_and_upload():
                 stage="info",
                 progress=0.08,
                 details={
-                    "title": title,
+                    "title": display_title,
                     "duration": duration,
                     "filename": filename,
                 },
@@ -7042,7 +7051,7 @@ def youtube_download_and_upload():
         video_key = str(uuid.uuid4())
         project = {
             "key": video_key,
-            "name": clean_title,
+            "name": display_title,
             "file_name": actual_filename,
             "uploaded": utc_now_iso(),
             "last_opened": None,
@@ -7076,18 +7085,18 @@ def youtube_download_and_upload():
             save_state()
 
         _progress_event(
-            download_id, f'Imported "{clean_title}"', stage="done", progress=1.0
+            download_id, f'Imported "{display_title}"', stage="done", progress=1.0
         )
         _progress_finish(
             download_id,
             details={
-                "title": clean_title,
+                "title": display_title,
                 "video_key": video_key,
             },
         )
 
         logging.info("=" * 60)
-        logging.info("✅ YouTube video uploaded successfully: %s", clean_title)
+        logging.info("✅ YouTube video uploaded successfully: %s", display_title)
         logging.info("=" * 60)
 
         return (
@@ -7095,14 +7104,14 @@ def youtube_download_and_upload():
                 {
                     "success": True,
                     "video_info": {
-                        "title": clean_title,
+                        "title": display_title,
                         "duration": duration,
                         "file_size": file_size,
                         "thumbnail": thumbnail_url,
                         "has_audio": has_audio,
                     },
                     "project": project,
-                    "message": f'Video "{clean_title}" imported successfully',
+                    "message": f'Video "{display_title}" imported successfully',
                     "filename": actual_filename,
                     "video_key": video_key,
                 }
