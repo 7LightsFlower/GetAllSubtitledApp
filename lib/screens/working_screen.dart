@@ -18,11 +18,11 @@ import 'package:http_parser/http_parser.dart';
 // ─── Helper for robust date parsing ────────────────────────────
 DateTime _parseDateTime(String dateStr) {
   try {
-    return DateTime.parse(dateStr);
+    return DateTime.parse(dateStr).toLocal();
   } catch (_) {
     final cleaned = dateStr.replaceFirst(RegExp(r'\+00:00(?=Z)'), '');
     try {
-      return DateTime.parse(cleaned);
+      return DateTime.parse(cleaned).toLocal();
     } catch (_) {
       return DateTime.now();
     }

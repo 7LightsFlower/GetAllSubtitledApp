@@ -82,7 +82,9 @@ class SessionDetail {
       segments: segments,
             greenscreenFileSize: json['greenscreen_file_size'] as int? ?? 0,
       greenscreenCreatedAt: json['greenscreen_created_at'] != null
-          ? DateTime.tryParse(json['greenscreen_created_at'] as String)
+          ? DateTime.tryParse(
+              json['greenscreen_created_at'] as String,
+            )?.toLocal()
           : null,
       greenscreenStatus:
           json['greenscreen_status'] as String? ?? 'pending',

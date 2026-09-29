@@ -487,6 +487,23 @@ def utc_now_iso():
     )
 
 
+def file_mtime_iso(path: str) -> str:
+    """File mtime as an ISO 8601 string with a 'Z' suffix (UTC).
+
+    Explicitly tagged as UTC so the client can convert to the
+    browser's local timezone for display. Without the suffix,
+    `DateTime.parse` in Dart treats the value as local time and the
+    displayed time is off by the viewer's offset from UTC.
+    """
+    return (
+        datetime.datetime.fromtimestamp(
+            os.path.getmtime(path), tz=datetime.timezone.utc
+        )
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+    
+
 def _public_base_url() -> str:
     """Base URL the browser should use, honouring the proxy chain.
 
@@ -3974,8 +3991,7 @@ def session_transcript_save_vtt(session_id):
         for file in os.listdir(session_dir):
             file_path = os.path.join(session_dir, file)
             if os.path.isfile(file_path) and _is_meaningful_file(file_path):
-                mtime = os.path.getmtime(file_path)
-                mod_time = datetime.datetime.fromtimestamp(mtime).isoformat()
+                mod_time = file_mtime_iso(file_path)
                 files.append(
                     {
                         "name": file,
@@ -5892,9 +5908,7 @@ def video_detail(video_key):
                 if os.path.exists(gs_path):
                     try:
                         gs_size = os.path.getsize(gs_path)
-                        gs_created_at = datetime.datetime.fromtimestamp(
-                            os.path.getmtime(gs_path)
-                        ).isoformat()
+                        gs_created_at = file_mtime_iso(gs_path)
                     except OSError:
                         pass
             detail["greenscreen_file_size"] = gs_size
@@ -6330,8 +6344,7 @@ def get_session_output(session_id):
         for file in os.listdir(session_dir):
             file_path = os.path.join(session_dir, file)
             if os.path.isfile(file_path) and _is_meaningful_file(file_path):
-                mtime = os.path.getmtime(file_path)
-                mod_time = datetime.datetime.fromtimestamp(mtime).isoformat()
+                mod_time = file_mtime_iso(file_path)
 
                 # For VTT files, use the local file URL
                 if file.endswith(".vtt"):

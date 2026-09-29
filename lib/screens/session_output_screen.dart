@@ -1765,7 +1765,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
   String _formatDate(String isoDate) {
     try {
-      final dateTime = DateTime.parse(isoDate);
+      final dateTime = DateTime.parse(isoDate).toLocal();
       final now = DateTime.now();
       final difference = now.difference(dateTime);
 
