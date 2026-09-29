@@ -1526,31 +1526,39 @@ def get_video_metadata(video_path):
 
 
 def curl_download(url, output_path, token):
-    """
-    Download a file using curl with authentication.
-    Returns True if successful, False otherwise.
-    """
+    """Download a file using curl. Returns True on a 2xx response
+    with a plausible body, False otherwise."""
     try:
         cmd = [
             "curl",
             "-s",
             "-L",
             "--insecure",
-            "-H",
-            f"X-Forward-Auth: {token}",
-            "-H",
-            f"Authorization: Bearer {token}",
-            "-H",
-            "User-Agent: Mozilla/5.0 (compatible; LT-Uploader/1.0)",
-            "--cookie",
-            f"_forward_auth={token}",
-            "-o",
-            output_path,
+            "-H", f"X-Forward-Auth: {token}",
+            "-H", f"Authorization: Bearer {token}",
+            "-H", "User-Agent: Mozilla/5.0 (compatible; LT-Uploader/1.0)",
+            "--cookie", f"_forward_auth={token}",
+            "-w", "%{http_code}",          # ← write status code to stdout
+            "-o", output_path,
             url,
         ]
-        subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=300, check=False
+        )
+        status_str = (result.stdout or "").strip()
+        try:
+            status = int(status_str)
+        except ValueError:
+            status = 0
+
+        if status == 200 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
             return True
+
+        if status != 200:
+            logging.info("curl_download: %s → HTTP %s (discarding)", url, status)
+        else:
+            logging.info("curl_download: %s → 200 but body too small", url)
+
         if os.path.exists(output_path):
             os.remove(output_path)
         return False
@@ -1560,11 +1568,13 @@ def curl_download(url, output_path, token):
     except OSError as e:
         logging.warning("Curl error for %s: %s", url, str(e))
         return False
-
+    
 
 def curl_download_with_headers(url, output_path, token):
-    """
-    Download a file using curl with additional headers for authentication.
+    """Download a file using curl with an Accept: application/json header.
+
+    Retained for parity with curl_download; currently unused. Rejects
+    non-2xx responses the same way curl_download does.
     """
     try:
         cmd = [
@@ -1572,23 +1582,31 @@ def curl_download_with_headers(url, output_path, token):
             "-s",
             "-L",
             "--insecure",
-            "-H",
-            f"X-Forward-Auth: {token}",
-            "-H",
-            f"Authorization: Bearer {token}",
-            "-H",
-            "Accept: application/json",
-            "-H",
-            "User-Agent: Mozilla/5.0 (compatible; LT-Uploader/1.0)",
-            "--cookie",
-            f"_forward_auth={token}",
-            "-o",
-            output_path,
+            "-H", f"X-Forward-Auth: {token}",
+            "-H", f"Authorization: Bearer {token}",
+            "-H", "Accept: application/json",
+            "-H", "User-Agent: Mozilla/5.0 (compatible; LT-Uploader/1.0)",
+            "--cookie", f"_forward_auth={token}",
+            "-w", "%{http_code}",
+            "-o", output_path,
             url,
         ]
-        subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=300, check=False
+        )
+        try:
+            status = int((result.stdout or "").strip())
+        except ValueError:
+            status = 0
+
+        if status == 200 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
             return True
+
+        if status != 200:
+            logging.info(
+                "curl_download_with_headers: %s → HTTP %s (discarding)",
+                url, status,
+            )
         if os.path.exists(output_path):
             os.remove(output_path)
         return False
@@ -1598,7 +1616,7 @@ def curl_download_with_headers(url, output_path, token):
     except OSError as e:
         logging.warning("Curl error for %s: %s", url, str(e))
         return False
-
+    
 
 def extract_text_from_file(file_path):
     """Extract transcript text from a file."""
@@ -6280,28 +6298,32 @@ def _is_meaningful_file(path: str) -> bool:
 
 @app.route("/session-output/<path:session_id>", methods=["GET"])
 def get_session_output(session_id):
-    """Get the session output as a JSON response with file URLs."""
     session_dir = _session_dir(session_id)
 
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
         token = request.cookies.get("_forward_auth", "")
 
-    # ONLY download if the directory is empty or doesn't exist.
-    # The background worker is responsible for fetching the session's
-    # contents; this endpoint is just a read view.
-    if not os.path.isdir(session_dir) or not os.listdir(session_dir):
+    # Don't race the background worker. It's already going to fetch
+    # everything as soon as the KIT server says the session is ready.
+    with job_progress_lock:
+        job_running = session_id in _job_progress_store and not _job_progress_store[session_id].get("done")
+
+    if (
+        not job_running
+        and token
+        and (not os.path.isdir(session_dir) or not os.listdir(session_dir))
+    ):
         server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
-        if token:
-            logging.info(
-                "Session %s has no local files — triggering download from %s",
-                _short_sid(session_id),
-                server_url,
-            )
-            try:
-                download_session_files(session_id, token, server_url)
-            except _JobCancelled:
-                pass
+        logging.info(
+            "Session %s has no local files — triggering download from %s",
+            _short_sid(session_id),
+            server_url,
+        )
+        try:
+            download_session_files(session_id, token, server_url)
+        except _JobCancelled:
+            pass
 
     files = []
     if os.path.exists(session_dir):
