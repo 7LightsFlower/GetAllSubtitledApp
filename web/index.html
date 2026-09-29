@@ -34,6 +34,17 @@
   <link rel="manifest" href="manifest.json">
 </head>
 <body>
+  <script>
+  // Unregister any service worker left over from a previous build that
+  // used the default PWA strategy. Runs before Flutter boots, so the
+  // new (stub) service worker that Flutter registers takes effect
+    // immediately and never caches assets again.
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function (regs) {
+        regs.forEach(function (r) { r.unregister(); });
+      });
+    }
+  </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>
