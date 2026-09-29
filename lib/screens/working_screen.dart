@@ -152,9 +152,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
 
     final url = Uri.parse('$authBaseUrl/videos');
 
-    if (kDebugMode) {
-      print('📡 GET $url  (authBaseUrl="$authBaseUrl")');
-    }
+    debugPrint('📡 GET $url  (authBaseUrl="$authBaseUrl")');
 
     http.Response response;
     try {
@@ -162,7 +160,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
           .get(url, headers: {'Accept': 'application/json'})
           .timeout(const Duration(seconds: 15));
     } on TimeoutException {
-      if (kDebugMode) print('❌ Timed out after 15 s');
+      debugPrint('❌ Timed out after 15 s');
       if (mounted) {
         setState(() {
           _listError =
@@ -173,7 +171,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
       }
       return;
     } on http.ClientException catch (e) {
-      if (kDebugMode) print('❌ ClientException: $e');
+      debugPrint('❌ ClientException: $e');
       if (mounted) {
         setState(() {
           _listError =
@@ -185,7 +183,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
       }
       return;
     } catch (e) {
-      if (kDebugMode) print('❌ Unexpected network error: $e');
+      debugPrint('❌ Unexpected network error: $e');
       if (mounted) {
         setState(() {
           _listError = 'Network error while loading projects: $e';
@@ -201,10 +199,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
         ? response.body.substring(0, 200)
         : response.body;
 
-    if (kDebugMode) {
-      print('📡 status=${response.statusCode} content-type=$contentType');
-      print('📡 body preview: $bodyPreview');
-    }
+    debugPrint('📡 status=${response.statusCode} content-type=$contentType');
+    debugPrint('📡 body preview: $bodyPreview');
 
     if (response.statusCode != 200) {
       if (mounted) {
@@ -220,9 +216,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
 
     if (!contentType.contains('application/json') &&
         bodyPreview.trimLeft().startsWith('<')) {
-      if (kDebugMode) {
-        print('❌ Got HTML instead of JSON — wrong URL?');
-      }
+      debugPrint('❌ Got HTML instead of JSON — wrong URL?');
+
       if (mounted) {
         setState(() {
           _listError =
@@ -241,7 +236,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
     try {
       data = jsonDecode(response.body) as Map<String, dynamic>;
     } catch (e) {
-      if (kDebugMode) print('❌ JSON parse failed: $e');
+      debugPrint('❌ JSON parse failed: $e');
       if (mounted) {
         setState(() {
           _listError =
@@ -258,7 +253,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
               try {
                 return VideoProject.fromJson(e as Map<String, dynamic>);
               } catch (err) {
-                if (kDebugMode) print('❌ Error parsing project: $err');
+                debugPrint('❌ Error parsing project: $err');
                 return null;
               }
             })
@@ -297,16 +292,12 @@ class _WorkingScreenState extends State<WorkingScreen> {
           Uri.parse('$authBaseUrl/prepare-greenscreen/${p.key}'),
           headers: {'Content-Type': 'application/json'},
         );
-        if (kDebugMode) {
-          print('🧪 prepare-greenscreen requested for ${p.key}');
-        }
+        debugPrint('🧪 prepare-greenscreen requested for ${p.key}');
       } catch (e) {
         // If the request itself fails, allow a retry on the next
         // refresh by forgetting the key.
         _greenscreenTriggered.remove(p.key);
-        if (kDebugMode) {
-          print('prepare-greenscreen failed for ${p.key}: $e');
-        }
+        debugPrint('prepare-greenscreen failed for ${p.key}: $e');
       }
     }
 
@@ -655,10 +646,10 @@ class _WorkingScreenState extends State<WorkingScreen> {
         final videoUrl = await _getYouTubeVideoUrl(url);
         if (videoUrl != null) {
           resolvedUrls.add({'original': url, 'resolved': videoUrl});
-          if (kDebugMode) print('✅ Resolved YouTube URL: $url -> $videoUrl');
+          debugPrint('✅ Resolved YouTube URL: $url -> $videoUrl');
         } else {
           errors.add('Could not resolve YouTube URL: $url');
-          if (kDebugMode) print('❌ Failed to resolve YouTube URL: $url');
+          debugPrint('❌ Failed to resolve YouTube URL: $url');
         }
       } else if (_isValidUrl(url)) {
         resolvedUrls.add({'original': url, 'resolved': url});

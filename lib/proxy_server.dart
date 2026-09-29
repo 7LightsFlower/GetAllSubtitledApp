@@ -8,12 +8,8 @@ void main() async {
   const proxyPort = 8081;
 
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, proxyPort);
-  if (kDebugMode) {
-    print('🔄 Proxy running on http://localhost:$proxyPort');
-  }
-  if (kDebugMode) {
-    print('   Forwarding to https://$targetHost');
-  }
+    debugPrint('🔄 Proxy running on http://localhost:$proxyPort');
+    debugPrint('   Forwarding to https://$targetHost');
 
   final client = HttpClient()
     ..badCertificateCallback = (X509Certificate cert, String host, int port) => true;
@@ -28,12 +24,8 @@ void main() async {
         query: req.uri.query,
       );
 
-      if (kDebugMode) {
-        print('\n📥 Request: ${req.method} ${req.uri.path}');
-      }
-      if (kDebugMode) {
-        print('   Query: ${req.uri.query}');
-      }
+      debugPrint('\n📥 Request: ${req.method} ${req.uri.path}');
+      debugPrint('   Query: ${req.uri.query}');
 
       // Create proxy request
       final proxyReq = await client.openUrl(req.method, targetUri);
@@ -50,23 +42,14 @@ void main() async {
       final forwardedCookie = req.headers.value('X-Forwarded-Cookie');
       if (forwardedCookie != null && forwardedCookie.isNotEmpty) {
         proxyReq.headers.set('Cookie', forwardedCookie);
-        if (kDebugMode) {
-          print('🍪 Forwarded Cookie: $forwardedCookie');
-        }
-      } else {
-        if (kDebugMode) {
-          print('⚠️ No X-Forwarded-Cookie header found, trying regular Cookie...');
-        }
+          debugPrint('🍪 Forwarded Cookie: $forwardedCookie');
+          debugPrint('⚠️ No X-Forwarded-Cookie header found, trying regular Cookie...');
         final existingCookie = req.headers.value('Cookie');
         if (existingCookie != null && existingCookie.isNotEmpty) {
           proxyReq.headers.set('Cookie', existingCookie);
-          if (kDebugMode) {
-            print('🍪 Using regular Cookie: $existingCookie');
-          }
+          debugPrint('🍪 Using regular Cookie: $existingCookie');
         } else {
-          if (kDebugMode) {
-            print('❌ No cookie found in request!');
-          }
+          debugPrint('❌ No cookie found in request!');
         }
       }
 
@@ -79,15 +62,11 @@ void main() async {
 
       // Send request
       final proxyRes = await proxyReq.close();
-      if (kDebugMode) {
-        print('📤 Response status: ${proxyRes.statusCode}');
-      }
+        debugPrint('📤 Response status: ${proxyRes.statusCode}');
 
       // If the target returns 401, log it clearly
       if (proxyRes.statusCode == 401) {
-        if (kDebugMode) {
-          print('⚠️ Target server returned 401 – cookie may be invalid.');
-        }
+        debugPrint('⚠️ Target server returned 401 – cookie may be invalid.');
       }
 
       // Forward status and headers, but **remove** WWW-Authenticate to prevent browser login popup
@@ -102,9 +81,7 @@ void main() async {
       // Pipe body
       await proxyRes.pipe(req.response);
     } catch (e) {
-      if (kDebugMode) {
-        print('❌ Proxy error: $e');
-      }
+      debugPrint('❌ Proxy error: $e');
       req.response
         ..statusCode = 500
         ..write('Proxy error: $e')

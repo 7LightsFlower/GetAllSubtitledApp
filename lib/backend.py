@@ -702,6 +702,20 @@ def _ensure_greenscreen_fields(project: dict) -> dict:
     project.setdefault("greenscreen_progress", 0)
     return project
 
+def _ensure_job_history(project: dict) -> dict:
+    """Make sure every project carries a `job_history` list.
+
+    Old state files predate this field; add lazily on read. The list
+    is stored newest-first and capped client- and server-side at
+    MAX_JOB_HISTORY_ENTRIES. Idempotent.
+    """
+    project.setdefault("job_history", [])
+    return project
+
+
+# Cap on how many job-history entries we keep per video. Matches the
+# client-side cap so the two never drift.
+MAX_JOB_HISTORY_ENTRIES = 20
 
 def _note_404(session_id: str, url: str) -> int:
     """Bump and return the consecutive-404 counter for a session.
@@ -5868,8 +5882,70 @@ def video_detail(video_key):
             detail["greenscreen_file_size"] = gs_size
             detail["greenscreen_created_at"] = gs_created_at
 
+            _ensure_job_history(project)
+            detail["job_history"] = list(project["job_history"])
             return jsonify(detail), 200
     return jsonify({"error": "Video not found"}), 404
+
+
+@app.route(
+    "/video-job-history/<video_key>",
+    methods=["GET", "PUT", "DELETE", "OPTIONS"],
+)
+def video_job_history(video_key):
+    """Server-side job history for one video.
+
+    GET    → the whole list, newest first
+    PUT    → replace the whole list (payload must be a JSON list)
+    DELETE → clear the list
+
+    The list is stored on the project dict and therefore persisted in
+    `server_state.pkl` like everything else. It's shared between all
+    browsers/clients that talk to this backend.
+    """
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    project = next((v for v in videos if v.get("key") == video_key), None)
+    if project is None:
+        return jsonify({"error": "Video not found"}), 404
+
+    _ensure_job_history(project)
+
+    if request.method == "GET":
+        # Snapshot so a concurrent write can't mutate the list while
+        # Flask is serialising it.
+        return jsonify(list(project["job_history"])), 200
+
+    if request.method == "DELETE":
+        project["job_history"] = []
+        save_state()
+        logging.info(
+            "job-history: cleared for video %s", video_key
+        )
+        return jsonify({"success": True, "count": 0}), 200
+
+    # PUT — replace the whole list
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, list):
+        return (
+            jsonify({"error": "Expected a JSON list in the request body"}),
+            400,
+        )
+
+    # Defensive: drop non-dict entries, cap length.
+    cleaned = [e for e in payload if isinstance(e, dict)]
+    if len(cleaned) > MAX_JOB_HISTORY_ENTRIES:
+        cleaned = cleaned[:MAX_JOB_HISTORY_ENTRIES]
+
+    project["job_history"] = cleaned
+    save_state()
+    logging.info(
+        "job-history: saved %d entries for video %s",
+        len(cleaned),
+        video_key,
+    )
+    return jsonify({"success": True, "count": len(cleaned)}), 200
 
 
 @app.route("/media/<video_key>")

@@ -55,7 +55,7 @@ class InternalAuthService {
     await prefs.setString(_manualTokenKey, token);
     // Also store as access token for compatibility
     await prefs.setString(_accessTokenKey, token);
-    if (kDebugMode) print('✅ Manual token set');
+    debugPrint('✅ Manual token set');
   }
 
   static Future<void> clearManualToken() async {
@@ -65,7 +65,7 @@ class InternalAuthService {
     await prefs.remove(_refreshTokenKey);
     await prefs.remove(_expiryKey);
     await prefs.remove(_emailKey);
-    if (kDebugMode) print('✅ Manual token cleared');
+    debugPrint('✅ Manual token cleared');
   }
 
   static Future<String?> getManualToken() async {
@@ -78,7 +78,7 @@ class InternalAuthService {
   static Future<bool> loginWithOAuth() async {
     try {
       final verifier = _generateCodeVerifier();
-      if (kDebugMode) print('🔑 Generated verifier: $verifier');
+      debugPrint('🔑 Generated verifier: $verifier');
 
       final challenge = _generateCodeChallenge(verifier);
 
@@ -128,13 +128,13 @@ class InternalAuthService {
         );
       }
 
-      if (kDebugMode) print('🔐 Full redirect URL: $redirectUrl');
+      debugPrint('🔐 Full redirect URL: $redirectUrl');
       final uri = Uri.parse(redirectUrl);
       final code = uri.queryParameters['code'];
-      if (kDebugMode) print('🔑 Extracted code: $code');
+      debugPrint('🔑 Extracted code: $code');
 
       if (code == null) {
-        if (kDebugMode) print('No code in redirect');
+        debugPrint('No code in redirect');
         return false;
       }
 
@@ -154,11 +154,9 @@ class InternalAuthService {
         },
       );
 
-      if (tokenResponse.statusCode != 200) {
-        if (kDebugMode) {
-          print('❌ Token exchange failed: ${tokenResponse.statusCode}');
-          print('❌ Body: ${tokenResponse.body}');
-        }
+      if (tokenResponse.statusCode != 200) {      
+        debugPrint('❌ Token exchange failed: ${tokenResponse.statusCode}');
+        debugPrint('❌ Body: ${tokenResponse.body}');
         return false;
       }
 
@@ -168,7 +166,7 @@ class InternalAuthService {
       final expiresIn = data['expires_in'] ?? 3600;
 
       if (accessToken == null) {
-        if (kDebugMode) print('❌ No access token in response');
+        debugPrint('❌ No access token in response');
         return false;
       }
 
@@ -183,10 +181,10 @@ class InternalAuthService {
       // Cache email
       await getUserEmail();
 
-      if (kDebugMode) print('✅ OAuth login successful, token stored');
+      debugPrint('✅ OAuth login successful, token stored');
       return true;
     } catch (e) {
-      if (kDebugMode) print('❌ OAuth login error: $e');
+      debugPrint('❌ OAuth login error: $e');
       return false;
     }
   }
@@ -202,7 +200,7 @@ class InternalAuthService {
 
     final verifier = html.window.sessionStorage['dex_verifier'];
     if (verifier == null) {
-      if (kDebugMode) print('No verifier found in sessionStorage');
+      debugPrint('No verifier found in sessionStorage');
       return false;
     }
 
@@ -224,7 +222,7 @@ class InternalAuthService {
     );
 
     if (tokenResponse.statusCode != 200) {
-      if (kDebugMode) print('Token exchange failed: ${tokenResponse.body}');
+      debugPrint('Token exchange failed: ${tokenResponse.body}');
       return false;
     }
 
@@ -245,7 +243,7 @@ class InternalAuthService {
 
     html.window.sessionStorage.remove('dex_verifier');
     await getUserEmail();
-    if (kDebugMode) print('✅ OAuth login successful (redirect flow)');
+    debugPrint('✅ OAuth login successful (redirect flow)');
     return true;
   }
 
@@ -280,7 +278,7 @@ class InternalAuthService {
     // Check for manual token first
     final manualToken = prefs.getString(_manualTokenKey);
     if (manualToken != null && manualToken.isNotEmpty) {
-      if (kDebugMode) print('🔑 Using manual token');
+      debugPrint('🔑 Using manual token');
       return manualToken;
     }
     
@@ -289,7 +287,7 @@ class InternalAuthService {
     final expiryStr = prefs.getString(_expiryKey);
 
     if (accessToken == null) {
-      if (kDebugMode) print('🔍 No access token – returning null');
+      debugPrint('🔍 No access token – returning null');
       return null;
     }
 
@@ -303,7 +301,7 @@ class InternalAuthService {
 
     // Token expired – try to refresh
     if (refreshToken != null) {
-      if (kDebugMode) print('🔄 Token expired – attempting refresh...');
+      debugPrint('🔄 Token expired – attempting refresh...');
       try {
         final credentials = base64Encode(utf8.encode('$dexClientId:$dexClientSecret'));
         final response = await http.post(
@@ -329,18 +327,18 @@ class InternalAuthService {
             }
             final newExpiry = DateTime.now().toUtc().add(Duration(seconds: expiresIn));
             await prefs.setString(_expiryKey, newExpiry.toIso8601String());
-            if (kDebugMode) print('✅ Refresh successful – returning new token');
+            debugPrint('✅ Refresh successful – returning new token');
             return newAccessToken;
           }
         } else {
-          if (kDebugMode) print('❌ Refresh failed: ${response.statusCode}');
+          debugPrint('❌ Refresh failed: ${response.statusCode}');
         }
       } catch (e) {
-        if (kDebugMode) print('❌ Refresh error: $e');
+        debugPrint('❌ Refresh error: $e');
       }
     }
 
-    if (kDebugMode) print('❌ Token refresh failed – clearing tokens');
+    debugPrint('❌ Token refresh failed – clearing tokens');
     await clearTokens();
     return null;
   }
@@ -361,7 +359,7 @@ class InternalAuthService {
     final prefs = await SharedPreferences.getInstance();
     final manualToken = prefs.getString(_manualTokenKey);
     if (manualToken != null && manualToken.isNotEmpty) {
-      if (kDebugMode) print('🔑 getToken: Using manual token');
+      debugPrint('🔑 getToken: Using manual token');
       return manualToken;
     }
 
@@ -393,7 +391,7 @@ class InternalAuthService {
         return null;
       }
     } catch (e) {
-      if (kDebugMode) print('❌ Error fetching token: $e');
+      debugPrint('❌ Error fetching token: $e');
       return null;
     }
   }
@@ -411,13 +409,13 @@ class InternalAuthService {
     final prefs = await SharedPreferences.getInstance();
     final cached = prefs.getString(_emailKey);
     if (cached != null && cached.isNotEmpty) {
-      if (kDebugMode) print('📧 Using cached email: $cached');
+      debugPrint('📧 Using cached email: $cached');
       return cached;
     }
 
     final token = await getValidAccessToken();
     if (token == null) {
-      if (kDebugMode) print('❌ No valid token to fetch userinfo');
+      debugPrint('❌ No valid token to fetch userinfo');
       return null;
     }
 
@@ -431,14 +429,14 @@ class InternalAuthService {
         final email = data['email'] as String?;
         if (email != null && email.isNotEmpty) {
           await prefs.setString(_emailKey, email);
-          if (kDebugMode) print('📧 Fetched and cached email: $email');
+          debugPrint('📧 Fetched and cached email: $email');
           return email;
         }
       } else {
-        if (kDebugMode) print('❌ Userinfo failed: ${response.statusCode}');
+        debugPrint('❌ Userinfo failed: ${response.statusCode}');
       }
     } catch (e) {
-      if (kDebugMode) print('❌ Error fetching userinfo: $e');
+      debugPrint('❌ Error fetching userinfo: $e');
     }
     return null;
   }

@@ -1,6 +1,5 @@
 // register_screen.dart
 import 'package:asr_live_translator/constants.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
@@ -56,10 +55,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
       );
 
       // --- DEBUG: print full response ---
-      if (kDebugMode) {
-        print('Registration status: ${response.statusCode}');
-        print('Registration body: ${response.body}');
-      }
+      debugPrint('Registration status: ${response.statusCode}');
+      debugPrint('Registration body: ${response.body}');
 
       if (response.statusCode == 201 || response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -101,9 +98,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
       }
     } catch (e) {
       _showSnackBar('Network error: $e', Colors.red);
-      if (kDebugMode) {
-        print('Registration exception: $e');
-      }
+      debugPrint('Registration exception: $e');
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }

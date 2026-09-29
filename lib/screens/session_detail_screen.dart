@@ -10,7 +10,6 @@ import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:asr_live_translator/models/language_config.dart';
 import 'package:asr_live_translator/services/server_config_service.dart';
 import 'package:asr_live_translator/widgets/job_progress_panel.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -385,7 +384,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         _pauseController.text = data['pause'] as String? ?? _pauseController.text;
       });
     } catch (e) {
-      if (kDebugMode) print('Error loading job settings: $e');
+      debugPrint('Error loading job settings: $e');
     }
   }
 
@@ -415,7 +414,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       };
       await prefs.setString(_kSettingsKey, jsonEncode(data));
     } catch (e) {
-      if (kDebugMode) print('Error saving job settings: $e');
+      debugPrint('Error saving job settings: $e');
     }
   }
 
@@ -596,22 +595,88 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   Future<void> _loadJobHistory() async {
     setState(() => _isLoadingHistory = true);
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final key = 'job_history_${widget.videoKey}';
-      final jsonString = prefs.getString(key);
-      if (jsonString != null && jsonString.isNotEmpty) {
-        final List<dynamic> history = jsonDecode(jsonString);
-        if (!mounted) return;
+      // If this browser still has an old local copy from the previous
+      // SharedPreferences implementation, push it to the server once.
+      await _migrateLocalJobHistoryIfNeeded();
+
+      final url = Uri.parse(
+          '$flaskServerUrl/video-job-history/${widget.videoKey}');
+      final response =
+          await http.get(url).timeout(const Duration(seconds: 10));
+
+      if (!mounted) return;
+
+      if (response.statusCode == 200) {
+        final List<dynamic> raw = jsonDecode(response.body);
         setState(() {
-          _jobHistory = history.cast<Map<String, dynamic>>();
+          _jobHistory = raw
+              .whereType<Map>()
+              .map((e) => e.cast<String, dynamic>())
+              .toList();
           _jobHistory.sort((a, b) =>
               (b['timestamp'] ?? '').compareTo(a['timestamp'] ?? ''));
         });
+      } else if (response.statusCode == 404) {
+        setState(() => _jobHistory = []);
+      } else {
+        debugPrint('loadJobHistory: HTTP ${response.statusCode}');
       }
     } catch (e) {
-      if (kDebugMode) print('Error loading job history: $e');
+      debugPrint('Error loading job history: $e');
     } finally {
       if (mounted) setState(() => _isLoadingHistory = false);
+    }
+  }
+
+  /// One-time migration: if this browser has job history in
+  /// SharedPreferences from the previous (client-only) implementation,
+  /// and the server doesn't yet have any for this video, push the local
+  /// copy to the server and clear it locally.
+  ///
+  /// Safe to call on every load: it no-ops when there's nothing to do.
+  Future<void> _migrateLocalJobHistoryIfNeeded() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final key = 'job_history_${widget.videoKey}';
+      final local = prefs.getString(key);
+      if (local == null || local.isEmpty) return;
+
+      final url = Uri.parse(
+          '$flaskServerUrl/video-job-history/${widget.videoKey}');
+
+      // Probe the server first — if it already has data, the local
+      // copy is stale and we drop it.
+      final probe = await http.get(url).timeout(const Duration(seconds: 10));
+      if (probe.statusCode != 200) return;
+
+      final List<dynamic> serverList = jsonDecode(probe.body);
+      if (serverList.isNotEmpty) {
+        await prefs.remove(key);
+        return;
+      }
+
+      // Server is empty and local has data: migrate.
+      final List<dynamic> localList = jsonDecode(local);
+      if (localList.isEmpty) {
+        await prefs.remove(key);
+        return;
+      }
+
+      final putResp = await http
+          .put(
+            url,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(localList),
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (putResp.statusCode == 200) {
+        await prefs.remove(key);
+        debugPrint(
+              'Migrated ${localList.length} local job-history entries to server');
+      }
+    } catch (e) {
+      debugPrint('Job-history migration skipped: $e');
     }
   }
 
@@ -623,82 +688,70 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     required bool hasOutput,
     int outputFiles = 0,
   }) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final key = 'job_history_${widget.videoKey}';
+    final existingIndex = _jobHistory
+        .indexWhere((job) => job['session_id'] == sessionId);
 
-      final existingIndex = _jobHistory
-          .indexWhere((job) => job['session_id'] == sessionId);
-
-      if (existingIndex != -1) {
-        _jobHistory[existingIndex]['status'] = status;
-        _jobHistory[existingIndex]['has_output'] = hasOutput;
-        if (outputFiles > 0) {
-          _jobHistory[existingIndex]['output_files'] = outputFiles;
-        }
-      } else {
-        final jobEntry = {
-          'session_id': sessionId,
-          'session_url': sessionUrl,
-          'session_name': sessionName,
-          'timestamp': DateTime.now().toIso8601String(),
-          'date': _date,
-          'status': status,
-          'has_output': hasOutput,
-          'output_files': outputFiles,
-          'input_languages': _inputLanguages.join(','),
-          'output_languages': _outputLanguages.join(','),
-          'availability': _availability,
-        };
-        _jobHistory.insert(0, jobEntry);
+    if (existingIndex != -1) {
+      _jobHistory[existingIndex]['status'] = status;
+      _jobHistory[existingIndex]['has_output'] = hasOutput;
+      if (outputFiles > 0) {
+        _jobHistory[existingIndex]['output_files'] = outputFiles;
       }
-
-      if (_jobHistory.length > 20) {
-        _jobHistory = _jobHistory.sublist(0, 20);
-      }
-
-      final jsonString = jsonEncode(_jobHistory);
-      await prefs.setString(key, jsonString);
-
-      if (mounted) setState(() {});
-    } catch (e) {
-      if (kDebugMode) print('Error saving job history: $e');
+    } else {
+      final jobEntry = {
+        'session_id': sessionId,
+        'session_url': sessionUrl,
+        'session_name': sessionName,
+        'timestamp': DateTime.now().toIso8601String(),
+        'date': _date,
+        'status': status,
+        'has_output': hasOutput,
+        'output_files': outputFiles,
+        'input_languages': _inputLanguages.join(','),
+        'output_languages': _outputLanguages.join(','),
+        'availability': _availability,
+      };
+      _jobHistory.insert(0, jobEntry);
     }
+
+    if (_jobHistory.length > 20) {
+      _jobHistory = _jobHistory.sublist(0, 20);
+    }
+
+    if (mounted) setState(() {});
+    await _saveJobHistoryToServer();
   }
 
-  Future<void> _saveJobHistoryToPrefs() async {
+  Future<void> _saveJobHistoryToServer() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final key = 'job_history_${widget.videoKey}';
-      final jsonString = jsonEncode(_jobHistory);
-      await prefs.setString(key, jsonString);
+      final url = Uri.parse(
+          '$flaskServerUrl/video-job-history/${widget.videoKey}');
+      final response = await http
+          .put(
+            url,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(_jobHistory),
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode != 200) {
+        debugPrint(
+            'saveJobHistory: HTTP ${response.statusCode} ${response.body}');
+      }
     } catch (e) {
-      if (kDebugMode) print('Error saving job history: $e');
+      debugPrint('Error saving job history: $e');
     }
   }
 
   Future<void> _deleteJobFromHistory(String sessionId) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final key = 'job_history_${widget.videoKey}';
+    _jobHistory.removeWhere((job) => job['session_id'] == sessionId);
+    if (mounted) setState(() {});
+    await _saveJobHistoryToServer();
 
-      _jobHistory.removeWhere((job) => job['session_id'] == sessionId);
-      final jsonString = jsonEncode(_jobHistory);
-      await prefs.setString(key, jsonString);
-
-      if (mounted) {
-        setState(() {});
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Job removed from history')),
-        );
-      }
-    } catch (e) {
-      if (kDebugMode) print('Error deleting job: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error deleting job: $e')),
-        );
-      }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Job removed from history')),
+      );
     }
   }
 
@@ -725,15 +778,23 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
     if (confirm == true) {
       try {
-        final prefs = await SharedPreferences.getInstance();
-        final key = 'job_history_${widget.videoKey}';
-        await prefs.remove(key);
-        setState(() {
-          _jobHistory.clear();
-        });
-        if (mounted) {
+        final url = Uri.parse(
+            '$flaskServerUrl/video-job-history/${widget.videoKey}');
+        final response =
+            await http.delete(url).timeout(const Duration(seconds: 10));
+        if (!mounted) return;
+
+        if (response.statusCode == 200) {
+          setState(() => _jobHistory.clear());
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('History cleared')),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                  'Failed to clear history: HTTP ${response.statusCode}'),
+            ),
           );
         }
       } catch (e) {
@@ -1017,7 +1078,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
             _isCheckingOutput = false;
             _outputStatus = '✅ Output is ready! Found $totalFiles files.';
           });
-          await _saveJobHistoryToPrefs();
+          await _saveJobHistoryToServer();
 
           if (mounted) {
             setState(() {
@@ -1103,7 +1164,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         if (idx != -1) {
           _jobHistory[idx]['status'] = 'Cancelled 🛑';
           _jobHistory[idx]['has_output'] = false;
-          await _saveJobHistoryToPrefs();
+          await _saveJobHistoryToServer();
         }
 
         setState(() {
@@ -1182,7 +1243,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
             _jobHistory[jobIndex]['status'] = 'Completed ✅';
             _jobHistory[jobIndex]['output_files'] = totalFiles;
           });
-          await _saveJobHistoryToPrefs();
+          await _saveJobHistoryToServer();
 
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
@@ -1319,14 +1380,12 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
     try {
       final token = await _getToken();
-      if (kDebugMode) print('🚀 [UPLOAD] Using token: $token');
+      debugPrint('🚀 [UPLOAD] Using token: $token');
 
       const userEmail = 'admin@example.com';
 
-      final localMediaUrl = Uri.parse('$authBaseUrl/media/${widget.videoKey}');
-      if (kDebugMode) {
-        print('🌐 [DEBUG] Fetching video from local server: $localMediaUrl');
-      }
+      final localMediaUrl = Uri.parse('$authBaseUrl/media/${widget.videoKey}');      
+      debugPrint('🌐 [DEBUG] Fetching video from local server: $localMediaUrl');
 
       http.Response localResponse = await http.get(localMediaUrl);
       if (localResponse.statusCode != 200) {
@@ -1347,9 +1406,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         throw Exception('Video file is empty.');
       }
 
-      if (kDebugMode) {
-        print('✅ [DEBUG] Video fetched from local: ${videoBytes.length} bytes');
-      }
+      debugPrint('✅ [DEBUG] Video fetched from local: ${videoBytes.length} bytes');
 
       await _uploadToInternalServer(
         videoBytes: videoBytes,
@@ -1382,7 +1439,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         pause: double.tryParse(_pauseController.text.trim()) ?? 2.0,
       );
     } catch (e) {
-      if (kDebugMode) print('❌ [DEBUG] Exception caught: $e');
+      debugPrint('❌ [DEBUG] Exception caught: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -1664,18 +1721,14 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   }
 
   void _printSessionLink() {
-    if (_sessionUrl.isNotEmpty && kDebugMode) {
-      if (kDebugMode) {
-        print('═══════════════════════════════════════════════════════════');
-      }
-      if (kDebugMode) print('📎 SESSION LINK:');
-      if (kDebugMode) print(_sessionUrl);
-      if (kDebugMode) {
-        print('═══════════════════════════════════════════════════════════');
-      }
+    if (_sessionUrl.isNotEmpty) {
+      debugPrint('═══════════════════════════════════════════════════════════');
+      debugPrint('📎 SESSION LINK:');
+      debugPrint(_sessionUrl);
+      debugPrint('═══════════════════════════════════════════════════════════');
     }
-    if (_sessionId.isNotEmpty && kDebugMode) {
-      if (kDebugMode) print('🆔 SESSION ID: $_sessionId');
+    if (_sessionId.isNotEmpty) {
+      debugPrint('🆔 SESSION ID: $_sessionId');
     }
   }
 

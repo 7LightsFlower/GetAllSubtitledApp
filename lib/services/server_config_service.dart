@@ -21,7 +21,7 @@ class ServerConfigService {
         internalServerUrl = defaultInternalServerUrl;
       }
     } catch (e) {
-      if (kDebugMode) print('ServerConfigService.load error: $e');
+      debugPrint('ServerConfigService.load error: $e');
       internalServerUrl = defaultInternalServerUrl;
     } finally {
       _loaded = true;
@@ -38,7 +38,7 @@ class ServerConfigService {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_prefKey, url);
     } catch (e) {
-      if (kDebugMode) print('ServerConfigService.setServer error: $e');
+      debugPrint('ServerConfigService.setServer error: $e');
     }
   }
 
