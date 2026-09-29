@@ -316,8 +316,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     _initServerConfig(); 
     _loadJobSettings();   
     _checkConnection();
-    _loadJobHistory();
-    _loadSavedSessionId();
+    _loadJobHistory().then((_) => _loadSavedSessionId());
     _fetchDetail();
 
     // Poll the job status every 30 s while any job is still "Processing".
@@ -558,16 +557,36 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   }
 
   Future<void> _loadSavedSessionId() async {
-    final sessionId = await InternalAuthService.getSessionId(widget.videoKey);
-    if (!mounted) return;
-    if (sessionId != null && sessionId.isNotEmpty) {
-      setState(() {
-        _savedSessionId = sessionId;
-        _hasSessionId = true;
-        _outputStatus =
-            '✅ Session ID loaded: $sessionId\nClick "Check Output" to see results.';
-      });
+    final stored = await InternalAuthService.getSessionId(widget.videoKey);
+
+    String resolvedId = (stored ?? '').trim();
+    String resolvedUrl = '';
+
+    if (resolvedId.isEmpty && _jobHistory.isNotEmpty) {
+      final newest = _jobHistory.first;
+      resolvedId = (newest['session_id'] as String? ?? '').trim();
+      resolvedUrl = newest['session_url'] as String? ?? '';
     }
+
+    if (!mounted || resolvedId.isEmpty) return;
+
+    setState(() {
+      _savedSessionId = resolvedId;
+      _savedSessionUrl = resolvedUrl;
+      _hasSessionId = true;
+
+      final idx =
+          _jobHistory.indexWhere((j) => j['session_id'] == resolvedId);
+      final hasOut =
+          idx != -1 && (_jobHistory[idx]['has_output'] as bool? ?? false);
+      final files =
+          idx != -1 ? (_jobHistory[idx]['output_files'] as int? ?? 0) : 0;
+
+      _outputStatus = hasOut
+          ? '✅ Output ready ($files files).'
+          : '✅ Session ID loaded: $resolvedId\n'
+              'Click "Check Output" to see results.';
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -931,11 +950,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
   Future<String> _getToken() async {
     final token = await InternalAuthService.getToken();
-    if (token == null || token.isEmpty) {
-      throw Exception(
-          'Not connected to internal server. Please click "Connect" or set a manual token first.');
-    }
-    return token;
+    return token ?? '';   // don't throw; caller decides
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -961,12 +976,13 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     }
 
     try {
-      final token = await _getToken();
+      final token = await InternalAuthService.getToken() ?? '';
       final url = '$flaskServerUrl/session-output/$_savedSessionId';
-
       final response = await http.get(
         Uri.parse(url),
-        headers: {'Authorization': 'Bearer $token'},
+        headers: {
+          if (token.isNotEmpty) 'Authorization': 'Bearer $token',
+        },
       );
 
       if (response.statusCode == 200) {
@@ -1118,6 +1134,15 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   }
 
   Future<void> _checkHistoricalOutput(String sessionId) async {
+    if (sessionId.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('⚠️ No session ID for this job')),
+        );
+      }
+      return;
+    }
+
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -1128,57 +1153,76 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     }
 
     try {
-      final token = await _getToken();
-      final url = '$flaskServerUrl/session-output/$sessionId';
+      // Do NOT require a token. The Flask backend serves whatever files
+      // it already has on disk; the token is only needed for it to fetch
+      // anything *missing* from the KIT server. If the user is offline,
+      // they still get the local status — which is what they asked for.
+      final token = await InternalAuthService.getToken() ?? '';
 
+      final url = '$flaskServerUrl/session-output/$sessionId';
       final response = await http.get(
         Uri.parse(url),
-        headers: {'Authorization': 'Bearer $token'},
+        headers: {
+          if (token.isNotEmpty) 'Authorization': 'Bearer $token',
+        },
       );
 
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final totalFiles = data['total_files'] ?? 0;
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final totalFiles = (data['total_files'] as num?)?.toInt() ?? 0;
+        final backendStatus = data['status'] as String? ?? 'processing';
 
         final jobIndex =
             _jobHistory.indexWhere((job) => job['session_id'] == sessionId);
+        if (jobIndex == -1) return;
 
-        if (jobIndex != -1) {
-          if (totalFiles > 0) {
-            setState(() {
-              _jobHistory[jobIndex]['has_output'] = true;
-              _jobHistory[jobIndex]['status'] = 'Completed ✅';
-              _jobHistory[jobIndex]['output_files'] = totalFiles;
-            });
-            await _saveJobHistoryToPrefs();
+        if (totalFiles > 0) {
+          setState(() {
+            _jobHistory[jobIndex]['has_output'] = true;
+            _jobHistory[jobIndex]['status'] = 'Completed ✅';
+            _jobHistory[jobIndex]['output_files'] = totalFiles;
+          });
+          await _saveJobHistoryToPrefs();
 
-            if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text('✅ Output ready! Found $totalFiles files.'),
-                  backgroundColor: Colors.green,
-                  duration: const Duration(seconds: 3),
-                ),
-              );
-              setState(() {});
-            }
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('✅ Output ready! Found $totalFiles files.'),
+                backgroundColor: Colors.green,
+                duration: const Duration(seconds: 3),
+              ),
+            );
+            setState(() {});
+          }
+        } else {
+          // No files on disk yet. Two sub-cases:
+          //  • still processing on the KIT server → tell them to wait;
+          //  • offline and nothing downloaded yet → tell them to connect.
+          final String msg;
+          if (token.isEmpty) {
+            msg = '🔌 Not connected — no files downloaded locally yet.\n'
+                'Connect to the internal server to fetch the output.';
+          } else if (backendStatus == 'ready') {
+            msg = '✅ Session processed, but no files are on disk yet.\n'
+                'Try "Check Status" again in a moment.';
           } else {
-            if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content:
-                      Text('⏳ Still processing... No output files found yet.'),
-                  duration: Duration(seconds: 3),
-                ),
-              );
-            }
+            msg = '⏳ Still processing... No output files found yet.';
+          }
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(msg),
+                duration: const Duration(seconds: 4),
+                backgroundColor: token.isEmpty ? Colors.orange : null,
+              ),
+            );
           }
         }
       } else {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('❌ Failed to check output: ${response.statusCode}'),
+              content: Text('❌ Failed to check output: HTTP ${response.statusCode}'),
               backgroundColor: Colors.red,
             ),
           );
@@ -2919,7 +2963,34 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   // ═══════════════════════════════════════════════════════════════════
 
   Widget _buildOutputCheckSection() {
-    if (!_hasSessionId) return const SizedBox.shrink();
+    if (!_hasSessionId) {
+      // No active session on this device, but the user may still have
+      // past jobs in the history. Don't draw the full "Current Session"
+      // card — just a one-line hint pointing at the history panel.
+      if (_jobHistory.isEmpty) return const SizedBox.shrink();
+      return Container(
+        margin: const EdgeInsets.only(top: 16),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.grey[50],
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.grey[300]!),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.info_outline, color: Colors.grey[600], size: 18),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'No session is active on this device right now. '
+                'Use Job History below to check or view past sessions.',
+                style: TextStyle(fontSize: 13, color: Colors.grey[700]),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
 
     final currentJobIndex =
         _jobHistory.indexWhere((job) => job['session_id'] == _savedSessionId);
