@@ -43,6 +43,7 @@ RUN flutter pub get
 ARG API_BASE_URL=""
 COPY . .
 RUN flutter build web --release --no-wasm-dry-run \
+    --pwa-strategy=none \
     --dart-define=API_BASE_URL=${API_BASE_URL}
 
 # ─────────────────────────────────────────────────────────────────────────────

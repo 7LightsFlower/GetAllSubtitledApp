@@ -442,6 +442,119 @@ def regenerate_missing_thumbnails():
         save_state()
         logging.info("🖼️ Regenerated %d thumbnail(s)", regenerated)
 
+def rebuild_videos_from_disk():
+    """Add `videos` entries for MP4s in UPLOAD_FOLDER that aren't
+    tracked in the state file yet.
+
+    Runs at startup, after load_state(). This is what makes the state
+    file self-healing: if server_state.pkl is lost or reset, the next
+    start repopulates the `videos` list from what's actually on disk.
+
+    Files are matched by `file_name`, so a project that is already
+    tracked — even one whose metadata drifted — is left untouched.
+
+    Does not delete anything. Deletion of entries for files that no
+    longer exist is handled by clean_missing_videos(), which runs
+    right after this in __main__.
+    """
+    if not os.path.isdir(UPLOAD_FOLDER):
+        return
+
+    known = {v.get("file_name") for v in videos if v.get("file_name")}
+    added = 0
+
+    for filename in sorted(os.listdir(UPLOAD_FOLDER)):
+        if not filename.lower().endswith(".mp4"):
+            continue
+        # Skip the derived artefacts the app creates alongside the
+        # original. These are not "videos" in the UI sense — they are
+        # stand-ins for the KIT pipeline.
+        if "__greenscreen" in filename or "_converted" in filename:
+            continue
+        if filename in known:
+            continue
+
+        file_path = os.path.join(UPLOAD_FOLDER, filename)
+        if not os.path.isfile(file_path):
+            continue
+
+        try:
+            size = os.path.getsize(file_path)
+            uploaded = file_mtime_iso(file_path)
+        except OSError as e:
+            logging.warning(
+                "rebuild_videos: skipping %s (stat failed: %s)", filename, e
+            )
+            continue
+
+        if size < 1000:
+            logging.warning(
+                "rebuild_videos: skipping %s (file too small: %d bytes)",
+                filename,
+                size,
+            )
+            continue
+
+        # Pick up the existing thumbnail if there is one. Naming
+        # convention: <stem>_thumb.jpg.
+        stem = os.path.splitext(filename)[0]
+        thumb_name = f"{stem}_thumb.jpg"
+        thumb_path = os.path.join(UPLOAD_FOLDER, thumb_name)
+        thumbnail_url = (
+            f"/thumbnails/{thumb_name}"
+            if os.path.exists(thumb_path)
+            else None
+        )
+
+        # Best-effort duration/fps. ffprobe is quick on a local file
+        # and the values are only used for display.
+        try:
+            duration, fps = get_video_metadata(file_path)
+        except (OSError, ValueError, TypeError):
+            duration, fps = 0.0, 0.0
+
+        # Name: prefer a human-readable title. Fall back to the
+        # filename stem if nothing better is available.
+        display_name = stem
+
+        videos.append(
+            {
+                "key": str(uuid.uuid4()),
+                "name": display_name,
+                "file_name": filename,
+                "uploaded": uploaded,
+                "last_opened": None,
+                "duration": duration,
+                "fps": fps,
+                "file_size": size,
+                "segment_count": 0,
+                "languages": ["en"],
+                "thumbnail_url": thumbnail_url,
+                "segmentation_done": False,
+                "segmentation_progress": 0,
+                # Mark so it's obvious in the debug endpoint that this
+                # entry was recovered rather than uploaded.
+                "_recovered": True,
+            }
+        )
+        added += 1
+
+    if added:
+        save_state()
+        logging.info(
+            "♻️ rebuild_videos_from_disk: recovered %d video(s) "
+            "from %s. Total videos now: %d",
+            added,
+            UPLOAD_FOLDER,
+            len(videos),
+        )
+    else:
+        logging.info(
+            "rebuild_videos_from_disk: no untracked videos found "
+            "(%d already tracked)",
+            len(videos),
+        )
+
 
 def parse_html_with_bs4(html_content):
     """Parse HTML content using BeautifulSoup if available."""
@@ -8164,6 +8277,32 @@ def debug_jobs():
 
 
 @app.route("/clear-videos", methods=["POST", "OPTIONS"])
+
+@app.route("/rebuild-videos-from-disk", methods=["POST", "OPTIONS"])
+def rebuild_videos_from_disk_endpoint():
+    """Reconcile the `videos` list with the MP4s present in
+    UPLOAD_FOLDER. Idempotent. Does not delete anything.
+    """
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    before = len(videos)
+    rebuild_videos_from_disk()
+    after = len(videos)
+
+    return (
+        jsonify(
+            {
+                "success": True,
+                "before": before,
+                "after": after,
+                "added": after - before,
+            }
+        ),
+        200,
+    )
+
+
 def clear_videos():
     """Wipe every project, file and piece of state.
 
@@ -8267,6 +8406,11 @@ if __name__ == "__main__":
 
     # Load saved state
     load_state()
+
+    # Reconcile the state file with what's actually on disk. This is
+    # what makes a lost or reset server_state.pkl self-heal: any MP4
+    # in UPLOAD_FOLDER that isn't tracked yet gets a fresh entry.
+    rebuild_videos_from_disk()
 
     # Clean up missing videos and orphaned data
     clean_missing_videos()
