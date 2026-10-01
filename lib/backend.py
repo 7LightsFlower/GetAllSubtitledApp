@@ -95,7 +95,7 @@ def add_no_cache_for_api(response):
             "/session-file/",
             "/session_languages/",
             "/session-languages/",
-            "/session_transcript_json/",            
+            "/session_transcript_json/",
             "/session-transcript-json/",
             "/session_tts/",
             "/session-tts/",
@@ -106,6 +106,7 @@ def add_no_cache_for_api(response):
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
     return response
+
 
 # Servers we are willing to forward uploads to. The client may only
 # pick from this list.
@@ -1020,20 +1021,21 @@ def _unroute_logs_from_session_panel(_exc):
     in before_request can only be reset once, so guard against the
     second call with a flag on `g`.
     """
-    if getattr(g, "_panel_log_reset", False):
+    if getattr(g, "panel_log_reset", False):
         return
 
     token = getattr(g, "_panel_log_token", None)
     if token is None:
         return
 
-    g._panel_log_reset = True
+    g.panel_log_reset = True
     try:
         _log_target.reset(token)
     except (ValueError, LookupError, RuntimeError):
         # Token was already reset (streaming teardown) or came from a
         # different context. Both are safe to ignore.
         pass
+
 
 def generate_mock_transcript():
     """Return a static sample transcript."""
@@ -2240,7 +2242,7 @@ def extract_transcripts_from_messages(messages_path):
                     # ── accept any of several text fields, not just "seq" ──
                     if isinstance(msg_data, dict):
                         sender = msg_data.get("sender", "")
-                        
+
                         # Skip TTS and lip-sync senders. These are synthesized audio
                         # messages that carry no text; the KIT front-end ignores them too
                         # (see the `startsWith("lip") / startsWith("tts")` branch in the
@@ -3961,9 +3963,9 @@ def session_tts(session_id, label):
     # KIT expects "<Language> Audio.wav" verbatim, with a literal space.
     filename = f"{label}.wav"
 
-    server = (
-        sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
-    ).rstrip("/")
+    server = (sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL).rstrip(
+        "/"
+    )
 
     # quote() encodes the space as %20 but leaves letters/dots alone.
     # Do NOT quote session_id — its trailing "==" is significant.
@@ -3985,7 +3987,7 @@ def session_tts(session_id, label):
     if token:
         upstream_headers["Authorization"] = f"Bearer {token}"
         upstream_headers["X-Forward-Auth"] = token
-        
+
     # Forward the browser's Range header so <audio> seeking works.
     if request.headers.get("Range"):
         upstream_headers["Range"] = request.headers["Range"]
@@ -4007,7 +4009,9 @@ def session_tts(session_id, label):
     if r.status_code >= 400:
         logging.info(
             "session_tts: upstream %s for %s (label=%r)",
-            r.status_code, kit_url, label,
+            r.status_code,
+            kit_url,
+            label,
         )
         return (
             jsonify({"error": f"Upstream returned {r.status_code}"}),
@@ -5261,7 +5265,7 @@ def wait_for_session_ready(
     last_size = -1
     stable_count = 0
     unauthorized_count = 0
-    
+
     # Quiet-period tracking for the readiness gate
     _quiet_baseline = 0
     _quiet_since = started
