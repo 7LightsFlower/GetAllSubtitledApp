@@ -44,10 +44,10 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 # Local uploads / session data — never commit
+# Local uploads / session data — never commit
 lib/uploads/
 lib/sessions/
-lib/session/
-lib/server_state.pkl
+lib/state/
 uploads/
 sessions/
 *.mp4
