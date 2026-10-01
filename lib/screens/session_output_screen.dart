@@ -3,6 +3,7 @@
 import 'package:asr_live_translator/theme/responsive.dart';
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:http/http.dart' as http;
 // ignore: deprecated_member_use, avoid_web_libraries_in_flutter
 import 'dart:html' as html;
@@ -11,6 +12,7 @@ import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:asr_live_translator/models/session_data.dart';
 import 'package:asr_live_translator/models/subtitle_track.dart';
+import 'package:asr_live_translator/models/tts_track.dart';
 import 'package:asr_live_translator/widgets/video_player_widget.dart';
 import 'package:asr_live_translator/widgets/transcript_view.dart';
 import 'package:asr_live_translator/widgets/chapter_seekbar.dart';
@@ -55,6 +57,93 @@ class VTTCue {
 
 enum SessionView { transcript, split, files }
 
+// ─── TTS AUDIO SOURCE SELECTOR ─────────────────────────────────────
+//
+// Mirrors the "Audio source" <select> in the KIT archive page: lets
+// the user swap the video's own audio for a synthesized TTS track in
+// any of the translated languages. `null` means "Original audio".
+class _TTSSelector extends StatelessWidget {
+  final List<TTSTrack> tracks;
+  final String? selected;
+  final ValueChanged<String?> onChanged;
+  final bool enabled;
+
+  const _TTSSelector({
+    required this.tracks,
+    required this.selected,
+    required this.onChanged,
+    this.enabled = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // Dedupe on the way in so a caller can never produce a broken menu.
+    final unique = <String, TTSTrack>{};
+    for (final t in tracks) {
+      unique.putIfAbsent(t.label, () => t);
+    }
+    final dedupedTracks = unique.values.toList();
+
+    final labels = dedupedTracks.map((t) => t.label).toSet();
+    final safeValue =
+        (selected != null && labels.contains(selected)) ? selected : null;
+
+    final items = <DropdownMenuItem<String?>>[
+      const DropdownMenuItem<String?>(
+        value: null,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.volume_up, size: 16),
+            SizedBox(width: 6),
+            Text('Original audio'),
+          ],
+        ),
+      ),
+      ...dedupedTracks.map(
+        (t) => DropdownMenuItem<String?>(
+          value: t.label,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.graphic_eq, size: 16),
+              const SizedBox(width: 6),
+              Text(t.label),
+            ],
+          ),
+        ),
+      ),
+    ];
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.grey.shade300),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String?>(
+          value: safeValue,
+          items: items,
+          onChanged: enabled ? onChanged : null,
+          isDense: true,
+          icon: const Icon(Icons.arrow_drop_down),
+          style: const TextStyle(fontSize: 13, color: Colors.black87),
+          selectedItemBuilder: (context) => items
+              .map(
+                (it) => Align(
+                  alignment: Alignment.centerLeft,
+                  child: it.child,
+                ),
+              )
+              .toList(),
+        ),
+      ),
+    );
+  }
+}
+
 class _SessionOutputScreenState extends State<SessionOutputScreen> {
   VideoPlayerController? _videoController;
   List<TranscriptData> _transcripts = [];
@@ -85,6 +174,14 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   // never picked. Drives the initial checkbox state in the dialog.
   List<String>? _embeddedLanguages;
 
+  String? _selectedTts;                // label of the currently-selected track
+  final AudioPlayer _ttsPlayer = AudioPlayer();   // package:audioplayers
+
+  List<TTSTrack> _ttsTracks = <TTSTrack>[];
+  
+  List<TTSTrack> get ttsTracks => _ttsTracks;
+  String? get selectedTts => _selectedTts;
+
   // Editing state. Owned by the State, not by build(), so
   // _buildEditableTranscript can be called on every rebuild without
   // leaking controllers.
@@ -103,6 +200,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
   @override
   void dispose() {
+    _ttsPlayer.dispose();
     _videoController?.removeListener(_onVideoProgress);
     _videoController?.dispose();
     _scrollController.dispose();
@@ -342,6 +440,31 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       if (_subtitleTracks.isNotEmpty && _selectedSubtitle == null) {
         _selectedSubtitle = _subtitleTracks.first.language;
       }
+    });
+  }
+
+  Future<void> _loadTTSTracks() async {
+    final languages = _transcripts.map((t) => t.language).toList();
+    final tracks = <TTSTrack>[];
+    final seenLabels = <String>{};
+
+    for (final lang in languages) {
+      final simple = _extractSimpleLanguage(lang);
+      if (simple.isEmpty || simple == 'Unknown') continue;
+
+      final label = '$simple Audio';
+      if (!seenLabels.add(label)) continue;   // ← skip duplicates
+      tracks.add(TTSTrack(
+        label: label,
+        url: '$flaskServerUrl/session-tts/${widget.sessionId}/'
+            '${Uri.encodeComponent(label)}',
+        language: simple,
+      ));
+    }
+
+    setState(() {
+      _ttsTracks = tracks;
+      _selectedTts = tracks.isNotEmpty ? tracks.first.label : null;
     });
   }
 
@@ -667,6 +790,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       }
 
       await _loadSubtitleTracks();
+      await _loadTTSTracks();
 
       setState(() => _isLoading = false);
     } catch (e) {
@@ -847,26 +971,84 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   }
 
   void _togglePlayPause() {
-    if (_videoController == null ||
-        !_videoController!.value.isInitialized) {
-      return;
-    }
-    if (_videoController!.value.isPlaying) {
-      _videoController!.pause();
+    final c = _videoController;
+    if (c == null || !c.value.isInitialized) return;
+
+    if (c.value.isPlaying) {
+      c.pause();
+      if (_selectedTts != null) _ttsPlayer.pause();
     } else {
-      _videoController!.play();
+      c.play();
+      if (_selectedTts != null) {
+        _ttsPlayer.seek(c.value.position);
+        _ttsPlayer.resume();
+      }
     }
     setState(() {});
   }
 
   void _seekTo(double seconds) {
-    if (_videoController == null ||
-        !_videoController!.value.isInitialized) {
+    final c = _videoController;
+    if (c == null || !c.value.isInitialized) return;
+    _lastCueText = null;
+    final target = Duration(milliseconds: (seconds * 1000).toInt());
+    c.seekTo(target);
+    if (_selectedTts != null) {
+      _ttsPlayer.seek(target);
+    }
+  }
+
+  /// Swap the audio source between the video's own track and a
+  /// synthesized TTS track. Called by _TTSSelector.onChanged.
+  Future<void> _applyTTSSource(String? label) async {
+    final video = _videoController;
+
+    // Always reset the audio state first so switching back and forth
+    // doesn't leave a stale track playing underneath.
+    await _ttsPlayer.stop();
+
+    if (label == null) {
+      // Back to the video's own audio.
+      setState(() => _selectedTts = null);
+      await video?.setVolume(1.0);
       return;
     }
-    _lastCueText = null;
-    _videoController!
-        .seekTo(Duration(milliseconds: (seconds * 1000).toInt()));
+
+    final track = _ttsTracks.firstWhere(
+      (t) => t.label == label,
+      orElse: () => _ttsTracks.first,
+    );
+
+    try {
+      // Mute the video so its original audio doesn't bleed through.
+      await video?.setVolume(0.0);
+
+      // Load the TTS track. audioplayers supports network URLs directly.
+      await _ttsPlayer.setSourceUrl(track.url);
+
+      // Sync playback position with the video, then mirror its state.
+      if (video != null && video.value.isInitialized) {
+        await _ttsPlayer.seek(video.value.position);
+        if (video.value.isPlaying) {
+          await _ttsPlayer.resume();
+        }
+      }
+
+      setState(() => _selectedTts = label);
+    } catch (e) {
+      debugPrint('Failed to load TTS track "$label": $e');
+      // Roll back so the UI doesn't claim a track is active when it isn't.
+      await video?.setVolume(1.0);
+      if (mounted) {
+        setState(() => _selectedTts = null);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ Failed to load TTS audio: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   void _jumpToChapter(ChapterData chapter) {
@@ -1512,6 +1694,14 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                                   onLanguageSelected: _selectLanguage,
                                   enabled: !_isEditingMode && !_isSaving,
                                 ),
+                                const SizedBox(width: 8),
+                                if (!_isEditingMode && _ttsTracks.isNotEmpty)
+                                  _TTSSelector(
+                                    tracks: _ttsTracks,
+                                    selected: _selectedTts,
+                                    enabled: !_isSaving,
+                                    onChanged: _applyTTSSource,
+                                  ),
                                 const Spacer(),
                                 if (_isEditingMode)
                                   Container(
@@ -1869,6 +2059,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
   }
 
+
   Widget _buildToolbar(TranscriptData currentTranscript) {
     return Container(
       width: double.infinity,
@@ -1941,75 +2132,49 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   /// opens the second panel; the matching "×" lives on the second panel
   /// itself (see _buildSplitTranscriptView).
   Widget _buildNormalToolbar(TranscriptData currentTranscript) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        return SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: ConstrainedBox(
-            constraints: BoxConstraints(minWidth: constraints.maxWidth),
-            child: IntrinsicWidth(
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  // ── Left group ────────────────────────────────
-                  IconButton(
-                    icon: const Icon(Icons.edit),
-                    onPressed:
-                        currentTranscript.segments.isNotEmpty && !_isSaving
-                            ? () => _enterEditMode(currentTranscript)
-                            : null,
-                    tooltip: 'Edit Transcript',
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.download),
-                    onPressed: _showExportDialog,
-                    tooltip: 'Export Transcript',
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.subtitles),
-                    onPressed: _isSaving ? null : _downloadCurrentVtt,
-                    tooltip: 'Download VTT',
-                  ),
+    final buttons = <Widget>[
+      IconButton(
+        icon: const Icon(Icons.edit),
+        onPressed: currentTranscript.segments.isNotEmpty && !_isSaving
+            ? () => _enterEditMode(currentTranscript)
+            : null,
+        tooltip: 'Edit Transcript',
+      ),
+      IconButton(
+        icon: const Icon(Icons.download),
+        onPressed: _showExportDialog,
+        tooltip: 'Export Transcript',
+      ),
+      IconButton(
+        icon: const Icon(Icons.subtitles),
+        onPressed: _isSaving ? null : _downloadCurrentVtt,
+        tooltip: 'Download VTT',
+      ),
+      const SizedBox(width: 12),
+      Container(width: 1, height: 28, color: Colors.grey.shade300),
+      const SizedBox(width: 12),
+      if (_view == SessionView.transcript)
+        IconButton(
+          icon: const Icon(Icons.add),
+          onPressed: () => _setView(SessionView.split),
+          tooltip: 'Add second panel',
+        )
+      else
+        const SizedBox(width: 48),
+      const SizedBox(width: 12),
+      Container(width: 1, height: 28, color: Colors.grey.shade300),
+      const SizedBox(width: 12),
+      IconButton(
+        icon: const Icon(Icons.video_settings),
+        onPressed: _updateVideoSubtitles,
+        tooltip: 'Update Video Subtitles',
+      ),
+    ];
 
-                  // ── Centre: + to add the second panel ─────────
-                  const SizedBox(width: 12),
-                  Container(
-                    width: 1,
-                    height: 28,
-                    color: Colors.grey.shade300,
-                  ),
-                  const SizedBox(width: 12),
-                  if (_view == SessionView.transcript)
-                    IconButton(
-                      icon: const Icon(Icons.add),
-                      onPressed: () => _setView(SessionView.split),
-                      tooltip: 'Add second panel',
-                    )
-                  else
-                    // Reserve the space so the layout doesn't jump when
-                    // the + disappears in split / files view.
-                    const SizedBox(width: 48),
-
-                  const SizedBox(width: 12),
-                  Container(
-                    width: 1,
-                    height: 28,
-                    color: Colors.grey.shade300,
-                  ),
-                  const SizedBox(width: 12),
-
-                  // ── Right group ───────────────────────────────
-                  IconButton(
-                    icon: const Icon(Icons.video_settings),
-                    onPressed: _updateVideoSubtitles,
-                    tooltip: 'Update Video Subtitles',
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(children: buttons),
     );
   }
+
 }
