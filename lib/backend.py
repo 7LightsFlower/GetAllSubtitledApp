@@ -24,7 +24,15 @@ from urllib.parse import quote
 
 import requests
 import yt_dlp
-from flask import Flask, g, jsonify, request, send_file
+from flask import (
+    Flask,
+    Response,
+    g,
+    jsonify,
+    request,
+    send_file,
+    stream_with_context,
+)
 from flask_cors import CORS
 from docx import Document
 from docx.shared import Pt, RGBColor
@@ -76,19 +84,21 @@ _USER_AGENT = (
 
 @app.after_request
 def add_no_cache_for_api(response):
-    """Never let the browser or any proxy cache API / session responses.
-
-    The web tier (index.html, main.dart.js, ...) is served by nginx and
-    gets its own cache policy. Everything Flask returns is dynamic and
-    must always be re-fetched.
-    """
+    """Disable client and intermediary caching for API responses."""
     if request.path.startswith(
         (
             "/job_progress/",
+            "/job-progress/",
             "/session_output/",
+            "/session-output/",
             "/session_file/",
+            "/session-file/",
             "/session_languages/",
-            "/session_transcript_json/",
+            "/session-languages/",
+            "/session_transcript_json/",            
+            "/session-transcript-json/",
+            "/session_tts/",
+            "/session-tts/",
             "/api/",
         )
     ):
@@ -96,7 +106,6 @@ def add_no_cache_for_api(response):
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
     return response
-
 
 # Servers we are willing to forward uploads to. The client may only
 # pick from this list.
@@ -442,6 +451,7 @@ def regenerate_missing_thumbnails():
         save_state()
         logging.info("🖼️ Regenerated %d thumbnail(s)", regenerated)
 
+
 def rebuild_videos_from_disk():
     """Add `videos` entries for MP4s in UPLOAD_FOLDER that aren't
     tracked in the state file yet.
@@ -501,9 +511,7 @@ def rebuild_videos_from_disk():
         thumb_name = f"{stem}_thumb.jpg"
         thumb_path = os.path.join(UPLOAD_FOLDER, thumb_name)
         thumbnail_url = (
-            f"/thumbnails/{thumb_name}"
-            if os.path.exists(thumb_path)
-            else None
+            f"/thumbnails/{thumb_name}" if os.path.exists(thumb_path) else None
         )
 
         # Best-effort duration/fps. ffprobe is quick on a local file
@@ -615,7 +623,7 @@ def file_mtime_iso(path: str) -> str:
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z")
     )
-    
+
 
 def _public_base_url() -> str:
     """Base URL the browser should use, honouring the proxy chain.
@@ -832,6 +840,7 @@ def _ensure_greenscreen_fields(project: dict) -> dict:
     project.setdefault("greenscreen_progress", 0)
     return project
 
+
 def _ensure_job_history(project: dict) -> dict:
     """Make sure every project carries a `job_history` list.
 
@@ -846,6 +855,7 @@ def _ensure_job_history(project: dict) -> dict:
 # Cap on how many job-history entries we keep per video. Matches the
 # client-side cap so the two never drift.
 MAX_JOB_HISTORY_ENTRIES = 20
+
 
 def _note_404(session_id: str, url: str) -> int:
     """Bump and return the consecutive-404 counter for a session.
@@ -951,6 +961,7 @@ _SESSION_SCOPED_ENDPOINTS = {
     "session_transcript_save_vtt",
     "download_session_zip",
     "session_messages_json",
+    "session_tts",
     "extract_video_subtitles",
     "update_video_subtitles",
     "session_languages",
@@ -978,18 +989,51 @@ def _route_logs_to_session_panel():
     setattr(g, "_panel_log_token", _log_target.set(("job", session_id)))
 
 
+@app.before_request
+def _capture_auth_token():
+    """Remember the most recent bearer token we saw.
+
+    The browser's native <audio> element cannot send custom headers,
+    so /session-tts has to fall back to a token the backend already
+    holds. Every request that does carry one seeds this cache, so by
+    the time the user picks a TTS track (which can only happen after
+    the screen has loaded its data) the token is there.
+    """
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[7:].strip()
+        if token:
+            _state["token"] = token
+            return
+    cookie = request.cookies.get("_forward_auth", "")
+    if cookie:
+        _state["token"] = cookie
+
+
 @app.teardown_request
 def _unroute_logs_from_session_panel(_exc):
-    """Restore the previous _log_target after the request finishes."""
+    """Restore the previous _log_target after the request finishes.
+
+    Flask calls this twice for streaming responses (`stream_with_context`
+    keeps the request context alive across the generator, so both the
+    initial and the streamed context get popped). The token we stashed
+    in before_request can only be reset once, so guard against the
+    second call with a flag on `g`.
+    """
+    if getattr(g, "_panel_log_reset", False):
+        return
+
     token = getattr(g, "_panel_log_token", None)
     if token is None:
         return
+
+    g._panel_log_reset = True
     try:
         _log_target.reset(token)
-    except (ValueError, LookupError):
-        # Token was created in a different context — safe to ignore.
+    except (ValueError, LookupError, RuntimeError):
+        # Token was already reset (streaming teardown) or came from a
+        # different context. Both are safe to ignore.
         pass
-
 
 def generate_mock_transcript():
     """Return a static sample transcript."""
@@ -1423,8 +1467,7 @@ def job_progress(session_id):
             if claimed:
                 video_key = persisted.get("video_key")
                 server_url = (
-                    sessions.get(session_id, {}).get("server")
-                    or INTERNAL_SERVER_URL
+                    sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
                 )
                 expected_mt = sessions.get(session_id, {}).get("expected_mt")
                 logging.info(
@@ -1664,12 +1707,18 @@ def curl_download(url, output_path, token):
             "-s",
             "-L",
             "--insecure",
-            "-H", f"X-Forward-Auth: {token}",
-            "-H", f"Authorization: Bearer {token}",
-            "-H", "User-Agent: Mozilla/5.0 (compatible; LT-Uploader/1.0)",
-            "--cookie", f"_forward_auth={token}",
-            "-w", "%{http_code}",          # ← write status code to stdout
-            "-o", output_path,
+            "-H",
+            f"X-Forward-Auth: {token}",
+            "-H",
+            f"Authorization: Bearer {token}",
+            "-H",
+            "User-Agent: Mozilla/5.0 (compatible; LT-Uploader/1.0)",
+            "--cookie",
+            f"_forward_auth={token}",
+            "-w",
+            "%{http_code}",  # ← write status code to stdout
+            "-o",
+            output_path,
             url,
         ]
         result = subprocess.run(
@@ -1681,7 +1730,11 @@ def curl_download(url, output_path, token):
         except ValueError:
             status = 0
 
-        if status == 200 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+        if (
+            status == 200
+            and os.path.exists(output_path)
+            and os.path.getsize(output_path) > 1000
+        ):
             return True
 
         if status != 200:
@@ -1698,7 +1751,7 @@ def curl_download(url, output_path, token):
     except OSError as e:
         logging.warning("Curl error for %s: %s", url, str(e))
         return False
-    
+
 
 def curl_download_with_headers(url, output_path, token):
     """Download a file using curl with an Accept: application/json header.
@@ -1712,13 +1765,20 @@ def curl_download_with_headers(url, output_path, token):
             "-s",
             "-L",
             "--insecure",
-            "-H", f"X-Forward-Auth: {token}",
-            "-H", f"Authorization: Bearer {token}",
-            "-H", "Accept: application/json",
-            "-H", "User-Agent: Mozilla/5.0 (compatible; LT-Uploader/1.0)",
-            "--cookie", f"_forward_auth={token}",
-            "-w", "%{http_code}",
-            "-o", output_path,
+            "-H",
+            f"X-Forward-Auth: {token}",
+            "-H",
+            f"Authorization: Bearer {token}",
+            "-H",
+            "Accept: application/json",
+            "-H",
+            "User-Agent: Mozilla/5.0 (compatible; LT-Uploader/1.0)",
+            "--cookie",
+            f"_forward_auth={token}",
+            "-w",
+            "%{http_code}",
+            "-o",
+            output_path,
             url,
         ]
         result = subprocess.run(
@@ -1729,13 +1789,18 @@ def curl_download_with_headers(url, output_path, token):
         except ValueError:
             status = 0
 
-        if status == 200 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+        if (
+            status == 200
+            and os.path.exists(output_path)
+            and os.path.getsize(output_path) > 1000
+        ):
             return True
 
         if status != 200:
             logging.info(
                 "curl_download_with_headers: %s → HTTP %s (discarding)",
-                url, status,
+                url,
+                status,
             )
         if os.path.exists(output_path):
             os.remove(output_path)
@@ -1746,7 +1811,7 @@ def curl_download_with_headers(url, output_path, token):
     except OSError as e:
         logging.warning("Curl error for %s: %s", url, str(e))
         return False
-    
+
 
 def extract_text_from_file(file_path):
     """Extract transcript text from a file."""
@@ -2175,6 +2240,15 @@ def extract_transcripts_from_messages(messages_path):
                     # ── accept any of several text fields, not just "seq" ──
                     if isinstance(msg_data, dict):
                         sender = msg_data.get("sender", "")
+                        
+                        # Skip TTS and lip-sync senders. These are synthesized audio
+                        # messages that carry no text; the KIT front-end ignores them too
+                        # (see the `startsWith("lip") / startsWith("tts")` branch in the
+                        # archive page JS). Left in, they resolve to useless labels like
+                        # "Transcript (Language 4)" and clutter the language dropdown.
+                        if sender.startswith(("tts:", "tts_", "lip:", "lip_")):
+                            continue
+
                         text = (
                             msg_data.get("seq")
                             or msg_data.get("text")
@@ -3874,6 +3948,90 @@ def session_messages_json(session_id):
     return jsonify({"error": "messages.json not found"}), 404
 
 
+@app.route("/session-tts/<path:session_id>/<path:label>", methods=["GET"])
+def session_tts(session_id, label):
+    """Stream the per-language TTS track from the KIT server.
+
+    The KIT archive page advertises TTS audio via <source> tags of the
+    form `/archivemediafile/{session_id}/{Language} Audio.wav`. We
+    rebuild that URL here and proxy the bytes through, so the browser
+    never has to know the KIT host or carry the bearer token itself.
+    """
+    # `label` arrives URL-decoded by Flask ("English Audio").
+    # KIT expects "<Language> Audio.wav" verbatim, with a literal space.
+    filename = f"{label}.wav"
+
+    server = (
+        sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
+    ).rstrip("/")
+
+    # quote() encodes the space as %20 but leaves letters/dots alone.
+    # Do NOT quote session_id — its trailing "==" is significant.
+    kit_url = f"{server}/archivemediafile/{session_id}/{quote(filename)}"
+
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        token = request.cookies.get("_forward_auth", "")
+    if not token:
+        return jsonify({"error": "Missing token"}), 401
+
+    upstream_headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Forward-Auth": token,
+        "User-Agent": "Mozilla/5.0 (compatible; LT-Uploader/1.0)",
+    }
+    # Forward the browser's Range header so <audio> seeking works.
+    if request.headers.get("Range"):
+        upstream_headers["Range"] = request.headers["Range"]
+
+    try:
+        r = requests.get(
+            kit_url,
+            headers=upstream_headers,
+            cookies={"_forward_auth": token},
+            verify=False,
+            stream=True,
+            timeout=60,
+            allow_redirects=True,
+        )
+    except requests.exceptions.RequestException as e:
+        logging.warning("session_tts: upstream fetch failed: %s", e)
+        return jsonify({"error": f"Upstream fetch failed: {e}"}), 502
+
+    if r.status_code >= 400:
+        logging.info(
+            "session_tts: upstream %s for %s (label=%r)",
+            r.status_code, kit_url, label,
+        )
+        return (
+            jsonify({"error": f"Upstream returned {r.status_code}"}),
+            r.status_code,
+        )
+
+    # Pass through the headers the <audio> element cares about.
+    passthrough = {}
+    for h in (
+        "Content-Type",
+        "Content-Length",
+        "Accept-Ranges",
+        "Content-Range",
+    ):
+        if h in r.headers:
+            passthrough[h] = r.headers[h]
+
+    # KIT serves WAVs without an explicit type; fill it in so the
+    # browser doesn't fall back to sniffing (which fails on web).
+    if "Content-Type" not in passthrough:
+        passthrough["Content-Type"] = "audio/wav"
+
+    return Response(
+        stream_with_context(r.iter_content(chunk_size=64 * 1024)),
+        status=r.status_code,
+        headers=passthrough,
+        direct_passthrough=True,
+    )
+
+
 @app.route("/session-zip/<path:session_id>", methods=["GET"])
 def download_session_zip(session_id):
     """Download all files from a session as a ZIP archive."""
@@ -4109,7 +4267,7 @@ def session_transcript_save_vtt(session_id):
                     {
                         "name": file,
                         "size": os.path.getsize(file_path),
-                        "url": f"/session_file/{session_id}/{file}",
+                        "url": f"/session-file/{session_id}/{file}",
                         "modified": mod_time,
                     }
                 )
@@ -6094,9 +6252,7 @@ def video_job_history(video_key):
     if request.method == "DELETE":
         project["job_history"] = []
         save_state()
-        logging.info(
-            "job-history: cleared for video %s", video_key
-        )
+        logging.info("job-history: cleared for video %s", video_key)
         return jsonify({"success": True, "count": 0}), 200
 
     # PUT — replace the whole list
@@ -6454,6 +6610,7 @@ def _is_meaningful_file(path: str) -> bool:
 
 @app.route("/session-output/<path:session_id>", methods=["GET"])
 def get_session_output(session_id):
+    """Return the available output files for a transcription session."""
     session_dir = _session_dir(session_id)
 
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
@@ -6463,7 +6620,9 @@ def get_session_output(session_id):
     # Don't race the background worker. It's already going to fetch
     # everything as soon as the KIT server says the session is ready.
     with job_progress_lock:
-        job_running = session_id in _job_progress_store and not _job_progress_store[session_id].get("done")
+        job_running = session_id in _job_progress_store and not _job_progress_store[
+            session_id
+        ].get("done")
 
     if (
         not job_running
@@ -6489,10 +6648,7 @@ def get_session_output(session_id):
                 mod_time = file_mtime_iso(file_path)
 
                 # For VTT files, use the local file URL
-                if file.endswith(".vtt"):
-                    url = f"/session_file/{session_id}/{file}"
-                else:
-                    url = f"/session_file/{session_id}/{file}"
+                url = f"/session-file/{session_id}/{file}"
 
                 # If this is the placeholder video.mp4, report the
                 # size of the ORIGINAL video instead. The session
@@ -8277,7 +8433,6 @@ def debug_jobs():
 
 
 @app.route("/clear-videos", methods=["POST", "OPTIONS"])
-
 @app.route("/rebuild-videos-from-disk", methods=["POST", "OPTIONS"])
 def rebuild_videos_from_disk_endpoint():
     """Reconcile the `videos` list with the MP4s present in

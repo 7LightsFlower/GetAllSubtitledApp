@@ -56,3 +56,6 @@ sessions/
 *.avi
 *.wav
 *.m4a
+.env
+backups/
+tmp/
