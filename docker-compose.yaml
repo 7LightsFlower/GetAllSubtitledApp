@@ -25,6 +25,12 @@ services:
       retries: 12
 
 volumes:
-  sessions: {}
-  uploads: {}
-  state: {}
+  sessions:
+    external: true
+    name: getallsubtitledapp_sessions
+  uploads:
+    external: true
+    name: getallsubtitledapp_uploads
+  state:
+    external: true
+    name: getallsubtitledapp_stateX
