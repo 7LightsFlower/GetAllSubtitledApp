@@ -3973,13 +3973,19 @@ def session_tts(session_id, label):
     if not token:
         token = request.cookies.get("_forward_auth", "")
     if not token:
-        return jsonify({"error": "Missing token"}), 401
+        # The browser's native <audio> element cannot send custom
+        # headers, so the TTS request arrives bare. Fall back to the
+        # most recent token we saw on any other request from this
+        # session — _capture_auth_token() stores it in _state["token"].
+        token = _state.get("token") or ""
 
     upstream_headers = {
-        "Authorization": f"Bearer {token}",
-        "X-Forward-Auth": token,
         "User-Agent": "Mozilla/5.0 (compatible; LT-Uploader/1.0)",
     }
+    if token:
+        upstream_headers["Authorization"] = f"Bearer {token}"
+        upstream_headers["X-Forward-Auth"] = token
+        
     # Forward the browser's Range header so <audio> seeking works.
     if request.headers.get("Range"):
         upstream_headers["Range"] = request.headers["Range"]
