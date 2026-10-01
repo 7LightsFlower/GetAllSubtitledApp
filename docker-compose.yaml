@@ -33,4 +33,4 @@ volumes:
     name: getallsubtitledapp_uploads
   state:
     external: true
-    name: getallsubtitledapp_stateX
+    name: getallsubtitledapp_state
