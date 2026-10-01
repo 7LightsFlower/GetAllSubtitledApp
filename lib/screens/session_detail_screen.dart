@@ -59,6 +59,20 @@ class SessionDetail {
     this.greenscreenStatus = 'pending',
   });
 
+  static DateTime _parseDateTime(String dateStr) {
+    try {
+      return DateTime.parse(dateStr).toLocal();
+    } catch (_) {
+      final cleaned = dateStr.replaceFirst(RegExp(r'\+00:00(?=Z)'), '');
+      try {
+        return DateTime.parse(cleaned).toLocal();
+      } catch (_) {
+        return DateTime.now();
+      }
+    }
+  }
+
+
   factory SessionDetail.fromJson(Map<String, dynamic> json) {
     final segments = (json['segments'] as List?)
             ?.map((e) => Segment.fromJson(e))
@@ -68,9 +82,12 @@ class SessionDetail {
       key: json['key'] as String,
       name: json['name'] as String? ?? 'Untitled',
       fileName: json['file_name'] as String? ?? 'video.mp4',
-      uploaded: DateTime.parse(json['uploaded'] as String),
+      uploaded: _parseDateTime(json['uploaded'] as String),
       lastOpened: json['last_opened'] != null
-          ? DateTime.parse(json['last_opened'] as String)
+          ? _parseDateTime(json['last_opened'] as String)
+          : null,
+      greenscreenCreatedAt: json['greenscreen_created_at'] != null
+          ? _parseDateTime(json['greenscreen_created_at'] as String)
           : null,
       duration: (json['duration'] as num?)?.toDouble() ?? 0.0,
       fps: (json['fps'] as num?)?.toDouble() ?? 0.0,
@@ -81,11 +98,6 @@ class SessionDetail {
       videoUrl: json['video_url'] as String?,
       segments: segments,
             greenscreenFileSize: json['greenscreen_file_size'] as int? ?? 0,
-      greenscreenCreatedAt: json['greenscreen_created_at'] != null
-          ? DateTime.tryParse(
-              json['greenscreen_created_at'] as String,
-            )?.toLocal()
-          : null,
       greenscreenStatus:
           json['greenscreen_status'] as String? ?? 'pending',
     );

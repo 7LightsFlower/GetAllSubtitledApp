@@ -4835,6 +4835,17 @@ def _remote_size(url: str, token: str, timeout: int = 20) -> tuple[int, int]:
 MIN_MESSAGES_BYTES = 5_000  # tune to your smallest realistic session
 _STABLE_NEEDED = 3
 
+# How many bytes of growth in one poll still count as "quiet". Below
+# this, we treat the file as not having moved. Above it, the quiet
+# timer resets. 2 KB is small enough to catch the trickle of a
+# finishing session, large enough to ignore buffered-flush noise.
+_STABLE_GROWTH_BYTES = 2_000
+
+# How long the file has to stay quiet before we trust it and run the
+# content check. 30 s is generous enough for a slow KIT server to
+# flush the last segment.
+_STABLE_QUIET_SECONDS = 30.0
+
 
 def _fetch_messages_json_size(session_id, token, server_url=None):
     """Cheap HEAD-style size probe against the internal messages.json.
@@ -5131,7 +5142,7 @@ _PROGRESS_HEARTBEAT_SECONDS = 180.0
 
 
 def wait_for_session_ready(
-    session_id, token, server_url=None, expected_langs=None, timeout=1800
+    session_id, token, server_url=None, expected_langs=None, timeout=7200
 ):
     """Block until the internal server finishes producing messages.json.
 
@@ -5149,6 +5160,10 @@ def wait_for_session_ready(
     last_size = -1
     stable_count = 0
     unauthorized_count = 0
+    
+    # Quiet-period tracking for the readiness gate
+    _quiet_baseline = 0
+    _quiet_since = started
 
     # Progress-tick bookkeeping. The "reported" values are the ones the
     # panel has already seen; we only emit a new event when they move.
@@ -5190,8 +5205,22 @@ def wait_for_session_ready(
 
         size_changed = size != last_size
 
+        size_changed = size != last_size
+
+        # Track how long the file has been quiet. "Quiet" means it has
+        # not grown by more than _STABLE_GROWTH_BYTES since the last
+        # time we saw a meaningful jump. This is much more robust than
+        # "size == last_size" for sessions with many translation
+        # tracks, where the file grows on nearly every poll until the
+        # very end.
+        now = time.time()
+        if size > _quiet_baseline + _STABLE_GROWTH_BYTES:
+            _quiet_baseline = size
+            _quiet_since = now
+
+        quiet_for = now - _quiet_since
         plausible = size >= MIN_MESSAGES_BYTES
-        if plausible and size == last_size:
+        if plausible and quiet_for >= _STABLE_QUIET_SECONDS:
             stable_count += 1
         else:
             stable_count = 0
