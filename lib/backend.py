@@ -24,7 +24,15 @@ from urllib.parse import quote
 
 import requests
 import yt_dlp
-from flask import Flask, g, jsonify, request, send_file
+from flask import (
+    Flask,
+    Response,
+    g,
+    jsonify,
+    request,
+    send_file,
+    stream_with_context,
+)
 from flask_cors import CORS
 from docx import Document
 from docx.shared import Pt, RGBColor
@@ -87,8 +95,9 @@ def add_no_cache_for_api(response):
             "/session-file/",
             "/session_languages/",
             "/session-languages/",
-            "/session_transcript_json/",
+            "/session_transcript_json/",            
             "/session-transcript-json/",
+            "/session_tts/",
             "/session-tts/",
             "/api/",
         )
@@ -952,6 +961,7 @@ _SESSION_SCOPED_ENDPOINTS = {
     "session_transcript_save_vtt",
     "download_session_zip",
     "session_messages_json",
+    "session_tts",
     "extract_video_subtitles",
     "update_video_subtitles",
     "session_languages",
@@ -979,18 +989,51 @@ def _route_logs_to_session_panel():
     setattr(g, "_panel_log_token", _log_target.set(("job", session_id)))
 
 
+@app.before_request
+def _capture_auth_token():
+    """Remember the most recent bearer token we saw.
+
+    The browser's native <audio> element cannot send custom headers,
+    so /session-tts has to fall back to a token the backend already
+    holds. Every request that does carry one seeds this cache, so by
+    the time the user picks a TTS track (which can only happen after
+    the screen has loaded its data) the token is there.
+    """
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[7:].strip()
+        if token:
+            _state["token"] = token
+            return
+    cookie = request.cookies.get("_forward_auth", "")
+    if cookie:
+        _state["token"] = cookie
+
+
 @app.teardown_request
 def _unroute_logs_from_session_panel(_exc):
-    """Restore the previous _log_target after the request finishes."""
+    """Restore the previous _log_target after the request finishes.
+
+    Flask calls this twice for streaming responses (`stream_with_context`
+    keeps the request context alive across the generator, so both the
+    initial and the streamed context get popped). The token we stashed
+    in before_request can only be reset once, so guard against the
+    second call with a flag on `g`.
+    """
+    if getattr(g, "_panel_log_reset", False):
+        return
+
     token = getattr(g, "_panel_log_token", None)
     if token is None:
         return
+
+    g._panel_log_reset = True
     try:
         _log_target.reset(token)
-    except (ValueError, LookupError):
-        # Token was created in a different context — safe to ignore.
+    except (ValueError, LookupError, RuntimeError):
+        # Token was already reset (streaming teardown) or came from a
+        # different context. Both are safe to ignore.
         pass
-
 
 def generate_mock_transcript():
     """Return a static sample transcript."""
@@ -2197,6 +2240,15 @@ def extract_transcripts_from_messages(messages_path):
                     # ── accept any of several text fields, not just "seq" ──
                     if isinstance(msg_data, dict):
                         sender = msg_data.get("sender", "")
+                        
+                        # Skip TTS and lip-sync senders. These are synthesized audio
+                        # messages that carry no text; the KIT front-end ignores them too
+                        # (see the `startsWith("lip") / startsWith("tts")` branch in the
+                        # archive page JS). Left in, they resolve to useless labels like
+                        # "Transcript (Language 4)" and clutter the language dropdown.
+                        if sender.startswith(("tts:", "tts_", "lip:", "lip_")):
+                            continue
+
                         text = (
                             msg_data.get("seq")
                             or msg_data.get("text")
@@ -3898,42 +3950,85 @@ def session_messages_json(session_id):
 
 @app.route("/session-tts/<path:session_id>/<path:label>", methods=["GET"])
 def session_tts(session_id, label):
-    """Serve a synthesized audio track for a session + language label.
+    """Stream the per-language TTS track from the KIT server.
 
-    `label` is URL-encoded ("English Audio"), which Flask decodes for us.
-    We look for an audio file named after the language in the session
-    directory.
+    The KIT archive page advertises TTS audio via <source> tags of the
+    form `/archivemediafile/{session_id}/{Language} Audio.wav`. We
+    rebuild that URL here and proxy the bytes through, so the browser
+    never has to know the KIT host or carry the bearer token itself.
     """
-    session_dir = _session_dir(session_id)
-    if not os.path.isdir(session_dir):
-        return jsonify({"error": "Session not found"}), 404
+    # `label` arrives URL-decoded by Flask ("English Audio").
+    # KIT expects "<Language> Audio.wav" verbatim, with a literal space.
+    filename = f"{label}.wav"
 
-    # "English Audio" -> "English"
-    language = label.replace(" Audio", "").strip()
+    server = (
+        sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
+    ).rstrip("/")
 
-    # Find any audio file matching the language stem. Accept a few
-    # extensions so the pipeline can switch codecs without touching
-    # this route.
-    candidates = []
-    for f in os.listdir(session_dir):
-        stem, ext = os.path.splitext(f)
-        if ext.lower() not in (".wav", ".mp3", ".m4a", ".ogg", ".opus"):
-            continue
-        # Match "tts_English", "English_tts", "audio_English", etc.
-        if language.lower() in stem.lower():
-            candidates.append(os.path.join(session_dir, f))
+    # quote() encodes the space as %20 but leaves letters/dots alone.
+    # Do NOT quote session_id — its trailing "==" is significant.
+    kit_url = f"{server}/archivemediafile/{session_id}/{quote(filename)}"
 
-    if not candidates:
-        return jsonify({"error": f"No TTS audio for language '{language}'"}), 404
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        token = request.cookies.get("_forward_auth", "")
+    if not token:
+        return jsonify({"error": "Missing token"}), 401
 
-    # Prefer the largest file (most likely the complete track).
-    audio_path = max(candidates, key=os.path.getsize)
+    upstream_headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Forward-Auth": token,
+        "User-Agent": "Mozilla/5.0 (compatible; LT-Uploader/1.0)",
+    }
+    # Forward the browser's Range header so <audio> seeking works.
+    if request.headers.get("Range"):
+        upstream_headers["Range"] = request.headers["Range"]
 
-    mime, _ = mimetypes.guess_type(audio_path)
-    return send_file(
-        audio_path,
-        mimetype=mime or "audio/wav",
-        conditional=True,   # supports Range requests — important for <audio>
+    try:
+        r = requests.get(
+            kit_url,
+            headers=upstream_headers,
+            cookies={"_forward_auth": token},
+            verify=False,
+            stream=True,
+            timeout=60,
+            allow_redirects=True,
+        )
+    except requests.exceptions.RequestException as e:
+        logging.warning("session_tts: upstream fetch failed: %s", e)
+        return jsonify({"error": f"Upstream fetch failed: {e}"}), 502
+
+    if r.status_code >= 400:
+        logging.info(
+            "session_tts: upstream %s for %s (label=%r)",
+            r.status_code, kit_url, label,
+        )
+        return (
+            jsonify({"error": f"Upstream returned {r.status_code}"}),
+            r.status_code,
+        )
+
+    # Pass through the headers the <audio> element cares about.
+    passthrough = {}
+    for h in (
+        "Content-Type",
+        "Content-Length",
+        "Accept-Ranges",
+        "Content-Range",
+    ):
+        if h in r.headers:
+            passthrough[h] = r.headers[h]
+
+    # KIT serves WAVs without an explicit type; fill it in so the
+    # browser doesn't fall back to sniffing (which fails on web).
+    if "Content-Type" not in passthrough:
+        passthrough["Content-Type"] = "audio/wav"
+
+    return Response(
+        stream_with_context(r.iter_content(chunk_size=64 * 1024)),
+        status=r.status_code,
+        headers=passthrough,
+        direct_passthrough=True,
     )
 
 
@@ -4172,7 +4267,7 @@ def session_transcript_save_vtt(session_id):
                     {
                         "name": file,
                         "size": os.path.getsize(file_path),
-                        "url": f"/session_file/{session_id}/{file}",
+                        "url": f"/session-file/{session_id}/{file}",
                         "modified": mod_time,
                     }
                 )
@@ -6553,10 +6648,7 @@ def get_session_output(session_id):
                 mod_time = file_mtime_iso(file_path)
 
                 # For VTT files, use the local file URL
-                if file.endswith(".vtt"):
-                    url = f"/session_file/{session_id}/{file}"
-                else:
-                    url = f"/session_file/{session_id}/{file}"
+                url = f"/session-file/{session_id}/{file}"
 
                 # If this is the placeholder video.mp4, report the
                 # size of the ORIGINAL video instead. The session
