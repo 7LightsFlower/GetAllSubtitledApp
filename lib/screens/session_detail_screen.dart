@@ -351,7 +351,19 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     if (mounted) setState(() {});
   }
 
-    // ═══════════════════════════════════════════════════════════════════
+  /// Extract the email from a LT KIT bearer token.
+  ///
+  /// Token format: `<opaque>|<expiry>|<email>`.
+  String _emailFromToken(String token) {
+    final parts = token.split('|');
+    if (parts.length >= 3) {
+      final email = parts.last.trim();
+      if (email.contains('@')) return email;
+    }
+    return 'admin@example.com';  // legacy fallback
+  }  
+
+  // ═══════════════════════════════════════════════════════════════════
   //  JOB SETTINGS PERSISTENCE
   // ═══════════════════════════════════════════════════════════════════
 
@@ -1397,7 +1409,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       final token = await _getToken();
       debugPrint('🚀 [UPLOAD] Using token: $token');
 
-      const userEmail = 'admin@example.com';
+      final userEmail = _emailFromToken(token);   // parse token.split('|').last
 
       final localMediaUrl = Uri.parse('$authBaseUrl/media/${widget.videoKey}');      
       debugPrint('🌐 [DEBUG] Fetching video from local server: $localMediaUrl');

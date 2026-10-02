@@ -842,6 +842,25 @@ def _short_sid(session_id: str | None, keep: int = 8) -> str:
         return "<none>"
     return session_id[:keep] + "…"
 
+def _user_home_path(token: str) -> str:
+    """Build the LTKIT upload path from the authenticated user.
+
+    KIT bearer tokens have the shape ``<opaque>|<expiry>|<email>``.
+    The email is the identity LT KIT uses to build the user's home
+    directory, so ``/home/<email>`` is the path we should send in the
+    upload form. If the token is malformed (local dev, missing
+    email), we fall back to the legacy placeholder so the server
+    still starts and nothing crashes — but that fallback will not
+    work against a real KIT deployment.
+    """
+    if token:
+        parts = token.split("|")
+        if len(parts) >= 3:
+            email = parts[-1].strip()
+            if email and "@" in email:
+                return f"/home/{email}"
+    return "/home/admin@example.com"
+
 
 def _safe_local_name(name: str) -> str:
     """Turn a session name into a filesystem-safe folder name.
@@ -8073,7 +8092,7 @@ def _upload_to_internal_server_and_register(
                 resp.url,
                 resp.text[:5000],
             )
-            home_path = form_data.get("path") or "/home/admin@example.com"
+            home_path = form_data.get("path") or _user_home_path(token)
             full_path = f"{home_path.rstrip('/')}/{session_name}"
             session_id = base64.b64encode(full_path.encode("utf-8")).decode("ascii")
 
@@ -8090,7 +8109,7 @@ def _upload_to_internal_server_and_register(
         # encoding only the session name produces a plausible-looking id
         # that 404s on every subsequent poll.
         if not session_id and session_name:
-            home_path = form_data.get("path") or "/home/admin@example.com"
+            home_path = form_data.get("path") or _user_home_path(token)
             full_path = f"{home_path.rstrip('/')}/{session_name}"
             session_id = base64.b64encode(full_path.encode("utf-8")).decode("ascii")
             logging.info(
@@ -8359,7 +8378,7 @@ def upload_to_internal():
                 continue
             values = request.form.getlist(key)
             form_data[key] = values[0] if len(values) == 1 else values
-        form_data.setdefault("path", "/home/admin@example.com")
+        form_data.setdefault("path", _user_home_path(token))
 
         expected_mt = request.form.getlist("mtLanguage") or ["de"]
         target_url = _resolve_target_url(request.form.get("targetServer"))
@@ -8400,7 +8419,7 @@ def upload_to_internal():
         )
 
         form_data = {
-            "path": "/home/admin@example.com",
+            "path":  _user_home_path(token),
             "name": session_name,
             "topicname": session_name,
             "date": datetime.datetime.now().strftime("%Y-%m-%d"),
@@ -8674,9 +8693,10 @@ users["testuser@example.com"] = {
 # ─────────────────────────────────────────────────────────────────────
 def _initialise_state_once() -> None:
     """Load persisted state and reconcile with disk. Idempotent."""
-    if getattr(_initialise_state_once, "_done", False):
+    state = _initialise_state_once.__dict__
+    if state.get("_done", False):
         return
-    _initialise_state_once._done = True  # type: ignore[attr-defined]
+    state["_done"] = True
 
     try:
         loaded = load_state()
@@ -8688,25 +8708,25 @@ def _initialise_state_once() -> None:
             len(jobs),
             len(sessions),
         )
-    except Exception:
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
         logging.exception("startup: load_state() failed; continuing with empty state")
 
     # Reconciliation: safe to run every startup. Adding missing entries,
     # pruning deleted files, regenerating thumbnails.
     try:
         rebuild_videos_from_disk()
-    except Exception:
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
         logging.exception("startup: rebuild_videos_from_disk() failed")
 
     try:
         clean_missing_videos()
         cleanup_orphaned_data()
-    except Exception:
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, AttributeError):
         logging.exception("startup: cleanup failed")
 
     try:
         regenerate_missing_thumbnails()
-    except Exception:
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, AttributeError):
         logging.exception("startup: thumbnail regeneration failed")
 
 
@@ -8715,7 +8735,6 @@ _initialise_state_once()
 
 if __name__ == "__main__":
     try:
-        import urllib3
 
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     except ImportError:
@@ -8727,12 +8746,6 @@ if __name__ == "__main__":
     logging.info("Starting merged server on 0.0.0.0:5000")
     logging.info("State file: %s", STATE_FILE)
     app.run(host="0.0.0.0", port=5000, debug=True)
-    try:
-        import urllib3
-
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    except ImportError:
-        pass
 
     # Remove any stray files from the old versioned-name scheme, keep
     # only "video.mp4" and "video_subtitled.mp4".

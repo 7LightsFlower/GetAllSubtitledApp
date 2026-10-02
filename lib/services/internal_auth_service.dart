@@ -22,10 +22,12 @@ class InternalAuthService {
 
   static String get _tokenEndpoint {
     if (kIsWeb) {
+      // Ask the Flask backend to proxy, but tell it which host to
+      // forward to. The backend's /dex/token handler already forwards
+      // headers; add an X-Target-Server header and read it there.
       return '$authBaseUrl/dex/token';
-    } else {
-      return '$dexIssuer/token';
     }
+    return '$dexIssuer/token';
   }
 
   static String get _userInfoEndpoint {
@@ -212,6 +214,7 @@ class InternalAuthService {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         'Authorization': 'Basic $credentials',
+        'X-Target-Server': internalServerUrl,
       },
       body: {
         'grant_type': 'authorization_code',
