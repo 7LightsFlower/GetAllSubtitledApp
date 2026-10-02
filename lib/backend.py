@@ -859,7 +859,11 @@ def _user_home_path(token: str) -> str:
             email = parts[-1].strip()
             if email and "@" in email:
                 return f"/home/{email}"
-    return "/home/admin@example.com"
+    raise ValueError(
+        "Cannot derive the upload path: the token has no email field. "
+        "Refusing to fall back to /home/admin@example.com because that "
+        "produces sessions the KIT server cannot serve."
+    )
 
 
 def _safe_local_name(name: str) -> str:
@@ -8092,7 +8096,7 @@ def _upload_to_internal_server_and_register(
                 resp.url,
                 resp.text[:5000],
             )
-            home_path = form_data.get("path") or _user_home_path(token)
+            home_path = _user_home_path(token)   # ignore form_data["path"] entirely
             full_path = f"{home_path.rstrip('/')}/{session_name}"
             session_id = base64.b64encode(full_path.encode("utf-8")).decode("ascii")
 
@@ -8109,7 +8113,7 @@ def _upload_to_internal_server_and_register(
         # encoding only the session name produces a plausible-looking id
         # that 404s on every subsequent poll.
         if not session_id and session_name:
-            home_path = form_data.get("path") or _user_home_path(token)
+            home_path = _user_home_path(token)   # ignore form_data["path"] entirely
             full_path = f"{home_path.rstrip('/')}/{session_name}"
             session_id = base64.b64encode(full_path.encode("utf-8")).decode("ascii")
             logging.info(
@@ -8378,7 +8382,10 @@ def upload_to_internal():
                 continue
             values = request.form.getlist(key)
             form_data[key] = values[0] if len(values) == 1 else values
-        form_data.setdefault("path", _user_home_path(token))
+
+        # Do NOT trust a client-supplied `path`. The old Flutter build sends
+        # "/home/admin@example.com", and setdefault() never replaces it.
+        form_data["path"] = _user_home_path(token)
 
         expected_mt = request.form.getlist("mtLanguage") or ["de"]
         target_url = _resolve_target_url(request.form.get("targetServer"))
@@ -8735,20 +8742,17 @@ _initialise_state_once()
 
 if __name__ == "__main__":
     try:
-
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     except ImportError:
         pass
 
-    # Initialisation already ran at import time above, so we don't
-    # repeat load_state() here — but the __main__ path is otherwise
-    # unchanged.
-    logging.info("Starting merged server on 0.0.0.0:5000")
-    logging.info("State file: %s", STATE_FILE)
-    app.run(host="0.0.0.0", port=5000, debug=True)
-
-    # Remove any stray files from the old versioned-name scheme, keep
-    # only "video.mp4" and "video_subtitled.mp4".
+    # ── One-time session cleanup ──────────────────────────────────
+    # Remove any stray files from the old versioned-name scheme.
+    # Keep only "video.mp4" and "video_subtitled.mp4" inside each
+    # session directory.
+    #
+    # This MUST run before app.run(): app.run() blocks forever, so
+    # any code placed after it is never reached.
     _KEEP_VIDEO_FILES = {"video.mp4", "video_subtitled.mp4"}
 
     for sess_id in list(sessions.keys()):
@@ -8772,6 +8776,10 @@ if __name__ == "__main__":
             except OSError:
                 pass
 
+    # ── Start the server ──────────────────────────────────────────
+    # Initialisation already ran at import time (see
+    # _initialise_state_once() above), so load_state() is not repeated
+    # here. The __main__ path is otherwise unchanged.
     logging.info("Starting merged server on 0.0.0.0:5000")
     logging.info("State file: %s", STATE_FILE)
     app.run(host="0.0.0.0", port=5000, debug=True)
