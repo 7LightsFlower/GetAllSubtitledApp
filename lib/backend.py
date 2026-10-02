@@ -37,6 +37,9 @@ from flask_cors import CORS
 from docx import Document
 from docx.shared import Pt, RGBColor
 
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 # BeautifulSoup is imported only when needed for HTML parsing
 has_bs4 = False
 try:
@@ -47,6 +50,7 @@ except ImportError:
     logging.warning("BeautifulSoup not installed. Export functions will be limited.")
 
 logging.basicConfig(level=logging.DEBUG)
+
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
 app.config["DEBUG"] = True
@@ -739,7 +743,11 @@ def _extract_session_id(resp: requests.Response) -> str | None:
         payload = None
 
     def _from_dict(d: dict) -> str | None:
-        for key in ("session_id", "sessionId", "session", "id"):
+        for key in (
+            "session_id", "sessionId", "session", "id",
+            "session_uuid", "sessionid", "session_name",
+            "archive_session_id", "archiveSessionId",
+        ):
             v = d.get(key)
             if isinstance(v, str) and v.strip():
                 return v.strip()
@@ -777,7 +785,30 @@ def _extract_session_id(resp: requests.Response) -> str | None:
         if candidate and len(candidate) <= 200 and " " not in candidate:
             return candidate
 
-    # 5. Anything anywhere in the body that looks like a session link
+    # ── 5. Inline <script> JSON blob ─────────────────────────────
+    # KIT sometimes embeds the session as a JS object literal rather
+    # than as a data-attribute or a plain <a href>. Look for the
+    # first `<script>` that assigns a JSON object to a variable and
+    # try to pull a session id out of it.
+    m = re.search(
+        r'<script[^>]*>\s*(?:var|const|let)\s+\w+\s*=\s*({[^<]+})',
+        body,
+    )
+    if m:
+        try:
+            blob = json.loads(m.group(1))
+            sid = _from_dict(blob)
+            if sid:
+                return sid
+            # Some KIT pages nest the session one level deeper.
+            nested = blob.get("data") if isinstance(blob, dict) else None
+            if isinstance(nested, dict):
+                sid = _from_dict(nested)
+                if sid:
+                    return sid
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     sid = _session_id_from_any_url(body)
     if sid:
         return sid
@@ -7183,7 +7214,7 @@ def _post_multipart_with_retries(
     headers: dict,
     cookies: dict,
     *,
-    total_size: int,  # NEW — for the error log
+    total_size: int,
     max_attempts: int = 3,
     base_delay: float = 5.0,
 ):
@@ -7199,8 +7230,28 @@ def _post_multipart_with_retries(
                 cookies=cookies,
                 timeout=(60, 3600),
                 verify=False,
-                allow_redirects=True,
+                allow_redirects=False,
             )
+
+            # Follow a redirect manually so we can log where KIT sent us.
+            # The final response's .url will then contain the session id,
+            # which _extract_session_id() picks up in step 1.
+            if resp.status_code in (301, 302, 303, 307, 308):
+                location = resp.headers.get("Location", "")
+                if location:
+                    logging.info(
+                        "internal_upload: redirect %s -> %s",
+                        resp.status_code,
+                        location,
+                    )
+                    resp = requests.get(
+                        location,
+                        cookies=cookies,
+                        verify=False,
+                        timeout=60,
+                        allow_redirects=True,
+                    )
+
             if attempt > 1:
                 logging.info(
                     "internal_upload: succeeded on attempt %d/%d",
@@ -7209,7 +7260,6 @@ def _post_multipart_with_retries(
                 )
             return resp
 
-        # ─── THIS IS THE BLOCK YOU ASKED ABOUT ─────────────────────
         except requests.exceptions.ConnectionError as e:
             logging.error(
                 "internal_upload: connection reset after %d bytes "
@@ -7223,7 +7273,7 @@ def _post_multipart_with_retries(
                 delay = base_delay * (2 ** (attempt - 1))
                 logging.info("internal_upload: retrying in %.1fs", delay)
                 time.sleep(delay)
-        # ───────────────────────────────────────────────────────────
+
     raise last_exc
 
 
@@ -8012,6 +8062,27 @@ def _upload_to_internal_server_and_register(
         session_id = _extract_session_id(resp)
         if session_id:
             logging.info("internal_upload: session id from response: %s", session_id)
+
+        if not session_id and session_name:
+            logging.error(
+                "internal_upload: NO session id in upload response. "
+                "status=%s url=%s\n"
+                "----- RAW RESPONSE BODY -----\n%s\n"
+                "----- END RESPONSE BODY -----",
+                resp.status_code,
+                resp.url,
+                resp.text[:5000],
+            )
+            home_path = form_data.get("path") or "/home/admin@example.com"
+            full_path = f"{home_path.rstrip('/')}/{session_name}"
+            session_id = base64.b64encode(full_path.encode("utf-8")).decode("ascii")
+
+            if not session_id and session_name:
+                logging.error(
+                    "internal_upload: NO session id found. status=%s url=%s\n"
+                    "----- BODY (first 5000 chars) -----\n%s\n----- END -----",
+                    resp.status_code, resp.url, resp.text[:5000],
+                )
 
         # Fallback: KIT LT's upload endpoint returned a generic "Success"
         # page with no id. The real KIT deployment uses base64 of the
