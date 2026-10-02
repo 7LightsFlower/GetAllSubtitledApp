@@ -32,22 +32,54 @@ const String publicServerUrl = 'https://get-all-subtitled.isl.iar.kit.edu';
 // ─── Internal backend server (video processing + Dex OAuth) ────
 // Options the user may pick from. No trailing slash.
 const List<String> internalServerOptions = <String>[
+  'https://lt2srv-sscherrer.isl.iar.kit.edu',
   'https://lt2srv.iar.kit.edu',
   'https://lt2srv-backup.iar.kit.edu',
-  'https://lt2srv-sscherrer.isl.iar.kit.edu',
 ];
 
 const String defaultInternalServerUrl =
-    'https://lt2srv.iar.kit.edu';
+    'https://lt2srv-sscherrer.isl.iar.kit.edu';
 
 const Map<String, String> internalServerLabels = {
-  'https://lt2srv.iar.kit.edu': 'LT Main (Default)',
-  'https://lt2srv-backup.iar.kit.edu': 'LT Backup',
   'https://lt2srv-sscherrer.isl.iar.kit.edu':
-      'lt2srv-sscherrer',
+      'lt2srv-sscherrer (Default for now)',
+  'https://lt2srv.iar.kit.edu': 'LT Main',
+  'https://lt2srv-backup.iar.kit.edu': 'LT Backup',
 };
 
+/// The server the app is currently pointing at. Mutable on purpose:
+/// `ServerConfigService.setServer()` updates this after the user picks
+/// a different entry, and every call site reads it through this name.
 String internalServerUrl = defaultInternalServerUrl;
+
+// ─── Allowed-server validator ──────────────────────────────────
+//
+// Accepts every LT2SRV host the backend is willing to talk to:
+//   https://lt2srv.iar.kit.edu
+//   https://lt2srv-backup.iar.kit.edu
+//   https://lt2srv-sscherrer.isl.iar.kit.edu
+//   https://lt2srv-alice.isl.iar.kit.edu
+//   https://lt2srv-bob.iar.kit.edu
+//
+// A suffix is optional, lowercase, and may contain hyphens and digits.
+// The `.isl.` segment is optional.
+//
+// KEEP THIS IN SYNC WITH backend.py (`_ALLOWED_SERVER_RE`). If the two
+// drift, the client will happily accept a URL the backend then silently
+// rejects, and the user will see a confusing "unknown target server"
+// warning in the server log.
+final RegExp _allowedInternalServerRe = RegExp(
+  r'^https://lt2srv(?:-[a-z0-9]+)*\.(?:isl\.)?iar\.kit\.edu$',
+);
+
+/// True if [url] is one of the LT2SRV hosts the backend will accept.
+///
+/// Used by:
+///   * `ServerConfigService` — when loading the selected server and
+///     when adding or removing custom servers.
+///   * `_showAddServerDialog` — the "Add custom server" form.
+bool isAllowedInternalServer(String url) =>
+    _allowedInternalServerRe.hasMatch(url.trim());
 
 // ─── Flask backend base ────────────────────────────────────────
 // One source of truth. Both names resolve to the same value; keep
