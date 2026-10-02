@@ -6241,15 +6241,6 @@ def get_videos():
                 if current_score > best_score:
                     best_video = video
 
-            # Also log which ones were removed
-            for video in group:
-                if video != best_video:
-                    logging.info(
-                        "🗑️ Removing duplicate video: %s (keeping: %s)",
-                        video.get("file_name"),
-                        best_video.get("file_name"),
-                    )
-
             unique_videos.append(best_video)
     # ========================================
 
@@ -7737,23 +7728,48 @@ def youtube_download_and_upload():
 
         # ── 6. Save project ──────────────────────────────────────────
         _progress_event(download_id, "Saving project…", stage="saving", progress=0.90)
-        video_key = str(uuid.uuid4())
-        project = {
-            "key": video_key,
-            "name": display_title,
-            "file_name": actual_filename,
-            "uploaded": utc_now_iso(),
-            "last_opened": None,
-            "duration": duration,
-            "fps": fps,
-            "file_size": file_size,
-            "segment_count": 0,
-            "languages": ["en"],
-            "thumbnail_url": thumbnail_url,
-            "segmentation_done": auto_segmentation,
-            "segmentation_progress": 100 if auto_segmentation else 0,
-        }
-        videos.append(project)
+
+        existing = next(
+            (v for v in videos if v.get("file_name") == actual_filename),
+            None,
+        )
+
+        if existing is not None:
+            # Reuse the existing entry. Preserve key, uploaded, last_opened,
+            # greenscreen_*, job_history, session_id — only refresh fields
+            # that describe the file on disk.
+            project = existing
+            video_key = existing["key"]
+            project.update({
+                "name": display_title,
+                "file_size": file_size,
+                "duration": duration,
+                "fps": fps,
+                "thumbnail_url": thumbnail_url,
+            })
+            logging.info(
+                "♻️ Reusing existing project for %s (key=%s)",
+                actual_filename, video_key,
+            )
+        else:
+            video_key = str(uuid.uuid4())
+            project = {
+                "key": video_key,
+                "name": display_title,
+                "file_name": actual_filename,
+                "uploaded": utc_now_iso(),
+                "last_opened": None,
+                "duration": duration,
+                "fps": fps,
+                "file_size": file_size,
+                "segment_count": 0,
+                "languages": ["en"],
+                "thumbnail_url": thumbnail_url,
+                "segmentation_done": auto_segmentation,
+                "segmentation_progress": 100 if auto_segmentation else 0,
+            }
+            videos.append(project)
+
         save_state()
 
         # ── 7. Optional segmentation job ─────────────────────────────
