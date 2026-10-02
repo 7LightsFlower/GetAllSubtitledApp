@@ -33,7 +33,7 @@ const String publicServerUrl = 'https://get-all-subtitled.isl.iar.kit.edu';
 // Options the user may pick from. No trailing slash.
 const List<String> internalServerOptions = <String>[
   'https://lt2srv-sscherrer.isl.iar.kit.edu',
-  'https://lecture-translator.kit.edu',
+  'https://lt2srv.iar.kit.edu',
   'https://lt2srv-backup.iar.kit.edu',
 ];
 
@@ -43,7 +43,7 @@ const String defaultInternalServerUrl =
 const Map<String, String> internalServerLabels = {
   'https://lt2srv-sscherrer.isl.iar.kit.edu':
       'lt2srv-sscherrer (Default for now)',
-  'https://lecture-translator.kit.edu': 'LT Main',
+  'https://lt2srv.iar.kit.edu': 'LT Main',
   'https://lt2srv-backup.iar.kit.edu': 'LT Backup',
 };
 

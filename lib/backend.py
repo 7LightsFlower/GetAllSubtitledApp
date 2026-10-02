@@ -111,11 +111,11 @@ def add_no_cache_for_api(response):
 # Servers we are willing to forward uploads to. The client may only
 # pick from this list.
 ALLOWED_TARGET_SERVERS = {
-    "https://lt2srv-sscherrer.isl.iar.kit.edu",
-    "https://lecture-translator.kit.edu",
+    "https://lt2srv.iar.kit.edu",
     "https://lt2srv-backup.iar.kit.edu",
+    "https://lt2srv-sscherrer.isl.iar.kit.edu",
 }
-INTERNAL_SERVER_URL = "https://lt2srv-sscherrer.isl.iar.kit.edu"  # default
+INTERNAL_SERVER_URL = "https://lt2srv.iar.kit.edu"  # default
 
 # When True, upload a tiny solid-colour video that carries the audio
 # instead of the full video. The KIT server only processes the audio
@@ -1903,7 +1903,7 @@ def get_actual_file_url(session_id, filename, server_url, html_content=None):
     Determine the correct URL for a file based on its type.
 
     `server_url` is the base URL of the internal server that owns the
-    session (e.g. "https://lecture-translator.kit.edu"). Every returned
+    session (e.g. "https://lt2srv.iar.kit.edu"). Every returned
     URL is built against it, so a session that lives on a non-default
     server is downloaded from the right host.
     """
