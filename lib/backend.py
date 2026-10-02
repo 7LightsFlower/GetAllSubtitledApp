@@ -6967,10 +6967,15 @@ def download_youtube_video_adaptive(youtube_url, output_dir, filename=None):
         # 'bv*' = best video-only, 'ba' = best audio-only.
         # The '/' chain tries each option left to right.
         format_selector = (
-            "bv*[ext=mp4]+ba[ext=m4a]/"  # mp4 video + m4a audio (fastest)
-            "bv*[ext=mp4]+ba/"  # mp4 video + any audio
-            "bv*+ba/"  # any video + any audio
-            "b[ext=mp4]/b"  # single progressive file (<=720p)
+            # First choice: H.264 video + M4A audio. This is the one that
+            # plays in every browser including iOS Safari and Chrome-on-iOS.
+            "bv*[vcodec^=avc1][ext=mp4]+ba[ext=m4a]/"
+            "bv*[vcodec^=avc1]+ba/"
+            # Fallbacks: any MP4 pair, then any pair, then progressive MP4.
+            "bv*[ext=mp4]+ba[ext=m4a]/"
+            "bv*[ext=mp4]+ba/"
+            "bv*+ba/"
+            "b[ext=mp4]/b"
         )
 
         ydl_opts = {
@@ -7154,13 +7159,13 @@ def convert_video_to_browser_compatible(input_path, output_path):
             "-profile:v",
             "main",  # Main profile for better compatibility
             "-level",
-            "3.1",  # Level 3.1 for broad compatibility
+            "4.0",           # 4.0 covers 1080p; 3.1 is too tight for many sources
             "-pix_fmt",
             "yuv420p",  # YUV 4:2:0 for compatibility
             "-crf",
-            "23",  # Quality level (18-28, 23 is good)
+            "26",  # Quality level (18-28, 23 is good)
             "-preset",
-            "medium",  # Encoding speed vs quality
+            "veryfast",  # Encoding speed vs quality, was "medium" — 5–10× faster
             "-y",  # Overwrite output file
             output_path,
         ]
