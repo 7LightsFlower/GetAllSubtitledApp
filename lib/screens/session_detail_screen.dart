@@ -875,13 +875,20 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     await ServerConfigService.load(); 
     if (!mounted) return;
 
-    // Reset auth-related state because it was issued by the previous host.
+    // Tokens are per-server. The old one is worthless here — drop it so
+    // the user is forced to fetch a new one for the new host.
+    await InternalAuthService.clearManualToken();
+
     setState(() {
       _isConnected = false;
+      _isCancelling = false;
+      _hasSessionId = false;
+      _savedSessionId = '';
+      _savedSessionUrl = '';
       _outputStatus = '';
-      _tokenStatus = '🔀 Switched to: $url';
+      _tokenStatus = '🔀 Switched to: $url — paste a token for this host';
     });
-
+    
     await _checkConnection();
 
     if (mounted) {

@@ -38,6 +38,7 @@ from docx import Document
 from docx.shared import Pt, RGBColor
 
 import urllib3
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # BeautifulSoup is imported only when needed for HTML parsing
@@ -110,6 +111,7 @@ def add_no_cache_for_api(response):
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
     return response
+
 
 # ─── DEFAULT INTERNAL SERVER ──────────────────────────────
 INTERNAL_SERVER_URL = "https://lt2srv.iar.kit.edu"
@@ -744,9 +746,15 @@ def _extract_session_id(resp: requests.Response) -> str | None:
 
     def _from_dict(d: dict) -> str | None:
         for key in (
-            "session_id", "sessionId", "session", "id",
-            "session_uuid", "sessionid", "session_name",
-            "archive_session_id", "archiveSessionId",
+            "session_id",
+            "sessionId",
+            "session",
+            "id",
+            "session_uuid",
+            "sessionid",
+            "session_name",
+            "archive_session_id",
+            "archiveSessionId",
         ):
             v = d.get(key)
             if isinstance(v, str) and v.strip():
@@ -791,7 +799,7 @@ def _extract_session_id(resp: requests.Response) -> str | None:
     # first `<script>` that assigns a JSON object to a variable and
     # try to pull a session id out of it.
     m = re.search(
-        r'<script[^>]*>\s*(?:var|const|let)\s+\w+\s*=\s*({[^<]+})',
+        r"<script[^>]*>\s*(?:var|const|let)\s+\w+\s*=\s*({[^<]+})",
         body,
     )
     if m:
@@ -841,6 +849,7 @@ def _short_sid(session_id: str | None, keep: int = 8) -> str:
     if not session_id:
         return "<none>"
     return session_id[:keep] + "…"
+
 
 def _user_home_path(token: str) -> str:
     """Build the LTKIT upload path from the authenticated user.
@@ -1472,10 +1481,12 @@ def _job_cleanup():
 def job_progress(session_id):
     """Progress endpoint polled by JobProgressPanel."""
     if request.method == "OPTIONS":
+        origin = request.headers.get("Origin", "")
         r = jsonify({"message": "OK"})
-        r.headers.add("Access-Control-Allow-Origin", "*")
-        r.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
-        r.headers.add("Access-Control-Allow-Methods", "GET,OPTIONS")
+        r.headers["Access-Control-Allow-Origin"] = origin
+        r.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
+        r.headers["Access-Control-Allow-Methods"] = "GET,OPTIONS"
+        r.headers["Access-Control-Allow-Credentials"] = "true"
         return r, 200
 
     _job_cleanup()
@@ -1629,26 +1640,41 @@ def job_progress(session_id):
 
 @app.route("/cancel_session/<path:session_id>", methods=["POST", "OPTIONS"])
 def cancel_session(session_id):
-    """Ask the background worker for this session to stop.
-
-    Sets a flag; the worker checks it in its wait loop and between file
-    downloads. This call does not block waiting for the worker to die —
-    the panel reflects the change on the next poll.
-    """
+    """Cancel a queued or active processing session."""
     if request.method == "OPTIONS":
         return ("", 204)
 
-    logging.info("🛑 Cancel requested for session %s", _short_sid(session_id))
-
     _request_cancel(session_id)
 
-    # Update persisted state immediately so a page reload or a cold
-    # panel poll sees the cancelled status right away.
     job = jobs.get(session_id)
-    if job and job.get("status") == "processing":
+    had_job = job is not None and job.get("status") == "processing"
+    if had_job:
         job["status"] = "cancelled"
+
+    with job_progress_lock:
+        had_progress = session_id in _job_progress_store
+
     _job_cancel(session_id)
     save_state()
+
+    if not had_job and not had_progress:
+        # The session was never registered here — probably uploaded to a
+        # different host, or the backend was restarted.
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "session_id": session_id,
+                    "reason": "unknown_session",
+                    "message": (
+                        "No job is registered for this session id. It was "
+                        "either uploaded to a different server or the "
+                        "backend has restarted since."
+                    ),
+                }
+            ),
+            404,
+        )
 
     return jsonify({"success": True, "session_id": session_id}), 200
 
@@ -4983,38 +5009,31 @@ def _internal_cookies(token: str) -> dict:
 
 
 def _remote_size(url: str, token: str, timeout: int = 20) -> tuple[int, int]:
-    """Return (size, status_code). size=0 on error."""
-    headers = _internal_headers(token)
-    headers["Range"] = "bytes=0-0"
+    """Return (size, status_code). size=0 on error.
 
+    Uses HEAD so we never transfer the body. KIT reports
+    Content-Length on HEAD, which is all we need here.
+    """
+    headers = _internal_headers(token)
     try:
-        with requests.get(
+        r = requests.head(
             url,
             headers=headers,
             cookies=_internal_cookies(token),
             verify=False,
             timeout=timeout,
-            stream=True,
             allow_redirects=True,
-        ) as r:
-            status = r.status_code
-            cr = r.headers.get("Content-Range", "")
-            if "/" in cr:
-                try:
-                    return int(cr.rsplit("/", 1)[-1]), status
-                except ValueError:
-                    pass
-            cl = r.headers.get("Content-Length")
-            if cl:
-                try:
-                    n = int(cl)
-                    if n > 1:
-                        return n, status
-                except ValueError:
-                    pass
-            return 0, status
+        )
+        status = r.status_code
+        cl = r.headers.get("Content-Length")
+        if cl:
+            try:
+                return int(cl), status
+            except ValueError:
+                pass
+        return 0, status
     except requests.exceptions.RequestException as e:
-        logging.warning("Range GET failed for %s: %s", url, e)
+        logging.warning("HEAD failed for %s: %s", url, e)
     return 0, 0
 
 
@@ -7159,7 +7178,7 @@ def convert_video_to_browser_compatible(input_path, output_path):
             "-profile:v",
             "main",  # Main profile for better compatibility
             "-level",
-            "4.0",           # 4.0 covers 1080p; 3.1 is too tight for many sources
+            "4.0",  # 4.0 covers 1080p; 3.1 is too tight for many sources
             "-pix_fmt",
             "yuv420p",  # YUV 4:2:0 for compatibility
             "-crf",
@@ -7745,16 +7764,19 @@ def youtube_download_and_upload():
             # that describe the file on disk.
             project = existing
             video_key = existing["key"]
-            project.update({
-                "name": display_title,
-                "file_size": file_size,
-                "duration": duration,
-                "fps": fps,
-                "thumbnail_url": thumbnail_url,
-            })
+            project.update(
+                {
+                    "name": display_title,
+                    "file_size": file_size,
+                    "duration": duration,
+                    "fps": fps,
+                    "thumbnail_url": thumbnail_url,
+                }
+            )
             logging.info(
                 "♻️ Reusing existing project for %s (key=%s)",
-                actual_filename, video_key,
+                actual_filename,
+                video_key,
             )
         else:
             video_key = str(uuid.uuid4())
@@ -8117,7 +8139,7 @@ def _upload_to_internal_server_and_register(
                 resp.url,
                 resp.text[:5000],
             )
-            home_path = _user_home_path(token)   # ignore form_data["path"] entirely
+            home_path = _user_home_path(token)  # ignore form_data["path"] entirely
             full_path = f"{home_path.rstrip('/')}/{session_name}"
             session_id = base64.b64encode(full_path.encode("utf-8")).decode("ascii")
 
@@ -8125,7 +8147,9 @@ def _upload_to_internal_server_and_register(
                 logging.error(
                     "internal_upload: NO session id found. status=%s url=%s\n"
                     "----- BODY (first 5000 chars) -----\n%s\n----- END -----",
-                    resp.status_code, resp.url, resp.text[:5000],
+                    resp.status_code,
+                    resp.url,
+                    resp.text[:5000],
                 )
 
         # Fallback: KIT LT's upload endpoint returned a generic "Success"
@@ -8134,7 +8158,7 @@ def _upload_to_internal_server_and_register(
         # encoding only the session name produces a plausible-looking id
         # that 404s on every subsequent poll.
         if not session_id and session_name:
-            home_path = _user_home_path(token)   # ignore form_data["path"] entirely
+            home_path = _user_home_path(token)  # ignore form_data["path"] entirely
             full_path = f"{home_path.rstrip('/')}/{session_name}"
             session_id = base64.b64encode(full_path.encode("utf-8")).decode("ascii")
             logging.info(
@@ -8447,7 +8471,7 @@ def upload_to_internal():
         )
 
         form_data = {
-            "path":  _user_home_path(token),
+            "path": _user_home_path(token),
             "name": session_name,
             "topicname": session_name,
             "date": datetime.datetime.now().strftime("%Y-%m-%d"),
@@ -8535,23 +8559,26 @@ def check_session():
 def dex_token():
     """Forward token exchange to the internal server's /dex/token endpoint."""
     requested = request.headers.get("X-Target-Server")
-    server = requested.rstrip("/") if _is_allowed_server(requested) else INTERNAL_SERVER_URL
+    server = (
+        requested.rstrip("/") if _is_allowed_server(requested) else INTERNAL_SERVER_URL
+    )
     resp = requests.post(
         f"{server}/dex/token",
         data=request.get_data(),
         headers={k: v for k, v in request.headers if k.lower() != "host"},
-        allow_redirects=False, timeout=30, verify=False,
+        allow_redirects=False,
+        timeout=30,
+        verify=False,
     )
     return (resp.content, resp.status_code, resp.headers.items())
+
 
 @app.route("/dex/userinfo", methods=["GET"])
 def dex_userinfo():
     """Forward userinfo request to the internal server's /dex/userinfo endpoint."""
     requested = request.headers.get("X-Target-Server")
     server = (
-        requested.rstrip("/")
-        if _is_allowed_server(requested)
-        else INTERNAL_SERVER_URL
+        requested.rstrip("/") if _is_allowed_server(requested) else INTERNAL_SERVER_URL
     )
     try:
         headers = {k: v for k, v in request.headers if k.lower() != "host"}
@@ -8565,6 +8592,7 @@ def dex_userinfo():
         return (resp.content, resp.status_code, resp.headers.items())
     except requests.exceptions.RequestException as e:
         return jsonify({"error": f"Proxy error: {str(e)}"}), 500
+
 
 # ─── DEBUG ENDPOINTS ────────────────────────────────────────────────────
 
