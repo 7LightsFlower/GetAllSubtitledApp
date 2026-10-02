@@ -8589,6 +8589,59 @@ users["testuser@example.com"] = {
 }
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Startup initialisation
+#
+# Gunicorn imports this module and runs the top-level code, but it never
+# runs the `if __name__ == "__main__":` block below (that only fires when
+# the file is executed directly). Without this call, `load_state()` is
+# skipped under gunicorn and the process starts with empty `videos`,
+# `sessions`, etc. — even though server_state.pkl on the volume is full.
+#
+# Must run *after* every route and helper is defined, and *after* the
+# module-level `users[...]` seeding above.
+# ─────────────────────────────────────────────────────────────────────
+def _initialise_state_once() -> None:
+    """Load persisted state and reconcile with disk. Idempotent."""
+    if getattr(_initialise_state_once, "_done", False):
+        return
+    _initialise_state_once._done = True  # type: ignore[attr-defined]
+
+    try:
+        loaded = load_state()
+        logging.info(
+            "startup: load_state() -> %s (users=%d videos=%d jobs=%d sessions=%d)",
+            loaded,
+            len(users),
+            len(videos),
+            len(jobs),
+            len(sessions),
+        )
+    except Exception:
+        logging.exception("startup: load_state() failed; continuing with empty state")
+
+    # Reconciliation: safe to run every startup. Adding missing entries,
+    # pruning deleted files, regenerating thumbnails.
+    try:
+        rebuild_videos_from_disk()
+    except Exception:
+        logging.exception("startup: rebuild_videos_from_disk() failed")
+
+    try:
+        clean_missing_videos()
+        cleanup_orphaned_data()
+    except Exception:
+        logging.exception("startup: cleanup failed")
+
+    try:
+        regenerate_missing_thumbnails()
+    except Exception:
+        logging.exception("startup: thumbnail regeneration failed")
+
+
+_initialise_state_once()
+
+
 if __name__ == "__main__":
     try:
         import urllib3
@@ -8597,17 +8650,18 @@ if __name__ == "__main__":
     except ImportError:
         pass
 
-    # Load saved state
-    load_state()
+    # Initialisation already ran at import time above, so we don't
+    # repeat load_state() here — but the __main__ path is otherwise
+    # unchanged.
+    logging.info("Starting merged server on 0.0.0.0:5000")
+    logging.info("State file: %s", STATE_FILE)
+    app.run(host="0.0.0.0", port=5000, debug=True)
+    try:
+        import urllib3
 
-    # Reconcile the state file with what's actually on disk. This is
-    # what makes a lost or reset server_state.pkl self-heal: any MP4
-    # in UPLOAD_FOLDER that isn't tracked yet gets a fresh entry.
-    rebuild_videos_from_disk()
-
-    # Clean up missing videos and orphaned data
-    clean_missing_videos()
-    cleanup_orphaned_data()
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    except ImportError:
+        pass
 
     # Remove any stray files from the old versioned-name scheme, keep
     # only "video.mp4" and "video_subtitled.mp4".
@@ -8633,9 +8687,6 @@ if __name__ == "__main__":
                 )
             except OSError:
                 pass
-
-    # Regenerate missing thumbnails
-    regenerate_missing_thumbnails()
 
     logging.info("Starting merged server on 0.0.0.0:5000")
     logging.info("State file: %s", STATE_FILE)
