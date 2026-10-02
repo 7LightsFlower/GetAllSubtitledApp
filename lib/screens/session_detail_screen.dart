@@ -860,6 +860,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     if (confirmed != true) return;
 
     await ServerConfigService.setServer(url);
+    await ServerConfigService.load(); 
     if (!mounted) return;
 
     // Reset auth-related state because it was issued by the previous host.
@@ -2928,13 +2929,19 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   //  WIDGET BUILDERS – SERVER PICKER
   // ═══════════════════════════════════════════════════════════════════
 
+ // session_detail_screen.dart  (replacement)
+
   Widget _buildServerPicker() {
-    final currentLabel = internalServerLabels[internalServerUrl] ?? internalServerUrl;
+    final currentLabel =
+        internalServerLabels[internalServerUrl] ?? internalServerUrl;
+
+    // Built-ins first, then user-added ones.
+    final allServers = ServerConfigService.allServers;
+    final customSet = ServerConfigService.customServers.toSet();
+
     return Card(
       elevation: 1,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(10),
-      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         child: Row(
@@ -2966,63 +2973,301 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                       fontSize: _isNarrow(context) ? 9 : 10,
                       color: Colors.grey[600],
                     ),
-                    maxLines: _isNarrow(context) ? 1 : 1,
+                    maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
                 ],
               ),
             ),
+
+            // ── Add a custom server ─────────────────────────────
+            IconButton(
+              tooltip: 'Add custom server',
+              icon: const Icon(Icons.add_circle_outline, size: 20),
+              onPressed: _showAddServerDialog,
+            ),
+
+            // ── Switch between servers ──────────────────────────
             PopupMenuButton<String>(
               tooltip: 'Switch server',
               icon: const Icon(Icons.swap_horiz, size: 20),
-              onSelected: _changeServer,
-              itemBuilder: (context) => internalServerOptions.map((url) {
-                final isSelected = url == internalServerUrl;
-                final label = internalServerLabels[url] ?? url;
-                return PopupMenuItem<String>(
-                  value: url,
-                  child: Row(
-                    children: [
-                      Icon(
-                        isSelected
-                            ? Icons.radio_button_checked
-                            : Icons.radio_button_unchecked,
-                        size: 18,
-                        color: isSelected ? Colors.blue : Colors.grey,
+              onSelected: (value) async {
+                if (value == '__add__') {
+                  await _showAddServerDialog();
+                } else {
+                  await _changeServer(value);
+                }
+              },
+              itemBuilder: (context) {
+                final items = <PopupMenuEntry<String>>[];
+
+                for (final url in allServers) {
+                  final isSelected = url == internalServerUrl;
+                  final isCustom = customSet.contains(url);
+                  final label = internalServerLabels[url] ?? url;
+
+                  items.add(
+                    PopupMenuItem<String>(
+                      value: url,
+                      child: Row(
+                        children: [
+                          Icon(
+                            isSelected
+                                ? Icons.radio_button_checked
+                                : Icons.radio_button_unchecked,
+                            size: 18,
+                            color: isSelected ? Colors.blue : Colors.grey,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Row(
+                                  children: [
+                                    Flexible(
+                                      child: Text(
+                                        label,
+                                        style: TextStyle(
+                                          fontWeight: isSelected
+                                              ? FontWeight.bold
+                                              : FontWeight.normal,
+                                        ),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                    if (isCustom) ...[
+                                      const SizedBox(width: 6),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 6, vertical: 1),
+                                        decoration: BoxDecoration(
+                                          color: Colors.teal.shade50,
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                          border: Border.all(
+                                              color: Colors.teal.shade200),
+                                        ),
+                                        child: Text(
+                                          'custom',
+                                          style: TextStyle(
+                                            fontSize: 9,
+                                            color: Colors.teal.shade800,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                                Text(
+                                  url,
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: Colors.grey[600],
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ],
+                            ),
+                          ),
+                          // Remove button for custom entries only.
+                          if (isCustom)
+                            IconButton(
+                              tooltip: 'Remove',
+                              icon: const Icon(Icons.close, size: 16),
+                              onPressed: () async {
+                                await ServerConfigService
+                                    .removeCustomServer(url);
+                                if (!mounted) return;
+                                setState(() {});
+                              },
+                            ),
+                        ],
                       ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              label,
-                              style: TextStyle(
-                                fontWeight: isSelected
-                                    ? FontWeight.bold
-                                    : FontWeight.normal,
-                              ),
-                            ),
-                            Text(
-                              url,
-                              style: TextStyle(
-                                fontSize: 10,
-                                color: Colors.grey[600],
-                              ),
-                            ),
-                          ],
+                    ),
+                  );
+                }
+
+                items.add(const PopupMenuDivider());
+                items.add(
+                  const PopupMenuItem<String>(
+                    value: '__add__',
+                    child: Row(
+                      children: [
+                        Icon(Icons.add, size: 18, color: Colors.blue),
+                        SizedBox(width: 8),
+                        Text(
+                          'Add server…',
+                          style: TextStyle(color: Colors.blue),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 );
-              }).toList(),
+
+                return items;
+              },
             ),
           ],
         ),
       ),
     );
+  }
+  
+  // ═══════════════════════════════════════════════════════════════════
+  //  SERVER PICKER — ADD-CUSTOM-SERVER DIALOG
+  // ═══════════════════════════════════════════════════════════════════
+
+  /// Dialog that lets the user type an arbitrary `lt2srv-XXXX` host.
+  ///
+  /// Validation is done in two places:
+  ///   • the form validator below (immediate feedback),
+  ///   • `ServerConfigService.addCustomServer` (defence in depth).
+  ///
+  /// Both call `isAllowedInternalServer`, which is the *same* regex the
+  /// backend's `_is_allowed_server` uses. If you ever change one, change
+  /// the other.
+  Future<void> _showAddServerDialog() async {
+    final controller = TextEditingController(text: 'https://lt2srv-');
+    final formKey = GlobalKey<FormState>();
+
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.dns_outlined, color: Colors.blueGrey),
+              SizedBox(width: 8),
+              Text('Add internal server'),
+            ],
+          ),
+          content: SizedBox(
+            width: 420,
+            child: Form(
+              key: formKey,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Enter the base URL of an LT2SRV host. The same '
+                    'pattern the backend accepts is enforced here.',
+                    style: TextStyle(fontSize: 12, color: Colors.black54),
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: controller,
+                    autofocus: true,
+                    keyboardType: TextInputType.url,
+                    decoration: const InputDecoration(
+                      labelText: 'Server URL',
+                      hintText: 'https://lt2srv-alice.isl.iar.kit.edu',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.link),
+                    ),
+                    validator: (value) {
+                      final raw = (value ?? '').trim();
+                      if (raw.isEmpty) return 'Enter a URL';
+                      if (!raw.startsWith('https://')) {
+                        return 'Must start with https://';
+                      }
+                      if (!isAllowedInternalServer(raw)) {
+                        return 'Not a recognised lt2srv host';
+                      }
+                      final normalised = raw.endsWith('/')
+                          ? raw.substring(0, raw.length - 1)
+                          : raw;
+                      if (ServerConfigService.allServers
+                          .contains(normalised)) {
+                        return 'Already in the list';
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.shade50,
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: Colors.blue.shade100),
+                    ),
+                    child: const Text(
+                      'Accepted examples:\n'
+                      '  https://lt2srv.iar.kit.edu\n'
+                      '  https://lt2srv-backup.iar.kit.edu\n'
+                      '  https://lt2srv-sscherrer.isl.iar.kit.edu\n'
+                      '  https://lt2srv-alice.isl.iar.kit.edu',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                        height: 1.4,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton.icon(
+              icon: const Icon(Icons.check, size: 18),
+              label: const Text('Add'),
+              onPressed: () {
+                if (!(formKey.currentState?.validate() ?? false)) return;
+                var url = controller.text.trim();
+                if (url.endsWith('/')) {
+                  url = url.substring(0, url.length - 1);
+                }
+                Navigator.pop(ctx, url);
+              },
+            ),
+          ],
+        );
+      },
+    );
+
+    controller.dispose();
+
+    if (result == null) return;
+
+    final outcome = await ServerConfigService.addCustomServer(result);
+    if (!mounted) return;
+
+    switch (outcome) {
+      case AddResult.added:
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Added $result'),
+            action: SnackBarAction(
+              label: 'Switch to it',
+              onPressed: () => _changeServer(result),
+            ),
+          ),
+        );
+        break;
+
+      case AddResult.duplicate:
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('That server is already in the list.')),
+        );
+        break;
+
+      case AddResult.invalid:
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('That does not look like a valid lt2srv host.'),
+          ),
+        );
+        break;
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════

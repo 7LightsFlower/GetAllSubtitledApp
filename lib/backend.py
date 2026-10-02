@@ -107,16 +107,53 @@ def add_no_cache_for_api(response):
         response.headers["Expires"] = "0"
     return response
 
+# ─── DEFAULT INTERNAL SERVER ──────────────────────────────
+INTERNAL_SERVER_URL = "https://lt2srv.iar.kit.edu"
 
-# Servers we are willing to forward uploads to. The client may only
-# pick from this list.
-ALLOWED_TARGET_SERVERS = {
+# ─── ALLOWED TARGET SERVERS ───────────────────────────────
+# Any host of the form:
+#     lt2srv[-<suffix>].iar.kit.edu
+#     lt2srv[-<suffix>].isl.iar.kit.edu
+# A suffix is optional, lowercase, and may contain hyphens/digits.
+_ALLOWED_SERVER_RE = re.compile(
+    r"^https://lt2srv(?:-[a-z0-9]+)*\.(?:isl\.)?iar\.kit\.edu$"
+)
+
+_KNOWN_SERVERS = {
     "https://lt2srv.iar.kit.edu",
     "https://lt2srv-backup.iar.kit.edu",
     "https://lt2srv-sscherrer.isl.iar.kit.edu",
 }
-INTERNAL_SERVER_URL = "https://lt2srv.iar.kit.edu"  # default
+ALLOWED_TARGET_SERVERS = frozenset(_KNOWN_SERVERS)
 
+
+def _is_allowed_server(url: str) -> bool:
+    """True if we are willing to forward an upload to this host.
+
+    Two ways in:
+      1. It's one of the curated `_KNOWN_SERVERS` (fast path).
+      2. It matches the `lt2srv-XXXX[.isl].iar.kit.edu` pattern AND
+         matches the same regex the Flutter client validates with.
+    """
+    if not url:
+        return False
+    candidate = url.rstrip("/")
+    return candidate in ALLOWED_TARGET_SERVERS or bool(
+        _ALLOWED_SERVER_RE.match(candidate)
+    )
+
+
+def _resolve_target_url(requested: str | None) -> str:
+    """Pick a target upload URL, restricted to the allow-list."""
+    if requested:
+        candidate = requested.rstrip("/")
+        if _is_allowed_server(candidate):
+            return f"{candidate}/upload_lecture"
+        logging.warning("Rejected unknown target server: %r", requested)
+    return f"{INTERNAL_SERVER_URL}/upload_lecture"
+
+
+# ─── UPLOAD MODES ─────────────────────────────────────────
 # When True, upload a tiny solid-colour video that carries the audio
 # instead of the full video. The KIT server only processes the audio
 # track, so this is a 100× reduction in upload size.
@@ -128,15 +165,6 @@ USE_GREEN_SCREEN_UPLOAD = os.environ.get("USE_GREEN_SCREEN_UPLOAD", "1") == "1"
 # configurable so callers can toggle Transfer-Encoding: chunked when
 # needed without hitting a NameError during request handling.
 USE_CHUNKED_UPLOAD = os.environ.get("USE_CHUNKED_UPLOAD", "0") == "1"
-
-
-def _resolve_target_url(requested: str | None) -> str:
-    """Pick a target upload URL, restricted to the allow-list."""
-    if requested and requested.rstrip("/") in ALLOWED_TARGET_SERVERS:
-        return f"{requested.rstrip('/')}/upload_lecture"
-    if requested:
-        logging.warning("Rejected unknown target server: %r", requested)
-    return f"{INTERNAL_SERVER_URL}/upload_lecture"
 
 
 TARGET_URL = f"{INTERNAL_SERVER_URL}/upload_lecture"
@@ -8388,28 +8416,29 @@ def check_session():
 @app.route("/dex/token", methods=["POST"])
 def dex_token():
     """Forward token exchange to the internal server's /dex/token endpoint."""
-    try:
-        headers = {k: v for k, v in request.headers if k.lower() != "host"}
-        resp = requests.post(
-            f"{INTERNAL_SERVER_URL}/dex/token",
-            data=request.get_data(),
-            headers=headers,
-            allow_redirects=False,
-            timeout=30,
-            verify=False,
-        )
-        return (resp.content, resp.status_code, resp.headers.items())
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": f"Proxy error: {str(e)}"}), 500
-
+    requested = request.headers.get("X-Target-Server")
+    server = requested.rstrip("/") if _is_allowed_server(requested) else INTERNAL_SERVER_URL
+    resp = requests.post(
+        f"{server}/dex/token",
+        data=request.get_data(),
+        headers={k: v for k, v in request.headers if k.lower() != "host"},
+        allow_redirects=False, timeout=30, verify=False,
+    )
+    return (resp.content, resp.status_code, resp.headers.items())
 
 @app.route("/dex/userinfo", methods=["GET"])
 def dex_userinfo():
     """Forward userinfo request to the internal server's /dex/userinfo endpoint."""
+    requested = request.headers.get("X-Target-Server")
+    server = (
+        requested.rstrip("/")
+        if _is_allowed_server(requested)
+        else INTERNAL_SERVER_URL
+    )
     try:
         headers = {k: v for k, v in request.headers if k.lower() != "host"}
         resp = requests.get(
-            f"{INTERNAL_SERVER_URL}/dex/userinfo",
+            f"{server}/dex/userinfo",
             headers=headers,
             allow_redirects=False,
             timeout=30,
@@ -8418,7 +8447,6 @@ def dex_userinfo():
         return (resp.content, resp.status_code, resp.headers.items())
     except requests.exceptions.RequestException as e:
         return jsonify({"error": f"Proxy error: {str(e)}"}), 500
-
 
 # ─── DEBUG ENDPOINTS ────────────────────────────────────────────────────
 

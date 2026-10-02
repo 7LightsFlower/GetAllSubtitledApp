@@ -1,3 +1,5 @@
 proxy:
   - path: /dex/token
-    target: https://lt2srv-sscherrer.isl.iar.kit.edu/dex/token
+    target: ${INTERNAL_SERVER_URL}/dex/token
+  - path: /dex/userinfo
+    target: ${INTERNAL_SERVER_URL}/dex/userinfo

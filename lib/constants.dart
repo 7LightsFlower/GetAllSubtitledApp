@@ -32,19 +32,19 @@ const String publicServerUrl = 'https://get-all-subtitled.isl.iar.kit.edu';
 // ─── Internal backend server (video processing + Dex OAuth) ────
 // Options the user may pick from. No trailing slash.
 const List<String> internalServerOptions = <String>[
-  'https://lt2srv-sscherrer.isl.iar.kit.edu',
   'https://lt2srv.iar.kit.edu',
   'https://lt2srv-backup.iar.kit.edu',
+  'https://lt2srv-sscherrer.isl.iar.kit.edu',
 ];
 
 const String defaultInternalServerUrl =
-    'https://lt2srv-sscherrer.isl.iar.kit.edu';
+    'https://lt2srv.iar.kit.edu';
 
 const Map<String, String> internalServerLabels = {
-  'https://lt2srv-sscherrer.isl.iar.kit.edu':
-      'lt2srv-sscherrer (Default for now)',
-  'https://lt2srv.iar.kit.edu': 'LT Main',
+  'https://lt2srv.iar.kit.edu': 'LT Main (Default)',
   'https://lt2srv-backup.iar.kit.edu': 'LT Backup',
+  'https://lt2srv-sscherrer.isl.iar.kit.edu':
+      'lt2srv-sscherrer',
 };
 
 String internalServerUrl = defaultInternalServerUrl;
