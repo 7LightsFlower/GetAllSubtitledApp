@@ -464,8 +464,15 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
     setState(() {
       _ttsTracks = tracks;
-      _selectedTts = tracks.isNotEmpty ? tracks.first.label : null;
+      _selectedTts = null;
     });
+
+    if (tracks.isNotEmpty) {
+      // Defer to let the widget tree settle (context/dialog safety).
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _applyTTSSource(tracks.first.label);
+      });
+    }
   }
 
   /// Extract language name from filename.
