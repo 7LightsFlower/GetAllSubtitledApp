@@ -1000,44 +1000,48 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
   /// Swap the audio source between the video's own track and a
   /// synthesized TTS track. Called by _TTSSelector.onChanged.
+  static const int _maxTtsBytes = 30 * 1024 * 1024; // fallback cap only
+
   Future<void> _applyTTSSource(String? label) async {
     final video = _videoController;
 
-    // Always reset the audio state first so switching back and forth
-    // doesn't leave a stale track playing underneath.
     await _ttsPlayer.stop();
 
     if (label == null) {
-      // Back to the video's own audio.
       setState(() => _selectedTts = null);
       await video?.setVolume(1.0);
       return;
     }
 
-    final track = _ttsTracks.firstWhere(
-      (t) => t.label == label,
-      orElse: () => _ttsTracks.first,
-    );
+    // Safe lookup — no silent orElse fallback.
+    TTSTrack? track;
+    for (final t in _ttsTracks) {
+      if (t.label == label) { track = t; break; }
+    }
+    if (track == null) {
+      debugPrint('TTS label not found: $label');
+      return;
+    }
 
     try {
-      // Mute the video so its original audio doesn't bleed through.
       await video?.setVolume(0.0);
 
-      // Load the TTS track. audioplayers supports network URLs directly.
-      await _ttsPlayer.setSourceUrl(track.url);
+      // 1) Streaming path first.
+      final streamed = await _tryLoadViaSignedUrl(track);
 
-      // Sync playback position with the video, then mirror its state.
-      if (video != null && video.value.isInitialized) {
-        await _ttsPlayer.seek(video.value.position);
-        if (video.value.isPlaying) {
-          await _ttsPlayer.resume();
-        }
+      // 2) Fallback only if the signed endpoint isn't there.
+      if (!streamed) {
+        await _loadTtsAsBytes(track);
       }
 
+      // 3) Shared tail: line the audio up with the video.
+      if (video != null && video.value.isInitialized) {
+        await _ttsPlayer.seek(video.value.position);
+        if (video.value.isPlaying) await _ttsPlayer.resume();
+      }
       setState(() => _selectedTts = label);
     } catch (e) {
       debugPrint('Failed to load TTS track "$label": $e');
-      // Roll back so the UI doesn't claim a track is active when it isn't.
       await video?.setVolume(1.0);
       if (mounted) {
         setState(() => _selectedTts = null);
@@ -1050,6 +1054,107 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       }
     }
   }
+
+  /// Option B. Returns true if the audio source was set from a signed URL.
+  /// Returns false *only* when the endpoint is missing — other failures throw
+  /// so we don't silently mask a real problem behind the bytes fallback.
+  Future<bool> _tryLoadViaSignedUrl(TTSTrack track) async {
+    final token = await InternalAuthService.getToken();
+    final signUri = Uri.parse(
+      '$flaskServerUrl/session-tts-sign/${widget.sessionId}/'
+      '${Uri.encodeComponent(track.label)}',
+    );
+
+    final resp = await http.get(
+      signUri,
+      headers: {'Authorization': 'Bearer ${token ?? ''}'},
+    );
+
+    // Endpoint not deployed → fall back.
+    if (resp.statusCode == 404 || resp.statusCode == 501) {
+      debugPrint('Signed TTS endpoint unavailable (HTTP ${resp.statusCode})');
+      return false;
+    }
+    // Auth errors would hit the same wall on the fallback path — fail loudly.
+    if (resp.statusCode != 200) {
+      throw Exception('TTS sign failed: HTTP ${resp.statusCode}');
+    }
+
+    final signedPath = (jsonDecode(resp.body) as Map)['url'] as String;
+    final signedUrl = signedPath.startsWith('http')
+        ? signedPath
+        : '$flaskServerUrl$signedPath';
+
+    await _ttsPlayer.setSourceUrl(signedUrl);
+    return true;
+  }
+
+  /// Option A. Full-bytes fallback with a size guard.
+  Future<void> _loadTtsAsBytes(TTSTrack track) async {
+    final token = await InternalAuthService.getToken();
+    final uri = Uri.parse(track.url);
+    final headers = {'Authorization': 'Bearer ${token ?? ''}'};
+
+    // Ask for size first, if the server supports HEAD.
+    int? declared;
+    try {
+      final head = await http.head(uri, headers: headers);
+      declared = int.tryParse(head.headers['content-length'] ?? '');
+    } catch (_) {/* HEAD unsupported — check after download instead */}
+
+    if (declared != null && declared > _maxTtsBytes) {
+      final ok = await _confirmLargeTts(declared);
+      if (!ok) throw Exception('cancelled: track exceeds in-memory limit');
+    }
+
+    final resp = await http.get(uri, headers: headers);
+    if (resp.statusCode != 200) {
+      throw Exception('TTS fetch failed: HTTP ${resp.statusCode}');
+    }
+
+    if (declared == null && resp.bodyBytes.length > _maxTtsBytes) {
+      throw Exception(
+        'TTS is ${_humanBytes(resp.bodyBytes.length)}, exceeds '
+        '${_humanBytes(_maxTtsBytes)} in-memory limit',
+      );
+    }
+
+    await _ttsPlayer.setSourceBytes(resp.bodyBytes, mimeType: 'audio/wav');
+  }
+
+  Future<bool> _confirmLargeTts(int bytes) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Large TTS track'),
+        content: Text(
+          'This track is ${_humanBytes(bytes)} and will be loaded fully '
+          'into memory (streaming is unavailable). This can freeze the tab.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Load anyway'),
+          ),
+        ],
+      ),
+    );
+    return ok ?? false;
+  }
+
+  String _humanBytes(int b) {
+    if (b < 1024) return '$b B';
+    if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(1)} KB';
+    if (b < 1024 * 1024 * 1024) {
+      return '${(b / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(b / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+  }
+
 
   void _jumpToChapter(ChapterData chapter) {
     if (_videoController == null ||
