@@ -8258,6 +8258,11 @@ def _upload_to_internal_server_and_register(
     upload_filename_used = os.path.basename(local_path)
     gs_cleanup: list = []
     temp_multipart_path = None
+    logging.info(
+        "internal_upload: uploading %s (%d bytes) to KIT",
+        os.path.basename(upload_source_path),
+        os.path.getsize(upload_source_path),
+    )
 
     try:
         # ── 1. Decide what to send ────────────────────────────────
@@ -8717,32 +8722,72 @@ def upload_to_internal():
             or os.path.splitext(file_name)[0]
         )
 
+        # Build the KIT form data from whatever the client sent in
+        # the JSON body, falling back to the previous hard-coded
+        # defaults for anything missing. This keeps old clients that
+        # only send `video_key` working while letting the current UI
+        # pass the full job configuration (languages, features,
+        # post-production, timeouts, …).
+        def _as_list(v):
+            """Normalise a scalar-or-list into a list of strings."""
+            if v is None:
+                return None
+            if isinstance(v, list):
+                return [str(x) for x in v]
+            return [str(v)]
+
         form_data = {
-            "path": _user_home_path(token),
+            "path": _user_home_path(token),  # never trust a client path
             "name": session_name,
-            "topicname": session_name,
-            "date": datetime.datetime.now().strftime("%Y-%m-%d"),
-            "speakername": "",
-            "availability": "private",
-            "format": "mixed",
-            "smartChaptering": "online_dynamic",
-            "errorCorrection": "None",
-            "ttsQualityMode": "low_latency",
-            "language": ["en"],
-            "mtLanguage": ["de"],
-            "audioLanguage": ["de"],
-            "profanity": "1",
-            "filter_music": "1",
-            "summarization": "1",
-            "logging": "1",
-            "legals": "1",
-            "profile": "profile_1",
-            "profile_names": "",
-            "shorten": "",
-            "mute": "120",
-            "pause": "2",
+            "topicname": data_in.get("topicname") or session_name,
+            "date": (
+                data_in.get("date")
+                or datetime.datetime.now().strftime("%Y-%m-%d")
+            ),
+            "speakername": data_in.get("speakername") or "",
+            "availability": data_in.get("availability") or "private",
+            "format": data_in.get("format") or "mixed",
+            "smartChaptering":
+                data_in.get("smartChaptering") or "online_dynamic",
+            "errorCorrection":
+                data_in.get("errorCorrection") or "None",
+            "ttsQualityMode":
+                data_in.get("ttsQualityMode") or "low_latency",
+            "language":
+                _as_list(data_in.get("language")) or ["en"],
+            "mtLanguage":
+                _as_list(data_in.get("mtLanguage")) or ["de"],
+            "audioLanguage":
+                _as_list(data_in.get("audioLanguage")) or ["de"],
+            "profanity": str(data_in.get("profanity") or "1"),
+            "filter_music": str(data_in.get("filter_music") or "1"),
+            "summarization": str(data_in.get("summarization") or "1"),
+            "logging": str(data_in.get("logging") or "1"),
+            "legals": str(data_in.get("legals") or "1"),
+            "profile": data_in.get("profile") or "profile_1",
+            "profile_names": data_in.get("profile_names") or "",
+            "shorten": data_in.get("shorten") or "",
+            "mute": str(data_in.get("mute") or "120"),
+            "pause": str(data_in.get("pause") or "2"),
             "save_profile": "1",
         }
+
+        # Optional feature flags — only sent when the client asked
+        # for them. KIT's own defaults apply otherwise.
+        for opt_key in (
+            "notes",
+            "saasr",
+            "aiassistant",
+            "distinguish_unknown_speakers",
+        ):
+            val = data_in.get(opt_key)
+            if val:
+                form_data[opt_key] = str(val)
+
+        # Post-production shortening rates (e.g. ["50", "90"]).
+        postprod = _as_list(data_in.get("postproduction"))
+        if postprod:
+            form_data["postproduction"] = postprod
 
         expected_mt = data_in.get("mtLanguage") or data_in.get("mt_languages") or ["de"]
         if isinstance(expected_mt, str):

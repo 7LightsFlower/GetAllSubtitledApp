@@ -354,6 +354,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   /// Extract the email from a LT KIT bearer token.
   ///
   /// Token format: `<opaque>|<expiry>|<email>`.
+  // ignore: unused_element
   String _emailFromToken(String token) {
     final parts = token.split('|');
     if (parts.length >= 3) {
@@ -888,7 +889,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       _outputStatus = '';
       _tokenStatus = '🔀 Switched to: $url — paste a token for this host';
     });
-    
+
     await _checkConnection();
 
     if (mounted) {
@@ -1416,37 +1417,8 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       final token = await _getToken();
       debugPrint('🚀 [UPLOAD] Using token: $token');
 
-      final userEmail = _emailFromToken(token);   // parse token.split('|').last
-
-      final localMediaUrl = Uri.parse('$authBaseUrl/media/${widget.videoKey}');      
-      debugPrint('🌐 [DEBUG] Fetching video from local server: $localMediaUrl');
-
-      http.Response localResponse = await http.get(localMediaUrl);
-      if (localResponse.statusCode != 200) {
-        final fallbackUrl =
-            Uri.parse('$authBaseUrl/videos/${widget.videoKey}/download');
-        final fallbackResponse = await http.get(fallbackUrl);
-        if (fallbackResponse.statusCode != 200) {
-          throw Exception(
-            'Failed to fetch video from local server (HTTP ${fallbackResponse.statusCode}). '
-            'Body: ${fallbackResponse.body}',
-          );
-        }
-        localResponse = fallbackResponse;
-      }
-
-      final videoBytes = localResponse.bodyBytes;
-      if (videoBytes.isEmpty) {
-        throw Exception('Video file is empty.');
-      }
-
-      debugPrint('✅ [DEBUG] Video fetched from local: ${videoBytes.length} bytes');
-
       await _uploadToInternalServer(
-        videoBytes: videoBytes,
-        fileName: _detail?.fileName ?? '${widget.videoKey}.mp4',
         token: token,
-        userEmail: userEmail,
         sessionName: _sessionNameController.text.trim(),
         topicName: _topicNameController.text.trim(),
         date: _date,
@@ -1488,11 +1460,9 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     }
   }
 
+
   Future<void> _uploadToInternalServer({
-    required List<int> videoBytes,
-    required String fileName,
     required String token,
-    required String userEmail,
     required String sessionName,
     required String topicName,
     required String date,
@@ -1520,195 +1490,139 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   }) async {
     final uploadUrl = '$flaskServerUrl/upload';
 
-    final formData = html.FormData();
+    // Compact JSON body. The 1 GB video never crosses the network —
+    // the backend reads it from its own uploads/ folder using
+    // `video_key`, builds the green-screen, and sends only that
+    // small file to KIT.
+    final body = <String, dynamic>{
+      'video_key': widget.videoKey,
+      'token': token,
+      'targetServer': internalServerUrl,
+      'name': sessionName,
+      'topicname': topicName,
+      'date': date,
+      'speakername': speakerName,
+      'availability': availability,
+      'format': format,
+      'smartChaptering': smartChaptering,
+      'errorCorrection': errorCorrection,
+      'ttsQualityMode': ttsQualityMode,
+      'language': inputLanguages,
+      'mtLanguage': outputLanguages,
+      'audioLanguage': audioLanguages,
+      'profanity': profanityFilter ? '1' : '0',
+      'filter_music': filterMusic ? '1' : '0',
+      'summarization': enableSummarization ? '1' : '0',
+      'notes': enableLiveNotes ? '1' : '0',
+      'saasr': enableDiarization ? '1' : '0',
+      'aiassistant': enableAIAssistant ? '1' : '0',
+      'logging': saveSession ? '1' : '0',
+      'distinguish_unknown_speakers':
+          distinguishUnknownSpeakers ? '1' : '0',
+      'postproduction': postproduction,
+      'shorten': shorten,
+      'mute': mute.toString(),
+      'pause': pause.toString(),
+      'legals': '1',
+      'profile': 'profile_1',
+      'profile_names': '',
+      'save_profile': '1',
+    };
 
-    formData.append('token', token);
-    formData.append('targetServer', internalServerUrl); 
-    formData.append('path', '/home/$userEmail');
-    formData.append('name', sessionName);
-    formData.append('topicname', topicName);
-    formData.append('date', date);
-    formData.append('speakername', speakerName);
-    formData.append('availability', availability);
-    formData.append('format', format);
-    formData.append('smartChaptering', smartChaptering);
-    formData.append('errorCorrection', errorCorrection);
-    formData.append('ttsQualityMode', ttsQualityMode);
+    final encoded = jsonEncode(body);
+    debugPrint(
+      '📤 [UPLOAD] POST $uploadUrl  '
+      '(body=${encoded.length} bytes, video_key=${widget.videoKey})',
+    );
 
-    for (final lang in inputLanguages) {
-      formData.append('language', lang);
+    final response = await http.post(
+      Uri.parse(uploadUrl),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $token',
+      },
+      body: encoded,
+    );
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception(
+        'Upload failed: HTTP ${response.statusCode} — ${response.body}',
+      );
     }
-    for (final lang in outputLanguages) {
-      formData.append('mtLanguage', lang);
-    }
-    for (final lang in audioLanguages) {
-      formData.append('audioLanguage', lang);
-    }
 
-    if (profanityFilter) formData.append('profanity', '1');
-    if (filterMusic) formData.append('filter_music', '1');
-    if (enableSummarization) formData.append('summarization', '1');
-    if (enableLiveNotes) formData.append('notes', '1');
-    if (enableDiarization) formData.append('saasr', '1');
-    if (enableAIAssistant) formData.append('aiassistant', '1');
-    if (saveSession) formData.append('logging', '1');
-    if (distinguishUnknownSpeakers) {
-      formData.append('distinguish_unknown_speakers', '1');
+    // The backend always returns JSON. Parse it.
+    Map<String, dynamic> data;
+    try {
+      data = jsonDecode(response.body) as Map<String, dynamic>;
+    } catch (e) {
+      throw Exception(
+        'Server returned a non-JSON response: ${response.body}',
+      );
     }
 
-    formData.append('legals', '1');
-    formData.append('profile', 'profile_1');
-    formData.append('profile_names', '');
-    formData.append('shorten', shorten);
-    formData.append('mute', mute.toString());
-    formData.append('pause', pause.toString());
-    formData.append('save_profile', '1');
+    final sessionId = data['session_id']?.toString() ?? '';
+    final sessionUrl = data['session_url']?.toString() ?? '';
 
-    for (final rate in postproduction) {
-      formData.append('postproduction', rate);
+    if (sessionId.isEmpty) {
+      throw Exception(
+        'Server did not return a session_id. Body: ${response.body}',
+      );
     }
 
-    final blob = html.Blob([videoBytes]);
+    if (!mounted) return;
 
-    String uploadFileName = fileName;
-    if (!uploadFileName.toLowerCase().endsWith('.mp4')) {
-      uploadFileName = '$uploadFileName.mp4';
-    }
-    formData.appendBlob('videofile', blob, uploadFileName);
-
-    final request = html.HttpRequest();
-    request.open('POST', uploadUrl);
-    request.send(formData);
-    await request.onLoadEnd.first;
-
-    final status = request.status ?? 0;
-    final responseText = request.responseText;
-    final finalUrl = request.responseUrl;
-
-    bool historySaved = false;
-
-    if (status >= 200 && status < 300) {
-      if (mounted) {
-        try {
-          final data = jsonDecode(responseText ?? '{}');
-          setState(() {
-            _responseMessage = data['data']?['raw_response'] ??
-                data['data']?['message'] ??
-                data['message'] ??
-                'Upload successful!';
-            _responseHtml = data['html'] ?? '';
-            _sessionUrl = data['session_url'] ?? '';
-            _sessionId = data['session_id']?.toString() ?? '';
-            _videoKeyResponse = data['video_key'] ?? '';
-            _showResponse = true;
-          });
-          _printSessionLink();
-        } catch (_) {
-          final parsedSessionId =
-              _parseHtmlResponseAndReturnSessionId(responseText ?? '');
-          if (parsedSessionId != null && parsedSessionId.isNotEmpty) {
-            if (mounted) {
-              await InternalAuthService.saveSessionId(
-                  widget.videoKey, parsedSessionId);
-            }
-          }
-
-          if (mounted) {
-            setState(() {
-              _responseMessage = responseText ?? 'Upload successful!';
-              _showResponse = true;
-            });
-          }
-          _printSessionLink();
-        }
+    // KIT can put a raw_response / message inside a "data" object,
+    // or as a top-level "message". Try all three.
+    String pickMessage() {
+      final d = data['data'];
+      if (d is Map) {
+        final m = d['raw_response'] ?? d['message'];
+        if (m != null) return m.toString();
       }
+      final top = data['message'];
+      if (top != null) return top.toString();
+      return 'Upload successful!';
+    }
 
-      if (finalUrl != null && finalUrl.contains('/archivesession/')) {
-        final sessionId =
-            finalUrl.split('/archivesession/')[-1].split('/')[0];
-        if (mounted) {
-          setState(() {
-            _sessionId = sessionId;
-            _sessionUrl = finalUrl;
-            _savedSessionId = sessionId;
-            _savedSessionUrl = finalUrl;
-            _hasSessionId = true;
-            _outputStatus = '✅ Upload complete! Session ID: $sessionId\n'
-                'Click "Check Output" to see if processing is finished.';
-          });
+    setState(() {
+      _responseMessage = pickMessage();
+      _responseHtml = data['html']?.toString() ?? '';
+      _sessionUrl = sessionUrl;
+      _sessionId = sessionId;
+      _videoKeyResponse = data['video_key']?.toString() ?? '';
+      _showResponse = true;
 
-          await InternalAuthService.saveSessionId(widget.videoKey, sessionId);
+      _savedSessionId = sessionId;
+      _savedSessionUrl = sessionUrl;
+      _hasSessionId = true;
+      _outputStatus =
+          '✅ Upload complete! Session ID: $sessionId\n'
+          'Click "Check Output" to see if processing is finished.';
+    });
 
-          if (!historySaved) {
-            await _saveJobToHistory(
-              sessionId: sessionId,
-              sessionUrl: finalUrl,
-              sessionName: _sessionNameController.text.trim(),
-              status: 'Processing... ⏳',
-              hasOutput: false,
-            );
-            historySaved = true;
-          }
+    await InternalAuthService.saveSessionId(widget.videoKey, sessionId);
+    await _saveJobToHistory(
+      sessionId: sessionId,
+      sessionUrl: sessionUrl,
+      sessionName: sessionName,
+      status: 'Processing... ⏳',
+      hasOutput: false,
+    );
 
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('✅ Upload complete! Session ID: $sessionId'),
-                backgroundColor: Colors.green,
-                duration: const Duration(seconds: 4),
-              ),
-            );
-          }
-        }
-        return;
-      }
+    _printSessionLink();
 
-      try {
-        final data = jsonDecode(responseText ?? '');
-        final sessionId = data['session_id']?.toString();
-        if (sessionId != null && sessionId.isNotEmpty) {
-          if (mounted) {
-            setState(() {
-              _sessionId = sessionId;
-              _sessionUrl = data['session_url'] ?? '';
-              _savedSessionId = sessionId;
-              _savedSessionUrl = data['session_url'] ?? '';
-              _hasSessionId = true;
-              _outputStatus = '✅ Upload complete! Session ID: $sessionId\n'
-                  'Click "Check Output" to see if processing is finished.';
-            });
-
-            await InternalAuthService.saveSessionId(widget.videoKey, sessionId);
-
-            if (!historySaved) {
-              await _saveJobToHistory(
-                sessionId: sessionId,
-                sessionUrl: data['session_url'] ?? '',
-                sessionName: _sessionNameController.text.trim(),
-                status: 'Processing... ⏳',
-                hasOutput: false,
-              );
-              historySaved = true;
-            }
-
-            if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text('✅ Upload complete! Session ID: $sessionId'),
-                  backgroundColor: Colors.green,
-                  duration: const Duration(seconds: 4),
-                ),
-              );
-            }
-          }
-          return;
-        }
-      } catch (_) {}
-
-      return;
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('✅ Upload complete! Session ID: $sessionId'),
+          backgroundColor: Colors.green,
+          duration: const Duration(seconds: 4),
+        ),
+      );
     }
   }
 
+  // ignore: unused_element
   String? _parseHtmlResponseAndReturnSessionId(String html) {
     final RegExp linkRegex = RegExp(r'<a href="([^"]+)"[^>]*>([^<]+)</a>');
     final linkMatch = linkRegex.firstMatch(html);
