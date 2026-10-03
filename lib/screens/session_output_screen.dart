@@ -57,6 +57,12 @@ class VTTCue {
 
 enum SessionView { transcript, split, files }
 
+/// Which TTS loading path the UI should use.
+///
+/// - [TtsPath.stream]  → backend URL, works offline once WAVs are local
+/// - [TtsPath.signed]  → legacy: signed URL + bytes fallback
+enum TtsPath { stream, signed }
+
 // ─── TTS AUDIO SOURCE SELECTOR ─────────────────────────────────────
 //
 // Mirrors the "Audio source" <select> in the KIT archive page: lets
@@ -449,6 +455,11 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     final seenLabels = <String>{};
 
     for (final lang in languages) {
+      // KIT LT only serves TTS for real target languages. The speaker's own
+      // ASR track ("Transcript") has no matching audio on the server.
+      if (lang == 'Transcript' || lang.contains('Original ASR')) {
+        continue;
+      }
       final simple = _extractSimpleLanguage(lang);
       if (simple.isEmpty || simple == 'Unknown') continue;
 
@@ -1009,7 +1020,10 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   /// synthesized TTS track. Called by _TTSSelector.onChanged.
   static const int _maxTtsBytes = 30 * 1024 * 1024; // fallback cap only
 
-  Future<void> _applyTTSSource(String? label) async {
+  /// Original signed-URL + bytes-fallback path. Kept for reference and
+  /// for the case where a future server variant only exposes the
+  /// signed endpoint. Not called by default — see _applyTTSSource.
+  Future<void> _applyTTSSourceSigned(String? label) async {
     final video = _videoController;
 
     await _ttsPlayer.stop();
@@ -1059,6 +1073,72 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           ),
         );
       }
+    }
+  }
+
+  /// Streams the TTS track straight from the backend URL.
+  ///
+  /// The backend now serves /session-tts/… from a local WAV when it has
+  /// one, so this works offline with no token, no CORS preflight, and no
+  /// in-memory size limit. When the WAV isn't local, the backend proxies
+  /// KIT using the token it already cached — same URL, same call.
+  Future<void> _applyTTSSourceStreaming(String? label) async {
+    final video = _videoController;
+    await _ttsPlayer.stop();
+
+    if (label == null) {
+      setState(() => _selectedTts = null);
+      await video?.setVolume(1.0);
+      return;
+    }
+
+    TTSTrack? track;
+    for (final t in _ttsTracks) {
+      if (t.label == label) { track = t; break; }
+    }
+    if (track == null) {
+      debugPrint('TTS label not found: $label');
+      return;
+    }
+
+    try {
+      await video?.setVolume(0.0);
+
+      // No Authorization header → no CORS preflight → no 30 MB ceiling.
+      // Works whether the backend serves a local file or proxies KIT.
+      await _ttsPlayer.setSourceUrl(track.url);
+
+      if (video != null && video.value.isInitialized) {
+        await _ttsPlayer.seek(video.value.position);
+        if (video.value.isPlaying) await _ttsPlayer.resume();
+      }
+      setState(() => _selectedTts = label);
+    } catch (e) {
+      debugPrint('Failed to load TTS track "$label": $e');
+      await video?.setVolume(1.0);
+      if (mounted) {
+        setState(() => _selectedTts = null);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('❌ Failed to load TTS audio: $e')),
+        );
+      }
+    }
+  }
+
+
+  /// Default path for TTS loading. Change this to TtsPath.signed to
+  /// fall back to the old signed-URL/bytes behaviour without touching
+  /// any other code.
+  static const TtsPath _ttsPath = TtsPath.stream;
+
+  /// Entry point for the TTS dropdown. Dispatches to the selected
+  /// implementation so both remain available and neither is dead code.
+  Future<void> _applyTTSSource(String? label) {
+    switch (_ttsPath) {
+      case TtsPath.stream:
+        return _applyTTSSourceStreaming(label);
+      case TtsPath.signed:
+        return _applyTTSSourceSigned(label);
     }
   }
 

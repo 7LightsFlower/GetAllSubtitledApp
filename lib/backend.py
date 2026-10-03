@@ -118,11 +118,18 @@ INTERNAL_SERVER_URL = "https://lt2srv.iar.kit.edu"
 
 # ─── ALLOWED TARGET SERVERS ───────────────────────────────
 # Any host of the form:
-#     lt2srv[-<suffix>].iar.kit.edu
-#     lt2srv[-<suffix>].isl.iar.kit.edu
-# A suffix is optional, lowercase, and may contain hyphens/digits.
+#     lt2srv.iar.kit.edu                          (bare host, no `isl.`)
+#     lt2srv-<suffix>.iar.kit.edu
+#     lt2srv-<suffix>.isl.iar.kit.edu
+# A suffix is mandatory when `isl.` is present — KIT does not publish
+# `lt2srv.isl.iar.kit.edu`, and allowing it here let a stale
+# `INTERNAL_SERVER_URL` slip past validation and then 404 on every poll.
 _ALLOWED_SERVER_RE = re.compile(
-    r"^https://lt2srv(?:-[a-z0-9]+)*\.(?:isl\.)?iar\.kit\.edu$"
+    r"^https://(?:"
+    r"lt2srv\.iar\.kit\.edu"
+    r"|lt2srv-[a-z0-9]+(?:-[a-z0-9]+)*\.iar\.kit\.edu"
+    r"|lt2srv-[a-z0-9]+(?:-[a-z0-9]+)*\.isl\.iar\.kit\.edu"
+    r")$"
 )
 
 _KNOWN_SERVERS = {
@@ -819,8 +826,17 @@ def _extract_session_id(resp: requests.Response) -> str | None:
 
     sid = _session_id_from_any_url(body)
     if sid:
+        logging.info("_extract_session_id: matched bare URL in body")
         return sid
 
+    logging.warning(
+        "_extract_session_id: no match. status=%s final_url=%s "
+        "content_type=%r body_len=%d",
+        resp.status_code,
+        resp.url,
+        resp.headers.get("Content-Type", "<none>"),
+        len(body),
+    )
     return None
 
 
@@ -2242,8 +2258,21 @@ def _download_session_files_locked(session_id, token, server_url):
             vtt_path = os.path.join(session_dir, vtt_name)
             _job_add_file(session_id, vtt_name, os.path.getsize(vtt_path))
             _job_log(session_id, f"Generated {vtt_name}")
+
     else:
         _job_log(session_id, "No transcripts extracted", level="warning")
+
+    # ── Pull TTS WAVs alongside the VTTs, so playback no longer
+    #    depends on a live KIT token. ─────────────────────────────
+    if _is_cancelled(session_id):
+        raise _JobCancelled(
+            f"Session {_short_sid(session_id)} cancelled before TTS download"
+        )
+    try:
+        download_tts_files(session_id, token, server_url)
+    except (OSError, ValueError, TypeError) as e:
+        logging.warning("TTS download failed for %s: %s",
+                        _short_sid(session_id), e)
 
     files = [
         f
@@ -2268,6 +2297,68 @@ def _download_session_files_locked(session_id, token, server_url):
         progress=1.0,
     )
     return len(files) > 0
+
+
+def download_tts_files(session_id, token, server_url=None, languages=None):
+    """Download per-language TTS WAVs into the session folder.
+
+    Naming mirrors what the frontend already builds: label =
+    "<Simple Language> Audio", local file = "tts_<Simple>.wav".
+    Skips the ASR "Transcript" track — KIT has no TTS for it.
+    """
+    session_dir = _session_dir(session_id)
+    server_url = (server_url or INTERNAL_SERVER_URL).rstrip("/")
+
+    if languages is None:
+        json_path = os.path.join(session_dir, "transcripts.json")
+        if not os.path.exists(json_path):
+            return []
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                transcripts = json.load(f)
+        except (OSError, ValueError, TypeError):
+            return []
+        languages = [t.get("language", "") for t in transcripts]
+
+    downloaded = []
+    seen = set()
+    for lang in languages:
+        if not lang:
+            continue
+        # KIT only serves TTS for real translation targets. The
+        # speaker's own track ("Transcript", "Original ASR") has no
+        # matching audio.
+        if lang == "Transcript" or "Original ASR" in lang:
+            continue
+
+        simple = _extract_simple_language_name(lang)
+        if not simple or simple == "Unknown":
+            continue
+        label = f"{simple} Audio"
+        if label in seen:
+            continue
+        seen.add(label)
+
+        local_name = f"tts_{simple}.wav"
+        local_path = os.path.join(session_dir, local_name)
+
+        if os.path.exists(local_path) and os.path.getsize(local_path) > 1000:
+            downloaded.append(local_name)
+            continue
+
+        kit_name = f"{label}.wav"
+        kit_url = f"{server_url}/archivemediafile/{session_id}/{quote(kit_name)}"
+
+        if curl_download(kit_url, local_path, token):
+            size = os.path.getsize(local_path)
+            logging.info("Downloaded TTS %s (%d bytes)", local_name, size)
+            _job_log(session_id, f"Downloaded {local_name}")
+            _job_add_file(session_id, local_name, size)
+            downloaded.append(local_name)
+        else:
+            logging.info("No TTS available for %s (%s)", simple, label)
+
+    return downloaded
 
 
 def safe_float(value, default=0.0):
@@ -4058,26 +4149,39 @@ def session_messages_json(session_id):
     return jsonify({"error": "messages.json not found"}), 404
 
 
-@app.route("/session-tts/<path:session_id>/<path:label>", methods=["GET"])
+@app.route("/session-tts/<path:session_id>/<path:label>", methods=["GET","OPTIONS"])
 def session_tts(session_id, label):
-    """Stream the per-language TTS track from the KIT server.
+    """Stream a per-language TTS track.
 
-    The KIT archive page advertises TTS audio via <source> tags of the
-    form `/archivemediafile/{session_id}/{Language} Audio.wav`. We
-    rebuild that URL here and proxy the bytes through, so the browser
-    never has to know the KIT host or carry the bearer token itself.
+    Preference order:
+      1. locally-downloaded WAV (offline, no token)
+      2. live proxy to KIT (legacy, requires cached token)
     """
-    # `label` arrives URL-decoded by Flask ("English Audio").
-    # KIT expects "<Language> Audio.wav" verbatim, with a literal space.
+    # CORS preflight — must return 2xx or the browser blocks the call.
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    session_dir = _session_dir(session_id)
+
+    # ── 1. Local file ─────────────────────────────────────────────
+    simple = label[:-len(" Audio")] if label.endswith(" Audio") else label
+    for name in (f"tts_{simple}.wav", f"{label}.wav"):
+        path = os.path.join(session_dir, name)
+        if os.path.exists(path) and os.path.getsize(path) > 1000:
+            logging.info("session_tts: serving local %s", name)
+            return send_file(
+                path,
+                mimetype="audio/wav",
+                conditional=True,      # gives Range support → seeking works
+                as_attachment=False,
+            )
+
+    # ── 2. Live proxy (unchanged) ─────────────────────────────────
     filename = f"{label}.wav"
-
-    server = (sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL).rstrip(
-        "/"
-    )
-
-    # quote() encodes the space as %20 but leaves letters/dots alone.
-    # Do NOT quote session_id — its trailing "==" is significant.
+    server = (sessions.get(session_id, {}).get("server")
+              or INTERNAL_SERVER_URL).rstrip("/")
     kit_url = f"{server}/archivemediafile/{session_id}/{quote(filename)}"
+
 
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
@@ -4149,7 +4253,100 @@ def session_tts(session_id, label):
         direct_passthrough=True,
     )
 
+# pylint: disable=unused-argument
+@app.route("/session-tts-sign/<path:session_id>/<path:label>", methods=["GET", "OPTIONS"])
+def session_tts_sign(session_id, label):
+    """Signed-URL TTS endpoint — stub.
 
+    The backend serves TTS through /session-tts directly, so there is
+    nothing to sign. This route exists purely so the browser's CORS
+    preflight gets a 2xx response.
+
+    ``session_id`` and ``label`` are required by Flask's routing
+    machinery (they match the ``<path:…>`` placeholders) but are not
+    used in the body.
+    """
+    if request.method == "OPTIONS":
+        return ("", 204)
+    return (
+        jsonify({
+            "error": "not_implemented",
+            "message": (
+                "Signed TTS URLs are not supported on this server. "
+                "Use /session-tts/<session_id>/<label> instead."
+            ),
+        }),
+        404,
+    )
+
+
+@app.route( "/session-tts-backfill/<path:session_id>", methods=["POST", "OPTIONS"])
+def session_tts_backfill(session_id):
+    """Download every TTS WAV for one session into its local folder.
+
+    Idempotent — files already present are skipped.
+    """
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    session_dir = _session_dir(session_id)
+    if not os.path.isdir(session_dir):
+        return jsonify({"error": "Session not found"}), 404
+
+    token = _state.get("token") or ""
+    if not token:
+        return (
+            jsonify({
+                "error": "no_token",
+                "message": ("Open the session screen once in the browser "
+                            "so the server caches a token, then retry."),
+            }),
+            400,
+        )
+
+    server = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
+
+    try:
+        written = download_tts_files(session_id, token, server)
+    except (OSError, ValueError, TypeError) as e:
+        logging.exception("TTS backfill failed for %s", _short_sid(session_id))
+        return jsonify({"error": str(e)}), 500
+
+    save_state()
+    return (
+        jsonify({
+            "success": True,
+            "session_id": session_id,
+            "downloaded": written,
+            "count": len(written),
+        }),
+        200,
+    )
+
+
+@app.route("/session-tts-backfill-all", methods=["POST", "OPTIONS"])
+def session_tts_backfill_all():
+    """Backfill TTS for every session the server currently knows about."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    token = _state.get("token") or ""
+    if not token:
+        return jsonify({"error": "no_token"}), 400
+
+    results = {}
+    for sid in list(sessions.keys()):
+        if not os.path.isdir(_session_dir(sid)):
+            continue
+        server = sessions.get(sid, {}).get("server") or INTERNAL_SERVER_URL
+        try:
+            results[sid] = download_tts_files(sid, token, server)
+        except (OSError, ValueError, TypeError) as e:
+            logging.warning("Backfill failed for %s: %s", _short_sid(sid), e)
+            results[sid] = {"error": str(e)}
+
+    save_state()
+    return jsonify({"success": True, "results": results}), 200
 @app.route("/session-zip/<path:session_id>", methods=["GET"])
 def download_session_zip(session_id):
     """Download all files from a session as a ZIP archive."""
@@ -5008,32 +5205,58 @@ def _internal_cookies(token: str) -> dict:
     return {"_forward_auth": token}
 
 
-def _remote_size(url: str, token: str, timeout: int = 20) -> tuple[int, int]:
+def _remote_size(url: str, token: str, timeout: int = 30) -> tuple[int, int]:
     """Return (size, status_code). size=0 on error.
 
     Uses HEAD so we never transfer the body. KIT reports
     Content-Length on HEAD, which is all we need here.
     """
     headers = _internal_headers(token)
-    try:
-        r = requests.head(
-            url,
-            headers=headers,
-            cookies=_internal_cookies(token),
-            verify=False,
-            timeout=timeout,
-            allow_redirects=True,
-        )
-        status = r.status_code
-        cl = r.headers.get("Content-Length")
-        if cl:
-            try:
-                return int(cl), status
-            except ValueError:
-                pass
-        return 0, status
-    except requests.exceptions.RequestException as e:
-        logging.warning("HEAD failed for %s: %s", url, e)
+    for attempt in range(1, 3):
+        try:
+            r = requests.head(
+                url,
+                headers=headers,
+                cookies=_internal_cookies(token),
+                verify=False,
+                timeout=(10, timeout),  # (connect, read)
+                allow_redirects=True,
+            )
+            status = r.status_code
+            cl = r.headers.get("Content-Length")
+            if cl:
+                try:
+                    return int(cl), status
+                except ValueError:
+                    pass
+            return 0, status
+
+        except requests.exceptions.ReadTimeout as e:
+            # Read timeout — connection worked, server just didn't
+            # answer in time. Retry once; only log on the second failure.
+            if attempt == 1:
+                logging.info(
+                    "HEAD read timeout for %s (attempt %d/2), retrying",
+                    url,
+                    attempt,
+                )
+                time.sleep(1)
+                continue
+            logging.warning(
+                "HEAD read timeout for %s after %d attempts: %s",
+                url,
+                attempt,
+                e,
+            )
+            return 0, 0
+
+        except requests.exceptions.RequestException as e:
+            logging.warning("HEAD failed for %s: %s", url, e)
+            return 0, 0
+
+    # Callers that distinguish "slow" from "gone" can inspect this.
+    # Right now the only caller is _fetch_messages_json_size, which
+    # treats 0/0 as "unknown", which is exactly right.
     return 0, 0
 
 
@@ -5558,7 +5781,16 @@ def wait_for_session_ready(
             # Reset the stability gate and try again once the file changes.
             stable_count = 0
 
-        time.sleep(2)
+        # Adaptive backoff: 2s while the file is still growing, longer
+        # once it has settled. KIT starts throttling if we hit it every
+        # two seconds for a long session; this keeps the early polls
+        # responsive and the late polls polite.
+        if stable_count >= _STABLE_NEEDED - 1:
+            time.sleep(8)
+        elif last_size <= MIN_MESSAGES_BYTES:
+            time.sleep(5)
+        else:
+            time.sleep(3)
 
 
 def process_session_in_background(
@@ -7358,6 +7590,30 @@ def _session_files_look_incomplete(session_dir):
         )
         return True
 
+    # Do we have a TTS WAV for every *translation* track that
+    # has a VTT? The ASR track is intentionally excluded: KIT
+    # does not synthesize TTS for the speaker's own language, so
+    # there is no tts_Transcript.wav to expect.
+    vtt_langs = {
+        f[len("subtitles_") : -len(".vtt")]
+        for f in vtt_files
+        if f != "subtitles_Transcript.vtt"
+    }
+    tts_langs = {
+        f[len("tts_") : -len(".wav")]
+        for f in os.listdir(session_dir)
+        if f.startswith("tts_")
+        and f.endswith(".wav")
+        and os.path.getsize(os.path.join(session_dir, f)) > 1000
+    }
+    if vtt_langs - tts_langs:
+        logging.info(
+            "_session_files_look_incomplete: %s missing TTS for %s",
+            _short_sid(os.path.basename(session_dir)),
+            sorted(vtt_langs - tts_langs),
+        )
+        return True
+
     return False
 
 
@@ -8128,44 +8384,35 @@ def _upload_to_internal_server_and_register(
         session_id = _extract_session_id(resp)
         if session_id:
             logging.info("internal_upload: session id from response: %s", session_id)
-
-        if not session_id and session_name:
+        else:
+            # No id could be parsed out of the response. Log the raw body
+            # so the next failure is self-diagnosing — without this, the
+            # only symptom is a stream of 404s on /messages.json several
+            # seconds later.
             logging.error(
                 "internal_upload: NO session id in upload response. "
                 "status=%s url=%s\n"
-                "----- RAW RESPONSE BODY -----\n%s\n"
-                "----- END RESPONSE BODY -----",
+                "----- RAW RESPONSE BODY (first 5000 chars) -----\n%s\n"
+                "----- END RAW RESPONSE BODY -----",
                 resp.status_code,
                 resp.url,
                 resp.text[:5000],
             )
-            home_path = _user_home_path(token)  # ignore form_data["path"] entirely
-            full_path = f"{home_path.rstrip('/')}/{session_name}"
-            session_id = base64.b64encode(full_path.encode("utf-8")).decode("ascii")
-
-            if not session_id and session_name:
-                logging.error(
-                    "internal_upload: NO session id found. status=%s url=%s\n"
-                    "----- BODY (first 5000 chars) -----\n%s\n----- END -----",
-                    resp.status_code,
-                    resp.url,
-                    resp.text[:5000],
+            # Fallback: KIT LT's upload endpoint sometimes returns a
+            # generic "Success" page with no id. In that case the real
+            # session id is base64 of the full "/home/<user>/<name>"
+            # path — encoding only the name produces a plausible-looking
+            # id that 404s on every subsequent poll.
+            if session_name:
+                home_path = _user_home_path(token)  # ignore form_data["path"]
+                full_path = f"{home_path.rstrip('/')}/{session_name}"
+                session_id = base64.b64encode(full_path.encode("utf-8")).decode("ascii")
+                logging.info(
+                    "internal_upload: generated fallback session id "
+                    "from path: %s → %s",
+                    full_path,
+                    session_id,
                 )
-
-        # Fallback: KIT LT's upload endpoint returned a generic "Success"
-        # page with no id. The real KIT deployment uses base64 of the
-        # full "/home/<user>/<session_name>" path as the session id —
-        # encoding only the session name produces a plausible-looking id
-        # that 404s on every subsequent poll.
-        if not session_id and session_name:
-            home_path = _user_home_path(token)  # ignore form_data["path"] entirely
-            full_path = f"{home_path.rstrip('/')}/{session_name}"
-            session_id = base64.b64encode(full_path.encode("utf-8")).decode("ascii")
-            logging.info(
-                "internal_upload: generated session id from path: %s → %s",
-                full_path,
-                session_id,
-            )
 
         if not session_id:
             logging.error(
