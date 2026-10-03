@@ -937,6 +937,19 @@ def _session_dir(session_id: str) -> str:
     return os.path.join(SESSION_FOLDER, session_id)
 
 
+def _effective_token(session_id: str, fallback: str = "") -> str:
+    """Return the token that owns this session.
+
+    KIT sessions are user-scoped: only the bearer that created a
+    session can read it back. We record that token on the session
+    record at upload time and reuse it for every subsequent KIT
+    call, regardless of which user is currently logged in to the
+    web UI.
+    """
+    stored = (sessions.get(session_id) or {}).get("token")
+    return stored or fallback or (_state.get("token") or "")
+
+
 def _ensure_greenscreen_fields(project: dict) -> dict:
     """Make sure every project carries the green-screen bookkeeping fields.
 
@@ -2096,6 +2109,8 @@ def download_session_files(session_id, token, server_url=None):
         server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
     server_url = server_url.rstrip("/")
 
+    effective_token = _effective_token(session_id, fallback=token)
+
     lock = _get_session_download_lock(session_id)
     if not lock.acquire(blocking=False):
         lock.acquire()
@@ -2115,7 +2130,7 @@ def download_session_files(session_id, token, server_url=None):
                 _short_sid(session_id),
             )
             return True
-        return _download_session_files_locked(session_id, token, server_url)
+        return _download_session_files_locked(session_id, effective_token, server_url)
     finally:
         lock.release()
 
@@ -4127,7 +4142,7 @@ def session_messages_json(session_id):
 
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
-        token = request.cookies.get("_forward_auth", "")
+        token = _effective_token(session_id, fallback=token)
 
     if token:
         local_path = os.path.join(session_dir, "messages.json")
@@ -4191,7 +4206,12 @@ def session_tts(session_id, label):
         # headers, so the TTS request arrives bare. Fall back to the
         # most recent token we saw on any other request from this
         # session — _capture_auth_token() stores it in _state["token"].
-        token = _state.get("token") or ""
+        token = _effective_token(
+            session_id,
+            fallback=request.headers.get(
+                "Authorization", ""
+            ).replace("Bearer ", ""),
+        )
 
     upstream_headers = {
         "User-Agent": "Mozilla/5.0 (compatible; LT-Uploader/1.0)",
@@ -5810,6 +5830,14 @@ def process_session_in_background(
     if not server_url:
         server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
     server_url = server_url.rstrip("/")
+    
+    effective_token = _effective_token(session_id, fallback=token)
+    if effective_token != token:
+        logging.info(
+            "process_session_in_background: using stored token for %s "
+            "(request-time token differs)",
+            _short_sid(session_id),
+        )
 
     # Fall back to what the upload endpoint recorded for this session.
     if not expected_mt:
@@ -5840,7 +5868,7 @@ def process_session_in_background(
         )
 
         ready = wait_for_session_ready(
-            session_id, token, server_url, expected_langs=expected_mt
+            session_id, effective_token, server_url, expected_langs=expected_mt
         )
         if not ready:
             logging.warning(
@@ -5848,7 +5876,7 @@ def process_session_in_background(
                 _short_sid(session_id),
             )
 
-        ok = download_session_files(session_id, token, server_url)
+        ok = download_session_files(session_id, effective_token, server_url)
 
         job = jobs.get(session_id)
         if job:
@@ -6970,7 +6998,11 @@ def get_session_output(session_id):
             server_url,
         )
         try:
-            download_session_files(session_id, token, server_url)
+            download_session_files(
+                session_id,
+                _effective_token(session_id, fallback=token),
+                server_url,
+            )
         except _JobCancelled:
             pass
 
@@ -8469,6 +8501,7 @@ def _upload_to_internal_server_and_register(
             "url": f"{base_url}/archivesession/{session_id}",
             "server": base_url,
             "expected_mt": expected_mt,
+            "token": token,   # the token that created this session
         }
         jobs[session_id] = {
             "id": session_id,
