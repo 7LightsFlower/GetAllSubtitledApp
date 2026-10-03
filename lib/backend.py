@@ -8453,10 +8453,6 @@ def _upload_to_internal_server_and_register(
         if session_id:
             logging.info("internal_upload: session id from response: %s", session_id)
         else:
-            # No id could be parsed out of the response. Log the raw body
-            # so the next failure is self-diagnosing — without this, the
-            # only symptom is a stream of 404s on /messages.json several
-            # seconds later.
             logging.error(
                 "internal_upload: NO session id in upload response. "
                 "status=%s url=%s\n"
@@ -8466,15 +8462,55 @@ def _upload_to_internal_server_and_register(
                 resp.url,
                 resp.text[:5000],
             )
-            # Fallback: KIT LT's upload endpoint sometimes returns a
-            # generic "Success" page with no id. In that case the real
-            # session id is base64 of the full "/home/<user>/<name>"
-            # path — encoding only the name produces a plausible-looking
-            # id that 404s on every subsequent poll.
-            if session_name:
-                home_path = _user_home_path(token)  # ignore form_data["path"]
+
+            # ── NEW: ask the archive index for the newest session ──
+            # KIT stores the session under whatever name *it* chose
+            # after normalising the input. Rather than guess that
+            # normalisation (and get it wrong for apostrophes and
+            # dashes), read the id straight from the archive listing.
+            # KIT orders the index newest-first, so the top entry is
+            # this upload.
+            try:
+                index_resp = requests.get(
+                    f"{base_url}/index/",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "X-Forward-Auth": token,
+                    },
+                    cookies={"_forward_auth": token},
+                    verify=False,
+                    timeout=20,
+                    allow_redirects=True,
+                )
+                if index_resp.status_code == 200:
+                    m = re.search(
+                        r"/archivesession/([A-Za-z0-9_\-=]+)",
+                        index_resp.text,
+                    )
+                    if m:
+                        session_id = m.group(1)
+                        logging.info(
+                            "internal_upload: session id scraped from "
+                            "index: %s",
+                            session_id,
+                        )
+            except requests.exceptions.RequestException as e:
+                logging.warning(
+                    "internal_upload: could not scrape index for "
+                    "session id: %s",
+                    e,
+                )
+
+            # Fallback: only runs if the index scrape above did not
+            # produce an id. Reconstructs it from the /home/<user>/<name>
+            # path — kept as a last resort because it is sensitive to
+            # how KIT normalises punctuation.
+            if not session_id and session_name:
+                home_path = _user_home_path(token)
                 full_path = f"{home_path.rstrip('/')}/{session_name}"
-                session_id = base64.b64encode(full_path.encode("utf-8")).decode("ascii")
+                session_id = base64.b64encode(
+                    full_path.encode("utf-8")
+                ).decode("ascii")
                 logging.info(
                     "internal_upload: generated fallback session id "
                     "from path: %s → %s",
