@@ -2286,8 +2286,7 @@ def _download_session_files_locked(session_id, token, server_url):
     try:
         download_tts_files(session_id, token, server_url)
     except (OSError, ValueError, TypeError) as e:
-        logging.warning("TTS download failed for %s: %s",
-                        _short_sid(session_id), e)
+        logging.warning("TTS download failed for %s: %s", _short_sid(session_id), e)
 
     files = [
         f
@@ -4164,7 +4163,7 @@ def session_messages_json(session_id):
     return jsonify({"error": "messages.json not found"}), 404
 
 
-@app.route("/session-tts/<path:session_id>/<path:label>", methods=["GET","OPTIONS"])
+@app.route("/session-tts/<path:session_id>/<path:label>", methods=["GET", "OPTIONS"])
 def session_tts(session_id, label):
     """Stream a per-language TTS track.
 
@@ -4179,7 +4178,7 @@ def session_tts(session_id, label):
     session_dir = _session_dir(session_id)
 
     # ── 1. Local file ─────────────────────────────────────────────
-    simple = label[:-len(" Audio")] if label.endswith(" Audio") else label
+    simple = label[: -len(" Audio")] if label.endswith(" Audio") else label
     for name in (f"tts_{simple}.wav", f"{label}.wav"):
         path = os.path.join(session_dir, name)
         if os.path.exists(path) and os.path.getsize(path) > 1000:
@@ -4187,16 +4186,16 @@ def session_tts(session_id, label):
             return send_file(
                 path,
                 mimetype="audio/wav",
-                conditional=True,      # gives Range support → seeking works
+                conditional=True,  # gives Range support → seeking works
                 as_attachment=False,
             )
 
     # ── 2. Live proxy (unchanged) ─────────────────────────────────
     filename = f"{label}.wav"
-    server = (sessions.get(session_id, {}).get("server")
-              or INTERNAL_SERVER_URL).rstrip("/")
+    server = (sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL).rstrip(
+        "/"
+    )
     kit_url = f"{server}/archivemediafile/{session_id}/{quote(filename)}"
-
 
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
@@ -4208,9 +4207,7 @@ def session_tts(session_id, label):
         # session — _capture_auth_token() stores it in _state["token"].
         token = _effective_token(
             session_id,
-            fallback=request.headers.get(
-                "Authorization", ""
-            ).replace("Bearer ", ""),
+            fallback=request.headers.get("Authorization", "").replace("Bearer ", ""),
         )
 
     upstream_headers = {
@@ -4273,8 +4270,11 @@ def session_tts(session_id, label):
         direct_passthrough=True,
     )
 
+
 # pylint: disable=unused-argument
-@app.route("/session-tts-sign/<path:session_id>/<path:label>", methods=["GET", "OPTIONS"])
+@app.route(
+    "/session-tts-sign/<path:session_id>/<path:label>", methods=["GET", "OPTIONS"]
+)
 def session_tts_sign(session_id, label):
     """Signed-URL TTS endpoint — stub.
 
@@ -4289,18 +4289,20 @@ def session_tts_sign(session_id, label):
     if request.method == "OPTIONS":
         return ("", 204)
     return (
-        jsonify({
-            "error": "not_implemented",
-            "message": (
-                "Signed TTS URLs are not supported on this server. "
-                "Use /session-tts/<session_id>/<label> instead."
-            ),
-        }),
+        jsonify(
+            {
+                "error": "not_implemented",
+                "message": (
+                    "Signed TTS URLs are not supported on this server. "
+                    "Use /session-tts/<session_id>/<label> instead."
+                ),
+            }
+        ),
         404,
     )
 
 
-@app.route( "/session-tts-backfill/<path:session_id>", methods=["POST", "OPTIONS"])
+@app.route("/session-tts-backfill/<path:session_id>", methods=["POST", "OPTIONS"])
 def session_tts_backfill(session_id):
     """Download every TTS WAV for one session into its local folder.
 
@@ -4316,11 +4318,15 @@ def session_tts_backfill(session_id):
     token = _state.get("token") or ""
     if not token:
         return (
-            jsonify({
-                "error": "no_token",
-                "message": ("Open the session screen once in the browser "
-                            "so the server caches a token, then retry."),
-            }),
+            jsonify(
+                {
+                    "error": "no_token",
+                    "message": (
+                        "Open the session screen once in the browser "
+                        "so the server caches a token, then retry."
+                    ),
+                }
+            ),
             400,
         )
 
@@ -4334,12 +4340,14 @@ def session_tts_backfill(session_id):
 
     save_state()
     return (
-        jsonify({
-            "success": True,
-            "session_id": session_id,
-            "downloaded": written,
-            "count": len(written),
-        }),
+        jsonify(
+            {
+                "success": True,
+                "session_id": session_id,
+                "downloaded": written,
+                "count": len(written),
+            }
+        ),
         200,
     )
 
@@ -4367,6 +4375,8 @@ def session_tts_backfill_all():
 
     save_state()
     return jsonify({"success": True, "results": results}), 200
+
+
 @app.route("/session-zip/<path:session_id>", methods=["GET"])
 def download_session_zip(session_id):
     """Download all files from a session as a ZIP archive."""
@@ -5830,7 +5840,7 @@ def process_session_in_background(
     if not server_url:
         server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
     server_url = server_url.rstrip("/")
-    
+
     effective_token = _effective_token(session_id, fallback=token)
     if effective_token != token:
         logging.info(
@@ -8255,6 +8265,24 @@ def generate_video_thumbnail_simple(video_path, thumbnail_path):
         return False
 
 
+def _sanitize_session_name_for_kit(name: str) -> str:
+    """Match what KIT stores as the session path segment."""
+    if not name:
+        return name
+    for src, dst in {
+        "\u2022": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u00a0": " ",
+    }.items():
+        name = name.replace(src, dst)
+    return re.sub(r"\s+", " ", name).strip()
+
+
 # ─── UPLOAD ENDPOINT ────────────────────────────────────────────────────
 def _upload_to_internal_server_and_register(
     *,
@@ -8286,6 +8314,9 @@ def _upload_to_internal_server_and_register(
     The two callers only differ in what they send in and whether they
     want the stale-session cleanup (``forward_to_internal`` does).
     """
+
+    session_name = _sanitize_session_name_for_kit(session_name)
+
     upload_source_path = local_path
     upload_filename_used = os.path.basename(local_path)
     gs_cleanup: list = []
@@ -8501,7 +8532,7 @@ def _upload_to_internal_server_and_register(
             "url": f"{base_url}/archivesession/{session_id}",
             "server": base_url,
             "expected_mt": expected_mt,
-            "token": token,   # the token that created this session
+            "token": token,  # the token that created this session
         }
         jobs[session_id] = {
             "id": session_id,
@@ -8774,24 +8805,17 @@ def upload_to_internal():
             "name": session_name,
             "topicname": data_in.get("topicname") or session_name,
             "date": (
-                data_in.get("date")
-                or datetime.datetime.now().strftime("%Y-%m-%d")
+                data_in.get("date") or datetime.datetime.now().strftime("%Y-%m-%d")
             ),
             "speakername": data_in.get("speakername") or "",
             "availability": data_in.get("availability") or "private",
             "format": data_in.get("format") or "mixed",
-            "smartChaptering":
-                data_in.get("smartChaptering") or "online_dynamic",
-            "errorCorrection":
-                data_in.get("errorCorrection") or "None",
-            "ttsQualityMode":
-                data_in.get("ttsQualityMode") or "low_latency",
-            "language":
-                _as_list(data_in.get("language")) or ["en"],
-            "mtLanguage":
-                _as_list(data_in.get("mtLanguage")) or ["de"],
-            "audioLanguage":
-                _as_list(data_in.get("audioLanguage")) or ["de"],
+            "smartChaptering": data_in.get("smartChaptering") or "online_dynamic",
+            "errorCorrection": data_in.get("errorCorrection") or "None",
+            "ttsQualityMode": data_in.get("ttsQualityMode") or "low_latency",
+            "language": _as_list(data_in.get("language")) or ["en"],
+            "mtLanguage": _as_list(data_in.get("mtLanguage")) or ["de"],
+            "audioLanguage": _as_list(data_in.get("audioLanguage")) or ["de"],
             "profanity": str(data_in.get("profanity") or "1"),
             "filter_music": str(data_in.get("filter_music") or "1"),
             "summarization": str(data_in.get("summarization") or "1"),
