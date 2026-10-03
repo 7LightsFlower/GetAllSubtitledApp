@@ -8582,12 +8582,23 @@ def _upload_to_internal_server_and_register(
             "expected_mt": expected_mt,
         }
 
-        # Pre-create the in-memory progress entry *before* returning.
-        # The client starts polling /job-progress the instant it receives
-        # the session id. Without this the first poll can beat the
-        # background worker to _job_start(), fall through to the
-        # "recover after restart" branch and spawn a duplicate worker.
         _job_start(session_id, video_key, session_name)
+
+        # If a worker is already running for this video_key, cancel
+        # it before starting the new one. Without this, every retry
+        # leaves an orphan thread polling a stale session id.
+        for other_sid, other_job in list(jobs.items()):
+            if (other_job.get("video_key") == video_key
+                    and other_job.get("status") == "processing"
+                    and other_sid != session_id):
+                logging.info(
+                    "internal_upload: cancelling stale worker for %s",
+                    _short_sid(other_sid),
+                )
+                _request_cancel(other_sid)
+                other_job["status"] = "cancelled"
+                with job_progress_lock:
+                    _job_progress_store.pop(other_sid, None)
 
         threading.Thread(
             target=process_session_in_background,
