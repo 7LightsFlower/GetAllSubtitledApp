@@ -5238,55 +5238,65 @@ def _internal_cookies(token: str) -> dict:
 def _remote_size(url: str, token: str, timeout: int = 30) -> tuple[int, int]:
     """Return (size, status_code). size=0 on error.
 
-    Uses HEAD so we never transfer the body. KIT reports
-    Content-Length on HEAD, which is all we need here.
+    KIT's server does not reliably implement HEAD on /archivemediafile
+    (it 500s or times out), so we send a one-byte ranged GET and read
+    Content-Range instead. Content-Range looks like
+        bytes 0-0/12345
+    and the number after the slash is the total size.
     """
     headers = _internal_headers(token)
+    headers["Range"] = "bytes=0-0"
+
     for attempt in range(1, 3):
         try:
-            r = requests.head(
+            r = requests.get(
                 url,
                 headers=headers,
                 cookies=_internal_cookies(token),
                 verify=False,
-                timeout=(10, timeout),  # (connect, read)
+                timeout=(10, timeout),
                 allow_redirects=True,
+                stream=True,   # never download the body
             )
             status = r.status_code
+
+            # Preferred: Content-Range header on a 206 response.
+            cr = r.headers.get("Content-Range")
+            if cr and "/" in cr:
+                total = cr.rsplit("/", 1)[-1].strip()
+                if total.isdigit():
+                    return int(total), status
+
+            # Fallback: Content-Length on a normal 200.
             cl = r.headers.get("Content-Length")
             if cl:
                 try:
                     return int(cl), status
                 except ValueError:
                     pass
+
             return 0, status
 
         except requests.exceptions.ReadTimeout as e:
-            # Read timeout — connection worked, server just didn't
-            # answer in time. Retry once; only log on the second failure.
             if attempt == 1:
                 logging.info(
-                    "HEAD read timeout for %s (attempt %d/2), retrying",
+                    "ranged GET read timeout for %s (attempt %d/2), retrying",
                     url,
                     attempt,
                 )
                 time.sleep(1)
                 continue
             logging.warning(
-                "HEAD read timeout for %s after %d attempts: %s",
+                "ranged GET read timeout for %s after %d attempts: %s",
                 url,
                 attempt,
                 e,
             )
             return 0, 0
-
         except requests.exceptions.RequestException as e:
-            logging.warning("HEAD failed for %s: %s", url, e)
+            logging.warning("ranged GET failed for %s: %s", url, e)
             return 0, 0
 
-    # Callers that distinguish "slow" from "gone" can inspect this.
-    # Right now the only caller is _fetch_messages_json_size, which
-    # treats 0/0 as "unknown", which is exactly right.
     return 0, 0
 
 
