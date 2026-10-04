@@ -8463,13 +8463,13 @@ def _upload_to_internal_server_and_register(
                 resp.text[:5000],
             )
 
-            # ── NEW: ask KIT's archive browser for the real id ──────
-            # /index/ has the user's home directory as a
-            # /archive/<home_b64> link. /archive/<home_b64> then
-            # lists that user's sessions, newest first, as
-            # /archivesession/<id> links. Read the first one — it is
-            # the id KIT actually stored for this upload, byte for
-            # byte, with whatever typographic punctuation KIT chose.
+            # ── Ask KIT's archive browser for the real id ───────────
+            # /archive/<home_b64> lists every session for this user.
+            # The list is NOT ordered by recency — it is grouped by
+            # session name alphabetically. So we can't just take the
+            # first entry; we have to decode each candidate id and
+            # match its last path segment against the session name
+            # we sent to KIT.
             try:
                 home_path = _user_home_path(token)
                 home_b64 = base64.b64encode(
@@ -8488,17 +8488,43 @@ def _upload_to_internal_server_and_register(
                     allow_redirects=True,
                 )
                 if archive_resp.status_code == 200:
-                    matches = re.findall(
+                    candidates = re.findall(
                         r'/archivesession/([A-Za-z0-9_\-=]+)',
                         archive_resp.text,
                     )
-                    if matches:
-                        session_id = matches[0]
-                        logging.info(
-                            "internal_upload: session id scraped from "
-                            "archive listing: %s",
-                            session_id,
-                        )
+
+                    def _norm(s: str) -> str:
+                        """ASCII-fold the punctuation KIT tends to
+                        normalise, and collapse whitespace."""
+                        for src, dst in {
+                            "\u2018": "'", "\u2019": "'",
+                            "\u201c": '"', "\u201d": '"',
+                            "\u2013": "-", "\u2014": "-",
+                            "\u2022": "-",
+                            "\u00a0": " ",
+                        }.items():
+                            s = s.replace(src, dst)
+                        return re.sub(r"\s+", " ", s).strip()
+
+                    wanted = _norm(session_name)
+                    for cand in candidates:
+                        # base64 decode with padding repair
+                        padded = cand + "=" * (-len(cand) % 4)
+                        try:
+                            decoded = base64.b64decode(padded).decode(
+                                "utf-8", errors="ignore"
+                            )
+                        except (ValueError, UnicodeDecodeError):
+                            continue
+                        tail = decoded.rsplit("/", 1)[-1]
+                        if _norm(tail) == wanted:
+                            session_id = cand
+                            logging.info(
+                                "internal_upload: session id matched "
+                                "by name: %s",
+                                session_id,
+                            )
+                            break
             except requests.exceptions.RequestException as e:
                 logging.warning(
                     "internal_upload: could not scrape archive "
