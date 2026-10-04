@@ -50,7 +50,8 @@ try:
 except ImportError:
     logging.warning("BeautifulSoup not installed. Export functions will be limited.")
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
+logging.getLogger("urllib3").setLevel(logging.INFO)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -1013,7 +1014,9 @@ def _ensure_job_history(project: dict) -> dict:
 # client-side cap so the two never drift.
 MAX_JOB_HISTORY_ENTRIES = 20
 
-
+# Consecutive HTTP 404s per session. Used to keep a wrong or stale
+# session id from spamming the log and the progress panel while the
+# background worker spins. Reset as soon as the session responds.
 def _note_404(session_id: str, url: str) -> int:
     """Bump and return the consecutive-404 counter for a session.
 
@@ -1058,8 +1061,9 @@ class _PanelLogHandler(logging.Handler):
     # The polling chatter from wait_for_session_ready is useful in the
     # terminal but drowns out everything else in the panel.
     _CONSOLE_ONLY_SUBSTRINGS = (
-        "messages.json size=",
+        "messages=",
         "size stable but content",
+        "reports total=",
     )
 
     def emit(self, record):
@@ -5686,6 +5690,11 @@ def _fetch_archive_messages_page(session_id, token, server_url, page, limit=1000
         )
         return None
 
+# Last total reported per session, so the "reports total=N" line is
+# printed only when the count actually changes. Keyed by session id.
+_last_reported_total: dict[str, int] = {}
+_last_reported_total_lock = threading.Lock()
+
 
 def _fetch_all_archive_messages(
     session_id, token, server_url, limit=1000, max_pages=50
@@ -5715,12 +5724,18 @@ def _fetch_all_archive_messages(
             except (TypeError, ValueError):
                 total = 0
 
-        if total != last_reported_total:
+        with _last_reported_total_lock:
+            previous = _last_reported_total.get(session_id)
+            if previous != total:
+                _last_reported_total[session_id] = total
+                should_log = True
+            else:
+                should_log = False
+        if should_log:
             logging.info(
                 "archive_messages: session %s reports total=%d",
                 _short_sid(session_id), total,
             )
-            last_reported_total = total
         chunk = payload.get("data") or []
         all_messages.extend(chunk)
         if not chunk or len(chunk) < limit:
@@ -5807,6 +5822,10 @@ def wait_for_session_ready(
     last_reported_asr_end = 0.0
     last_heartbeat = started
 
+    # Fires the shape-diagnostic log line exactly once per call to this
+    # function — i.e. once per session — instead of once per process.
+    _logged_shape = False
+
     # Cooldown between two events of the same kind. Complements the
     # value-advance check below.
     while True:
@@ -5853,15 +5872,13 @@ def wait_for_session_ready(
             size = total
 
         # ── One-time shape log ────────────────────────────────────
-        if page1 is not None and not getattr(
-            wait_for_session_ready, "_logged_shape", False
-        ):
-            setattr(wait_for_session_ready, "_logged_shape", True)
-            total = page1.get("total", 0)
+        if page1 is not None and not _logged_shape:
+            _logged_shape = True
+            shape_total = page1.get("total", 0)
             n = len(page1.get("data") or [])
             logging.info(
                 "archive_messages: shape check — total=%s, page-1 items=%d",
-                total,
+                shape_total,
                 n,
             )
             if n:
@@ -5880,8 +5897,6 @@ def wait_for_session_ready(
                 )
         else:
             unauthorized_count = 0
-
-        size_changed = size != last_size
 
         size_changed = size != last_size
 
@@ -5920,7 +5935,7 @@ def wait_for_session_ready(
                 )
         elif status != 200 and size_changed:
             logging.info(
-                "Session %s: messages.json status=%d "
+                "Session %s: /archive_messages status=%d "
                 "(waiting for the internal server to publish the session)",
                 _short_sid(session_id),
                 status,
@@ -6050,7 +6065,7 @@ def wait_for_session_ready(
                     session_id, token, server_url, page=1, limit=1,
                 )
                 new_total = (probe or {}).get("total", 0) if probe else 0
-                if new_total == size:
+                if new_total == total:   # total from this iteration's probe
                     ready_messages2 = _fetch_all_archive_messages(
                         session_id, token, server_url,
                     )
@@ -6196,9 +6211,10 @@ def process_session_in_background(
         _job_finish(session_id, error=f"{type(e).__name__}: {e}")
     finally:
         _log_target.reset(token_cv)
-        # Don't leak the 404 counter after the job finishes either way.
         with _consecutive_404s_lock:
             _consecutive_404s.pop(session_id, None)
+        with _last_reported_total_lock:
+            _last_reported_total.pop(session_id, None)
 
 
 @app.route("/extract-video-subtitles/<path:session_id>", methods=["GET"])
