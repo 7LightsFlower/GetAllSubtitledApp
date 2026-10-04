@@ -1155,7 +1155,8 @@ def _capture_auth_token():
     if auth.startswith("Bearer "):
         token = auth[7:].strip()
         if token:
-            _log_token_email(token, "before_request")
+            logging.debug("before_request: token email = %r",
+                      token.split("|")[-1].strip() if "|" in token else "<none>")
             _state["token"] = token
             return
     cookie = request.cookies.get("_forward_auth", "")
@@ -5713,11 +5714,13 @@ def _fetch_all_archive_messages(
                 total = int(payload.get("total", 0))
             except (TypeError, ValueError):
                 total = 0
+
+        if total != last_reported_total:
             logging.info(
                 "archive_messages: session %s reports total=%d",
-                _short_sid(session_id),
-                total,
+                _short_sid(session_id), total,
             )
+            last_reported_total = total
         chunk = payload.get("data") or []
         all_messages.extend(chunk)
         if not chunk or len(chunk) < limit:
