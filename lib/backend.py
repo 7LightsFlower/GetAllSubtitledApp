@@ -2266,24 +2266,35 @@ def _download_session_files_locked(session_id, token, server_url):
         logging.warning("Could not download audio: %s", e)
 
     # messages.json
+    # messages.json — fetched from KIT's live /archive_messages/
+    # endpoint, not from the static archive file (which is not
+    # populated on lt2srv.iar.kit.edu for public sessions).
     if _is_cancelled(session_id):
         raise _JobCancelled(
             f"Session {_short_sid(session_id)} cancelled before messages.json download"
         )
-    messages_url = f"{server_url}/archivemediafile/{session_id}/messages.json"
     messages_path = os.path.join(session_dir, "messages.json")
-    if curl_download(messages_url, messages_path, token):
+    messages = _fetch_all_archive_messages(session_id, token, server_url)
+    if messages:
+        with open(messages_path, "w", encoding="utf-8") as f:
+            json.dump(messages, f, ensure_ascii=False)
+        size = os.path.getsize(messages_path)
         logging.info(
-            "Downloaded messages.json (%d bytes)", os.path.getsize(messages_path)
+            "Downloaded %d messages via /archive_messages (%d bytes)",
+            len(messages), size,
         )
         _job_log(
             session_id,
-            f"Downloaded messages.json " f"({os.path.getsize(messages_path)} bytes)",
+            f"Downloaded {len(messages)} messages "
+            f"({size} bytes)",
             progress=0.85,
         )
-        _job_add_file(session_id, "messages.json", os.path.getsize(messages_path))
+        _job_add_file(session_id, "messages.json", size)
     else:
-        logging.warning("Failed to download messages.json")
+        logging.warning(
+            "No messages returned by /archive_messages for session %s",
+            _short_sid(session_id),
+        )
 
     # Transcripts
     _job_log(session_id, "Extracting transcripts…", stage="extracting", progress=0.9)
@@ -5633,6 +5644,78 @@ def _count_messages(raw: bytes) -> int:
     return 0
 
 
+def _fetch_archive_messages_page(session_id, token, server_url, page, limit=1000):
+    """Fetch one page from KIT's live transcript endpoint.
+
+    IMPORTANT: `page` is 1-based. `page=0` returns `data: []` even
+    though `total` is non-zero. Always start at page=1.
+    """
+    if not server_url:
+        server_url = INTERNAL_SERVER_URL
+    server_url = server_url.rstrip("/")
+
+    url = f"{server_url}/archive_messages/{session_id}"
+    try:
+        r = requests.get(
+            url,
+            params={"page": page, "limit": limit},
+            headers=_internal_headers(token),
+            cookies=_internal_cookies(token),
+            verify=False,
+            timeout=60,
+            allow_redirects=True,
+        )
+        if r.status_code != 200:
+            logging.info(
+                "_fetch_archive_messages_page: %s page=%d -> HTTP %s",
+                url, page, r.status_code,
+            )
+            return None
+        return r.json()
+    except (requests.exceptions.RequestException,
+            json.JSONDecodeError, ValueError) as e:
+        logging.warning(
+            "_fetch_archive_messages_page: page=%d failed: %s", page, e,
+        )
+        return None
+
+
+def _fetch_all_archive_messages(session_id, token, server_url,
+                                limit=1000, max_pages=50):
+    """Page through /archive_messages/<sid> and return the concatenated list.
+
+    The return value has the same shape as `messages.json`: a list of
+    `[lang_id, "<message_json>"]` pairs. It is a drop-in replacement
+    for the data that `extract_transcripts_from_messages` reads.
+    """
+    all_messages = []
+    page = 1  # 1-based!
+    total = None
+    while page <= max_pages:
+        payload = _fetch_archive_messages_page(
+            session_id, token, server_url, page, limit,
+        )
+        if payload is None:
+            break
+        if total is None:
+            try:
+                total = int(payload.get("total", 0))
+            except (TypeError, ValueError):
+                total = 0
+            logging.info(
+                "archive_messages: session %s reports total=%d",
+                _short_sid(session_id), total,
+            )
+        chunk = payload.get("data") or []
+        all_messages.extend(chunk)
+        if not chunk or len(chunk) < limit:
+            break
+        if total is not None and page * limit >= total:
+            break
+        page += 1
+    return all_messages    
+
+
 # How often to re-fetch messages.json purely to refresh the progress
 # bar. The stability check already fetches it occasionally; this adds
 # a periodic tick so the bar moves even while the file is growing.
@@ -5693,7 +5776,45 @@ def wait_for_session_ready(
             time.sleep(1)
             continue
 
-        size, status = _fetch_messages_json_size(session_id, token, server_url)
+        # KIT's live transcript endpoint: page 1 is the first page.
+        # Fetching page 1 alone is cheap and gives us both `total` and
+        # a fresh sample of the newest messages, which is enough for
+        # the size / growth tracking that follows.
+        page1 = _fetch_archive_messages_page(
+            session_id, token, server_url, page=1, limit=1000,
+        )
+        if page1 is None:
+            # Treat a failed fetch as a transient 5xx: keep waiting
+            # but make the 404/401 bookkeeping happy.
+            status = 503
+            size = 0
+        else:
+            status = 200
+            try:
+                total = int(page1.get("total", 0))
+            except (TypeError, ValueError):
+                total = 0
+            # Use `total` as the "size" signal. It grows monotonically
+            # as KIT produces more messages, so the quiet-period logic
+            # below keeps working unchanged.
+            size = total
+
+        # ── One-time shape log ────────────────────────────────────
+        if page1 is not None and not getattr(
+            wait_for_session_ready, "_logged_shape", False
+        ):
+            wait_for_session_ready._logged_shape = True
+            total = page1.get("total", 0)
+            n = len(page1.get("data") or [])
+            logging.info(
+                "archive_messages: shape check — total=%s, page-1 items=%d",
+                total, n,
+            )
+            if n:
+                logging.info(
+                    "archive_messages: first item preview = %s",
+                    str(page1["data"][0])[:200],
+                )
 
         if status == 401:
             unauthorized_count += 1
@@ -5751,19 +5872,42 @@ def wait_for_session_ready(
                 status,
             )
 
-        # A long run of 404s almost always means the session id is
-        # wrong (e.g. the upload succeeded but the response didn't
-        # contain the real id, and a fallback was used). Fail early
-        # instead of polling until the 30-minute timeout.
-        with _consecutive_404s_lock:
-            n404 = _consecutive_404s.get(session_id, 0)
-        if n404 >= 30:
-            raise RuntimeError(
-                f"Session {_short_sid(session_id)} returned HTTP 404 on "
-                f"{n404} consecutive polls to {server_url}. The session "
-                f"id is almost certainly wrong — check the upload "
-                f"response in the backend log."
-            )
+        # ── Persistent-failure early exit ────────────────────────
+        # A run of consecutive failures from /archive_messages/ almost
+        # always means the session id is wrong (the upload succeeded
+        # but the response carried the wrong id, or the fallback path
+        # was used). Fail loudly after 30 attempts instead of polling
+        # until the 30-minute timeout.
+        if page1 is None:
+            with _consecutive_404s_lock:
+                n = _consecutive_404s.get(session_id, 0) + 1
+                _consecutive_404s[session_id] = n
+
+            if n == 1:
+                logging.warning(
+                    "/archive_messages returned a failure for session %s "
+                    "(attempt 1)", _short_sid(session_id),
+                )
+            elif n == 5:
+                logging.warning(
+                    "/archive_messages still failing for session %s after "
+                    "%d attempts; further failures for this session will "
+                    "be silenced",
+                    _short_sid(session_id), n,
+                )
+
+            if n >= 30:
+                raise RuntimeError(
+                    f"Session {_short_sid(session_id)} could not be "
+                    f"reached via /archive_messages/ for {n} consecutive "
+                    f"attempts. The session id is almost certainly wrong — "
+                    f"check the upload response in the backend log."
+                )
+        else:
+            # Success — clear the counter so a later transient failure
+            # starts a fresh count.
+            with _consecutive_404s_lock:
+                _consecutive_404s.pop(session_id, None)
 
         # ── Progress tick ────────────────────────────────────────────
         # Fetch the file and push a fraction of the video duration to
@@ -5771,7 +5915,13 @@ def wait_for_session_ready(
         now = time.time()
         if now - last_progress_fetch >= _PROGRESS_FETCH_INTERVAL:
             last_progress_fetch = now
-            raw_for_progress = _fetch_messages_json_bytes(session_id, token, server_url)
+            # Fetch *all* pages for the progress calculation. This is
+            # heavier than the page-1 probe above, but it runs only
+            # every _PROGRESS_FETCH_INTERVAL seconds (default 30 s).
+            progress_messages = _fetch_all_archive_messages(
+                session_id, token, server_url,
+            )
+            raw_for_progress = json.dumps(progress_messages).encode("utf-8")
             mt_end, asr_end = _compute_translation_progress(raw_for_progress)
             video_dur = _session_video_duration(session_id)
 
@@ -5823,14 +5973,16 @@ def wait_for_session_ready(
 
         # ── Readiness gate ───────────────────────────────────────────
         if stable_count >= _STABLE_NEEDED:
-            raw = _fetch_messages_json_bytes(session_id, token, server_url)
+            ready_messages = _fetch_all_archive_messages(
+                session_id, token, server_url,
+            )
+            raw = json.dumps(ready_messages).encode("utf-8")
             if _messages_look_done(raw, expected_langs):
-                # Confirm once more after a short pause. A single
-                # passing check can be a lucky moment during a
-                # mid-stream stall; two in a row five seconds apart is
-                # a much stronger signal that the server is really done.
                 time.sleep(5)
-                raw2 = _fetch_messages_json_bytes(session_id, token, server_url)
+                ready_messages2 = _fetch_all_archive_messages(
+                    session_id, token, server_url,
+                )
+                raw2 = json.dumps(ready_messages2).encode("utf-8")
                 if _messages_look_done(raw2, expected_langs):
                     logging.info(
                         "✅ Session %s appears complete (%d bytes, %d msgs)",
