@@ -866,29 +866,66 @@ def _short_sid(session_id: str | None, keep: int = 8) -> str:
         return "<none>"
     return session_id[:keep] + "…"
 
+def _log_token_email(token: str, where: str) -> None:
+    """Log the email field of a bearer token, for forensics only.
+
+    Never rewrites the token. Never caches the result. Purely a
+    diagnostic so the backend log shows, at upload time, exactly
+    which spelling KIT will see.
+    """
+    if not token:
+        logging.info("%s: token is empty", where)
+        return
+    parts = token.split("|")
+    if len(parts) >= 3:
+        logging.info(
+            "%s: token email = %r (token length %d)",
+            where,
+            parts[-1].strip(),
+            len(token),
+        )
+    else:
+        logging.info(
+            "%s: token has %d fields, cannot extract email",
+            where,
+            len(parts),
+        )
+
 
 def _user_home_path(token: str) -> str:
     """Build the LTKIT upload path from the authenticated user.
 
     KIT bearer tokens have the shape ``<opaque>|<expiry>|<email>``.
     The email is the identity LT KIT uses to build the user's home
-    directory, so ``/home/<email>`` is the path we should send in the
-    upload form. If the token is malformed (local dev, missing
-    email), we fall back to the legacy placeholder so the server
-    still starts and nothing crashes — but that fallback will not
-    work against a real KIT deployment.
+    directory. We copy it **verbatim** — no domain normalisation, no
+    case-folding, no trimming beyond the outer whitespace. Whatever
+    the token says is what KIT is expecting, so whatever the token
+    says is what we must send.
     """
-    if token:
-        parts = token.split("|")
-        if len(parts) >= 3:
-            email = parts[-1].strip()
-            if email and "@" in email:
-                return f"/home/{email}"
-    raise ValueError(
-        "Cannot derive the upload path: the token has no email field. "
-        "Refusing to fall back to /home/admin@example.com because that "
-        "produces sessions the KIT server cannot serve."
-    )
+    if not token:
+        raise ValueError(
+            "Cannot derive the upload path: no token was supplied."
+        )
+
+    parts = token.split("|")
+    if len(parts) < 3:
+        raise ValueError(
+            f"Cannot derive the upload path: token has {len(parts)} "
+            f"pipe-separated fields, need at least 3 "
+            f"('<opaque>|<expiry>|<email>')."
+        )
+
+    # Only the *outer* whitespace is stripped. Interior characters —
+    # dots, plus signs, the domain — are preserved exactly.
+    email = parts[-1].strip()
+
+    if "@" not in email:
+        raise ValueError(
+            f"Cannot derive the upload path: last token field "
+            f"{email!r} does not contain '@'."
+        )
+
+    return f"/home/{email}"
 
 
 def _safe_local_name(name: str) -> str:
@@ -1113,21 +1150,18 @@ def _route_logs_to_session_panel():
 @app.before_request
 def _capture_auth_token():
     """Remember the most recent bearer token we saw.
-
-    The browser's native <audio> element cannot send custom headers,
-    so /session-tts has to fall back to a token the backend already
-    holds. Every request that does carry one seeds this cache, so by
-    the time the user picks a TTS track (which can only happen after
-    the screen has loaded its data) the token is there.
+    ...
     """
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         token = auth[7:].strip()
         if token:
+            _log_token_email(token, "before_request")
             _state["token"] = token
             return
     cookie = request.cookies.get("_forward_auth", "")
     if cookie:
+        _log_token_email(cookie, "before_request(cookie)")
         _state["token"] = cookie
 
 
@@ -8293,6 +8327,27 @@ def _sanitize_session_name_for_kit(name: str) -> str:
     return re.sub(r"\s+", " ", name).strip()
 
 
+def _norm_session_name(s: str) -> str:
+    """Fold the punctuation KIT normalises in *session names*.
+
+    Deliberately does NOT touch the email or the domain. The caller
+    only ever passes the name segment, but keeping the function
+    narrow prevents a future edit from reaching into the path.
+
+    Do not add a ``@googlemail.com`` / ``@gmail.com`` fold here.
+    That fold would make a session on one domain match a name
+    from the other, and the scrape would return the wrong id.
+    """
+    for src, dst in {
+        "\u2018": "'", "\u2019": "'",
+        "\u201c": '"', "\u201d": '"',
+        "\u2013": "-", "\u2014": "-",
+        "\u2022": "-",
+        "\u00a0": " ",
+    }.items():
+        s = s.replace(src, dst)
+    return re.sub(r"\s+", " ", s).strip()
+
 # ─── UPLOAD ENDPOINT ────────────────────────────────────────────────────
 def _upload_to_internal_server_and_register(
     *,
@@ -8326,6 +8381,8 @@ def _upload_to_internal_server_and_register(
     """
 
     session_name = _sanitize_session_name_for_kit(session_name)
+
+    _log_token_email(token, "internal_upload")
 
     upload_source_path = local_path
     upload_filename_used = os.path.basename(local_path)
@@ -8503,20 +8560,7 @@ def _upload_to_internal_server_and_register(
                         archive_resp.text,
                     )
 
-                    def _norm(s: str) -> str:
-                        """ASCII-fold the punctuation KIT tends to
-                        normalise, and collapse whitespace."""
-                        for src, dst in {
-                            "\u2018": "'", "\u2019": "'",
-                            "\u201c": '"', "\u201d": '"',
-                            "\u2013": "-", "\u2014": "-",
-                            "\u2022": "-",
-                            "\u00a0": " ",
-                        }.items():
-                            s = s.replace(src, dst)
-                        return re.sub(r"\s+", " ", s).strip()
-
-                    wanted = _norm(session_name)
+                    wanted = _norm_session_name(session_name)
                     for cand in candidates:
                         # base64 decode with padding repair
                         padded = cand + "=" * (-len(cand) % 4)
@@ -8527,11 +8571,12 @@ def _upload_to_internal_server_and_register(
                         except (ValueError, UnicodeDecodeError):
                             continue
                         tail = decoded.rsplit("/", 1)[-1]
-                        if _norm(tail) == wanted:
+                        if _norm_session_name(tail) == wanted:
                             session_id = cand
                             logging.info(
                                 "internal_upload: session id matched "
-                                "by name: %s",
+                                "by name: %s (email segment preserved "
+                                "verbatim from KIT)",
                                 session_id,
                             )
                             break
@@ -8546,36 +8591,20 @@ def _upload_to_internal_server_and_register(
             # id. Reconstructs it from the /home/<user>/<name> path —
             # kept as a last resort because it is sensitive to how KIT
             # normalises punctuation.
-            if not session_id and session_name:
-                home_path = _user_home_path(token)
-                full_path = f"{home_path.rstrip('/')}/{session_name}"
-                session_id = base64.b64encode(
-                    full_path.encode("utf-8")
-                ).decode("ascii")
-                logging.info(
-                    "internal_upload: generated fallback session id "
-                    "from path: %s → %s",
-                    full_path,
-                    session_id,
+            if not session_id:
+                logging.error(
+                    "internal_upload: KIT did not return a session id. "
+                    "Refusing to fabricate one — a locally-built id would "
+                    "almost certainly 404 on every poll. Raw response:\n%s",
+                    resp.text[:3000],
                 )
-
-        if not session_id:
-            logging.error(
-                "internal_upload: no session id in response. Body:\n%s",
-                resp.text,
-            )
-            return (
-                {
+                return ({
                     "error": (
-                        "Internal server accepted the upload but did not "
-                        "return a session id. See the backend log for "
-                        "the response body."
+                        "KIT accepted the upload but did not return a session id. "
+                        "See the backend log for the raw response body."
                     ),
                     "status_code": resp.status_code,
-                    "response_preview": resp.text[:500],
-                },
-                502,
-            )
+                }, 502)
 
         # ── 5. Optionally clear stale local state ─────────────────
         if clear_stale_session:
