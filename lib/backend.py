@@ -8463,16 +8463,21 @@ def _upload_to_internal_server_and_register(
                 resp.text[:5000],
             )
 
-            # ── NEW: ask the archive index for the newest session ──
-            # KIT stores the session under whatever name *it* chose
-            # after normalising the input. Rather than guess that
-            # normalisation (and get it wrong for apostrophes and
-            # dashes), read the id straight from the archive listing.
-            # KIT orders the index newest-first, so the top entry is
-            # this upload.
+            # ── NEW: ask KIT's archive browser for the real id ──────
+            # /index/ has the user's home directory as a
+            # /archive/<home_b64> link. /archive/<home_b64> then
+            # lists that user's sessions, newest first, as
+            # /archivesession/<id> links. Read the first one — it is
+            # the id KIT actually stored for this upload, byte for
+            # byte, with whatever typographic punctuation KIT chose.
             try:
-                index_resp = requests.get(
-                    f"{base_url}/index/",
+                home_path = _user_home_path(token)
+                home_b64 = base64.b64encode(
+                    home_path.encode("utf-8")
+                ).decode("ascii")
+
+                archive_resp = requests.get(
+                    f"{base_url}/archive/{home_b64}",
                     headers={
                         "Authorization": f"Bearer {token}",
                         "X-Forward-Auth": token,
@@ -8482,29 +8487,29 @@ def _upload_to_internal_server_and_register(
                     timeout=20,
                     allow_redirects=True,
                 )
-                if index_resp.status_code == 200:
-                    m = re.search(
-                        r"/archivesession/([A-Za-z0-9_\-=]+)",
-                        index_resp.text,
+                if archive_resp.status_code == 200:
+                    matches = re.findall(
+                        r'/archivesession/([A-Za-z0-9_\-=]+)',
+                        archive_resp.text,
                     )
-                    if m:
-                        session_id = m.group(1)
+                    if matches:
+                        session_id = matches[0]
                         logging.info(
                             "internal_upload: session id scraped from "
-                            "index: %s",
+                            "archive listing: %s",
                             session_id,
                         )
             except requests.exceptions.RequestException as e:
                 logging.warning(
-                    "internal_upload: could not scrape index for "
-                    "session id: %s",
+                    "internal_upload: could not scrape archive "
+                    "listing for session id: %s",
                     e,
                 )
 
-            # Fallback: only runs if the index scrape above did not
-            # produce an id. Reconstructs it from the /home/<user>/<name>
-            # path — kept as a last resort because it is sensitive to
-            # how KIT normalises punctuation.
+            # Fallback: only used if the scrape above did not find an
+            # id. Reconstructs it from the /home/<user>/<name> path —
+            # kept as a last resort because it is sensitive to how KIT
+            # normalises punctuation.
             if not session_id and session_name:
                 home_path = _user_home_path(token)
                 full_path = f"{home_path.rstrip('/')}/{session_name}"
