@@ -38,7 +38,6 @@ from docx import Document
 from docx.shared import Pt, RGBColor
 
 import urllib3
-
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # BeautifulSoup is imported only when needed for HTML parsing
@@ -50,8 +49,7 @@ try:
 except ImportError:
     logging.warning("BeautifulSoup not installed. Export functions will be limited.")
 
-logging.basicConfig(level=logging.INFO)
-logging.getLogger("urllib3").setLevel(logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -113,24 +111,16 @@ def add_no_cache_for_api(response):
         response.headers["Expires"] = "0"
     return response
 
-
 # ─── DEFAULT INTERNAL SERVER ──────────────────────────────
 INTERNAL_SERVER_URL = "https://lt2srv.iar.kit.edu"
 
 # ─── ALLOWED TARGET SERVERS ───────────────────────────────
 # Any host of the form:
-#     lt2srv.iar.kit.edu                          (bare host, no `isl.`)
-#     lt2srv-<suffix>.iar.kit.edu
-#     lt2srv-<suffix>.isl.iar.kit.edu
-# A suffix is mandatory when `isl.` is present — KIT does not publish
-# `lt2srv.isl.iar.kit.edu`, and allowing it here let a stale
-# `INTERNAL_SERVER_URL` slip past validation and then 404 on every poll.
+#     lt2srv[-<suffix>].iar.kit.edu
+#     lt2srv[-<suffix>].isl.iar.kit.edu
+# A suffix is optional, lowercase, and may contain hyphens/digits.
 _ALLOWED_SERVER_RE = re.compile(
-    r"^https://(?:"
-    r"lt2srv\.iar\.kit\.edu"
-    r"|lt2srv-[a-z0-9]+(?:-[a-z0-9]+)*\.iar\.kit\.edu"
-    r"|lt2srv-[a-z0-9]+(?:-[a-z0-9]+)*\.isl\.iar\.kit\.edu"
-    r")$"
+    r"^https://lt2srv(?:-[a-z0-9]+)*\.(?:isl\.)?iar\.kit\.edu$"
 )
 
 _KNOWN_SERVERS = {
@@ -754,15 +744,9 @@ def _extract_session_id(resp: requests.Response) -> str | None:
 
     def _from_dict(d: dict) -> str | None:
         for key in (
-            "session_id",
-            "sessionId",
-            "session",
-            "id",
-            "session_uuid",
-            "sessionid",
-            "session_name",
-            "archive_session_id",
-            "archiveSessionId",
+            "session_id", "sessionId", "session", "id",
+            "session_uuid", "sessionid", "session_name",
+            "archive_session_id", "archiveSessionId",
         ):
             v = d.get(key)
             if isinstance(v, str) and v.strip():
@@ -807,7 +791,7 @@ def _extract_session_id(resp: requests.Response) -> str | None:
     # first `<script>` that assigns a JSON object to a variable and
     # try to pull a session id out of it.
     m = re.search(
-        r"<script[^>]*>\s*(?:var|const|let)\s+\w+\s*=\s*({[^<]+})",
+        r'<script[^>]*>\s*(?:var|const|let)\s+\w+\s*=\s*({[^<]+})',
         body,
     )
     if m:
@@ -827,17 +811,8 @@ def _extract_session_id(resp: requests.Response) -> str | None:
 
     sid = _session_id_from_any_url(body)
     if sid:
-        logging.info("_extract_session_id: matched bare URL in body")
         return sid
 
-    logging.warning(
-        "_extract_session_id: no match. status=%s final_url=%s "
-        "content_type=%r body_len=%d",
-        resp.status_code,
-        resp.url,
-        resp.headers.get("Content-Type", "<none>"),
-        len(body),
-    )
     return None
 
 
@@ -866,66 +841,6 @@ def _short_sid(session_id: str | None, keep: int = 8) -> str:
     if not session_id:
         return "<none>"
     return session_id[:keep] + "…"
-
-
-def _log_token_email(token: str, where: str) -> None:
-    """Log the email field of a bearer token, for forensics only.
-
-    Never rewrites the token. Never caches the result. Purely a
-    diagnostic so the backend log shows, at upload time, exactly
-    which spelling KIT will see.
-    """
-    if not token:
-        logging.info("%s: token is empty", where)
-        return
-    parts = token.split("|")
-    if len(parts) >= 3:
-        logging.info(
-            "%s: token email = %r (token length %d)",
-            where,
-            parts[-1].strip(),
-            len(token),
-        )
-    else:
-        logging.info(
-            "%s: token has %d fields, cannot extract email",
-            where,
-            len(parts),
-        )
-
-
-def _user_home_path(token: str) -> str:
-    """Build the LTKIT upload path from the authenticated user.
-
-    KIT bearer tokens have the shape ``<opaque>|<expiry>|<email>``.
-    The email is the identity LT KIT uses to build the user's home
-    directory. We copy it **verbatim** — no domain normalisation, no
-    case-folding, no trimming beyond the outer whitespace. Whatever
-    the token says is what KIT is expecting, so whatever the token
-    says is what we must send.
-    """
-    if not token:
-        raise ValueError("Cannot derive the upload path: no token was supplied.")
-
-    parts = token.split("|")
-    if len(parts) < 3:
-        raise ValueError(
-            f"Cannot derive the upload path: token has {len(parts)} "
-            f"pipe-separated fields, need at least 3 "
-            f"('<opaque>|<expiry>|<email>')."
-        )
-
-    # Only the *outer* whitespace is stripped. Interior characters —
-    # dots, plus signs, the domain — are preserved exactly.
-    email = parts[-1].strip()
-
-    if "@" not in email:
-        raise ValueError(
-            f"Cannot derive the upload path: last token field "
-            f"{email!r} does not contain '@'."
-        )
-
-    return f"/home/{email}"
 
 
 def _safe_local_name(name: str) -> str:
@@ -974,19 +889,6 @@ def _session_dir(session_id: str) -> str:
     return os.path.join(SESSION_FOLDER, session_id)
 
 
-def _effective_token(session_id: str, fallback: str = "") -> str:
-    """Return the token that owns this session.
-
-    KIT sessions are user-scoped: only the bearer that created a
-    session can read it back. We record that token on the session
-    record at upload time and reuse it for every subsequent KIT
-    call, regardless of which user is currently logged in to the
-    web UI.
-    """
-    stored = (sessions.get(session_id) or {}).get("token")
-    return stored or fallback or (_state.get("token") or "")
-
-
 def _ensure_greenscreen_fields(project: dict) -> dict:
     """Make sure every project carries the green-screen bookkeeping fields.
 
@@ -1014,9 +916,7 @@ def _ensure_job_history(project: dict) -> dict:
 # client-side cap so the two never drift.
 MAX_JOB_HISTORY_ENTRIES = 20
 
-# Consecutive HTTP 404s per session. Used to keep a wrong or stale
-# session id from spamming the log and the progress panel while the
-# background worker spins. Reset as soon as the session responds.
+
 def _note_404(session_id: str, url: str) -> int:
     """Bump and return the consecutive-404 counter for a session.
 
@@ -1061,9 +961,8 @@ class _PanelLogHandler(logging.Handler):
     # The polling chatter from wait_for_session_ready is useful in the
     # terminal but drowns out everything else in the panel.
     _CONSOLE_ONLY_SUBSTRINGS = (
-        "messages=",
+        "messages.json size=",
         "size stable but content",
-        "reports total=",
     )
 
     def emit(self, record):
@@ -1153,19 +1052,21 @@ def _route_logs_to_session_panel():
 @app.before_request
 def _capture_auth_token():
     """Remember the most recent bearer token we saw.
-    ...
+
+    The browser's native <audio> element cannot send custom headers,
+    so /session-tts has to fall back to a token the backend already
+    holds. Every request that does carry one seeds this cache, so by
+    the time the user picks a TTS track (which can only happen after
+    the screen has loaded its data) the token is there.
     """
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         token = auth[7:].strip()
         if token:
-            logging.debug("before_request: token email = %r",
-                      token.split("|")[-1].strip() if "|" in token else "<none>")
             _state["token"] = token
             return
     cookie = request.cookies.get("_forward_auth", "")
     if cookie:
-        _log_token_email(cookie, "before_request(cookie)")
         _state["token"] = cookie
 
 
@@ -1548,12 +1449,10 @@ def _job_cleanup():
 def job_progress(session_id):
     """Progress endpoint polled by JobProgressPanel."""
     if request.method == "OPTIONS":
-        origin = request.headers.get("Origin", "")
         r = jsonify({"message": "OK"})
-        r.headers["Access-Control-Allow-Origin"] = origin
-        r.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
-        r.headers["Access-Control-Allow-Methods"] = "GET,OPTIONS"
-        r.headers["Access-Control-Allow-Credentials"] = "true"
+        r.headers.add("Access-Control-Allow-Origin", "*")
+        r.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+        r.headers.add("Access-Control-Allow-Methods", "GET,OPTIONS")
         return r, 200
 
     _job_cleanup()
@@ -1707,41 +1606,26 @@ def job_progress(session_id):
 
 @app.route("/cancel_session/<path:session_id>", methods=["POST", "OPTIONS"])
 def cancel_session(session_id):
-    """Cancel a queued or active processing session."""
+    """Ask the background worker for this session to stop.
+
+    Sets a flag; the worker checks it in its wait loop and between file
+    downloads. This call does not block waiting for the worker to die —
+    the panel reflects the change on the next poll.
+    """
     if request.method == "OPTIONS":
         return ("", 204)
 
+    logging.info("🛑 Cancel requested for session %s", _short_sid(session_id))
+
     _request_cancel(session_id)
 
+    # Update persisted state immediately so a page reload or a cold
+    # panel poll sees the cancelled status right away.
     job = jobs.get(session_id)
-    had_job = job is not None and job.get("status") == "processing"
-    if had_job:
+    if job and job.get("status") == "processing":
         job["status"] = "cancelled"
-
-    with job_progress_lock:
-        had_progress = session_id in _job_progress_store
-
     _job_cancel(session_id)
     save_state()
-
-    if not had_job and not had_progress:
-        # The session was never registered here — probably uploaded to a
-        # different host, or the backend was restarted.
-        return (
-            jsonify(
-                {
-                    "success": False,
-                    "session_id": session_id,
-                    "reason": "unknown_session",
-                    "message": (
-                        "No job is registered for this session id. It was "
-                        "either uploaded to a different server or the "
-                        "backend has restarted since."
-                    ),
-                }
-            ),
-            404,
-        )
 
     return jsonify({"success": True, "session_id": session_id}), 200
 
@@ -1912,6 +1796,32 @@ def curl_download(url, output_path, token):
             and os.path.exists(output_path)
             and os.path.getsize(output_path) > 1000
         ):
+            # KIT returns 200 with an HTML error page for files it does
+            # not have. Refuse to treat that as a successful download,
+            # otherwise the HTML is written into a .wav / .vtt / .mp4
+            # slot and the browser chokes on it.
+            #
+            # index.html is intentionally HTML, so skip the check for
+            # that one filename.
+            if not output_path.endswith(".html"):
+                try:
+                    with open(output_path, "rb") as f:
+                        head = f.read(32)
+                    stripped = head.lstrip().lower()
+                    if (
+                        stripped.startswith(b"<!doctype html")
+                        or stripped.startswith(b"<html")
+                        or stripped.startswith(b"<!doctype")
+                    ):
+                        logging.info(
+                            "curl_download: %s → 200 but body is HTML; "
+                            "treating as failure",
+                            url,
+                        )
+                        os.remove(output_path)
+                        return False
+                except OSError:
+                    pass
             return True
 
         if status != 200:
@@ -2147,8 +2057,6 @@ def download_session_files(session_id, token, server_url=None):
         server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
     server_url = server_url.rstrip("/")
 
-    effective_token = _effective_token(session_id, fallback=token)
-
     lock = _get_session_download_lock(session_id)
     if not lock.acquire(blocking=False):
         lock.acquire()
@@ -2168,7 +2076,7 @@ def download_session_files(session_id, token, server_url=None):
                 _short_sid(session_id),
             )
             return True
-        return _download_session_files_locked(session_id, effective_token, server_url)
+        return _download_session_files_locked(session_id, token, server_url)
     finally:
         lock.release()
 
@@ -2270,35 +2178,24 @@ def _download_session_files_locked(session_id, token, server_url):
         logging.warning("Could not download audio: %s", e)
 
     # messages.json
-    # messages.json — fetched from KIT's live /archive_messages/
-    # endpoint, not from the static archive file (which is not
-    # populated on lt2srv.iar.kit.edu for public sessions).
     if _is_cancelled(session_id):
         raise _JobCancelled(
             f"Session {_short_sid(session_id)} cancelled before messages.json download"
         )
+    messages_url = f"{server_url}/archivemediafile/{session_id}/messages.json"
     messages_path = os.path.join(session_dir, "messages.json")
-    messages = _fetch_all_archive_messages(session_id, token, server_url)
-    if messages:
-        with open(messages_path, "w", encoding="utf-8") as f:
-            json.dump(messages, f, ensure_ascii=False)
-        size = os.path.getsize(messages_path)
+    if curl_download(messages_url, messages_path, token):
         logging.info(
-            "Downloaded %d messages via /archive_messages (%d bytes)",
-            len(messages),
-            size,
+            "Downloaded messages.json (%d bytes)", os.path.getsize(messages_path)
         )
         _job_log(
             session_id,
-            f"Downloaded {len(messages)} messages " f"({size} bytes)",
+            f"Downloaded messages.json " f"({os.path.getsize(messages_path)} bytes)",
             progress=0.85,
         )
-        _job_add_file(session_id, "messages.json", size)
+        _job_add_file(session_id, "messages.json", os.path.getsize(messages_path))
     else:
-        logging.warning(
-            "No messages returned by /archive_messages for session %s",
-            _short_sid(session_id),
-        )
+        logging.warning("Failed to download messages.json")
 
     # Transcripts
     _job_log(session_id, "Extracting transcripts…", stage="extracting", progress=0.9)
@@ -2322,20 +2219,8 @@ def _download_session_files_locked(session_id, token, server_url):
             vtt_path = os.path.join(session_dir, vtt_name)
             _job_add_file(session_id, vtt_name, os.path.getsize(vtt_path))
             _job_log(session_id, f"Generated {vtt_name}")
-
     else:
         _job_log(session_id, "No transcripts extracted", level="warning")
-
-    # ── Pull TTS WAVs alongside the VTTs, so playback no longer
-    #    depends on a live KIT token. ─────────────────────────────
-    if _is_cancelled(session_id):
-        raise _JobCancelled(
-            f"Session {_short_sid(session_id)} cancelled before TTS download"
-        )
-    try:
-        download_tts_files(session_id, token, server_url)
-    except (OSError, ValueError, TypeError) as e:
-        logging.warning("TTS download failed for %s: %s", _short_sid(session_id), e)
 
     files = [
         f
@@ -2360,68 +2245,6 @@ def _download_session_files_locked(session_id, token, server_url):
         progress=1.0,
     )
     return len(files) > 0
-
-
-def download_tts_files(session_id, token, server_url=None, languages=None):
-    """Download per-language TTS WAVs into the session folder.
-
-    Naming mirrors what the frontend already builds: label =
-    "<Simple Language> Audio", local file = "tts_<Simple>.wav".
-    Skips the ASR "Transcript" track — KIT has no TTS for it.
-    """
-    session_dir = _session_dir(session_id)
-    server_url = (server_url or INTERNAL_SERVER_URL).rstrip("/")
-
-    if languages is None:
-        json_path = os.path.join(session_dir, "transcripts.json")
-        if not os.path.exists(json_path):
-            return []
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                transcripts = json.load(f)
-        except (OSError, ValueError, TypeError):
-            return []
-        languages = [t.get("language", "") for t in transcripts]
-
-    downloaded = []
-    seen = set()
-    for lang in languages:
-        if not lang:
-            continue
-        # KIT only serves TTS for real translation targets. The
-        # speaker's own track ("Transcript", "Original ASR") has no
-        # matching audio.
-        if lang == "Transcript" or "Original ASR" in lang:
-            continue
-
-        simple = _extract_simple_language_name(lang)
-        if not simple or simple == "Unknown":
-            continue
-        label = f"{simple} Audio"
-        if label in seen:
-            continue
-        seen.add(label)
-
-        local_name = f"tts_{simple}.wav"
-        local_path = os.path.join(session_dir, local_name)
-
-        if os.path.exists(local_path) and os.path.getsize(local_path) > 1000:
-            downloaded.append(local_name)
-            continue
-
-        kit_name = f"{label}.wav"
-        kit_url = f"{server_url}/archivemediafile/{session_id}/{quote(kit_name)}"
-
-        if curl_download(kit_url, local_path, token):
-            size = os.path.getsize(local_path)
-            logging.info("Downloaded TTS %s (%d bytes)", local_name, size)
-            _job_log(session_id, f"Downloaded {local_name}")
-            _job_add_file(session_id, local_name, size)
-            downloaded.append(local_name)
-        else:
-            logging.info("No TTS available for %s (%s)", simple, label)
-
-    return downloaded
 
 
 def safe_float(value, default=0.0):
@@ -4190,7 +4013,7 @@ def session_messages_json(session_id):
 
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
-        token = _effective_token(session_id, fallback=token)
+        token = request.cookies.get("_forward_auth", "")
 
     if token:
         local_path = os.path.join(session_dir, "messages.json")
@@ -4212,38 +4035,25 @@ def session_messages_json(session_id):
     return jsonify({"error": "messages.json not found"}), 404
 
 
-@app.route("/session-tts/<path:session_id>/<path:label>", methods=["GET", "OPTIONS"])
+@app.route("/session-tts/<path:session_id>/<path:label>", methods=["GET"])
 def session_tts(session_id, label):
-    """Stream a per-language TTS track.
+    """Stream the per-language TTS track from the KIT server.
 
-    Preference order:
-      1. locally-downloaded WAV (offline, no token)
-      2. live proxy to KIT (legacy, requires cached token)
+    The KIT archive page advertises TTS audio via <source> tags of the
+    form `/archivemediafile/{session_id}/{Language} Audio.wav`. We
+    rebuild that URL here and proxy the bytes through, so the browser
+    never has to know the KIT host or carry the bearer token itself.
     """
-    # CORS preflight — must return 2xx or the browser blocks the call.
-    if request.method == "OPTIONS":
-        return ("", 204)
-
-    session_dir = _session_dir(session_id)
-
-    # ── 1. Local file ─────────────────────────────────────────────
-    simple = label[: -len(" Audio")] if label.endswith(" Audio") else label
-    for name in (f"tts_{simple}.wav", f"{label}.wav"):
-        path = os.path.join(session_dir, name)
-        if os.path.exists(path) and os.path.getsize(path) > 1000:
-            logging.info("session_tts: serving local %s", name)
-            return send_file(
-                path,
-                mimetype="audio/wav",
-                conditional=True,  # gives Range support → seeking works
-                as_attachment=False,
-            )
-
-    # ── 2. Live proxy (unchanged) ─────────────────────────────────
+    # `label` arrives URL-decoded by Flask ("English Audio").
+    # KIT expects "<Language> Audio.wav" verbatim, with a literal space.
     filename = f"{label}.wav"
+
     server = (sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL).rstrip(
         "/"
     )
+
+    # quote() encodes the space as %20 but leaves letters/dots alone.
+    # Do NOT quote session_id — its trailing "==" is significant.
     kit_url = f"{server}/archivemediafile/{session_id}/{quote(filename)}"
 
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
@@ -4254,10 +4064,7 @@ def session_tts(session_id, label):
         # headers, so the TTS request arrives bare. Fall back to the
         # most recent token we saw on any other request from this
         # session — _capture_auth_token() stores it in _state["token"].
-        token = _effective_token(
-            session_id,
-            fallback=request.headers.get("Authorization", "").replace("Bearer ", ""),
-        )
+        token = _state.get("token") or ""
 
     upstream_headers = {
         "User-Agent": "Mozilla/5.0 (compatible; LT-Uploader/1.0)",
@@ -4296,6 +4103,19 @@ def session_tts(session_id, label):
             r.status_code,
         )
 
+    # KIT returns 200 with an HTML error page when a TTS file is
+    # missing. Forwarding that as audio/wav causes the browser's
+    # <audio> element to fail with DEMUXER_ERROR_COULD_NOT_OPEN.
+    # Return a clean 404 instead.
+    upstream_type = r.headers.get("Content-Type", "").lower()
+    if "html" in upstream_type:
+        logging.info(
+            "session_tts: upstream returned HTML for %s (label=%r)",
+            kit_url,
+            label,
+        )
+        return jsonify({"error": "upstream_html"}), 404
+
     # Pass through the headers the <audio> element cares about.
     passthrough = {}
     for h in (
@@ -4319,111 +4139,29 @@ def session_tts(session_id, label):
         direct_passthrough=True,
     )
 
-
-# pylint: disable=unused-argument
 @app.route(
-    "/session-tts-sign/<path:session_id>/<path:label>", methods=["GET", "OPTIONS"]
+    "/session-tts-sign/<path:session_id>/<path:label>",
+    methods=["GET", "OPTIONS"],
 )
 def session_tts_sign(session_id, label):
-    """Signed-URL TTS endpoint — stub.
+    """Return a URL the browser can stream a TTS track from.
 
-    The backend serves TTS through /session-tts directly, so there is
-    nothing to sign. This route exists purely so the browser's CORS
-    preflight gets a 2xx response.
-
-    ``session_id`` and ``label`` are required by Flask's routing
-    machinery (they match the ``<path:…>`` placeholders) but are not
-    used in the body.
-    """
-    if request.method == "OPTIONS":
-        return ("", 204)
-    return (
-        jsonify(
-            {
-                "error": "not_implemented",
-                "message": (
-                    "Signed TTS URLs are not supported on this server. "
-                    "Use /session-tts/<session_id>/<label> instead."
-                ),
-            }
-        ),
-        404,
-    )
-
-
-@app.route("/session-tts-backfill/<path:session_id>", methods=["POST", "OPTIONS"])
-def session_tts_backfill(session_id):
-    """Download every TTS WAV for one session into its local folder.
-
-    Idempotent — files already present are skipped.
+    Browser <audio> elements can't send Authorization headers, so the
+    client can't use the normal /session-tts URL directly. We return
+    that URL anyway — /session-tts falls back to the most recently
+    captured bearer token (_capture_auth_token) when a request arrives
+    without one.
     """
     if request.method == "OPTIONS":
         return ("", 204)
 
-    session_dir = _session_dir(session_id)
-    if not os.path.isdir(session_dir):
-        return jsonify({"error": "Session not found"}), 404
+    if not label:
+        return jsonify({"error": "label is required"}), 400
 
-    token = _state.get("token") or ""
-    if not token:
-        return (
-            jsonify(
-                {
-                    "error": "no_token",
-                    "message": (
-                        "Open the session screen once in the browser "
-                        "so the server caches a token, then retry."
-                    ),
-                }
-            ),
-            400,
-        )
-
-    server = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
-
-    try:
-        written = download_tts_files(session_id, token, server)
-    except (OSError, ValueError, TypeError) as e:
-        logging.exception("TTS backfill failed for %s", _short_sid(session_id))
-        return jsonify({"error": str(e)}), 500
-
-    save_state()
-    return (
-        jsonify(
-            {
-                "success": True,
-                "session_id": session_id,
-                "downloaded": written,
-                "count": len(written),
-            }
-        ),
-        200,
-    )
-
-
-@app.route("/session-tts-backfill-all", methods=["POST", "OPTIONS"])
-def session_tts_backfill_all():
-    """Backfill TTS for every session the server currently knows about."""
-    if request.method == "OPTIONS":
-        return ("", 204)
-
-    token = _state.get("token") or ""
-    if not token:
-        return jsonify({"error": "no_token"}), 400
-
-    results = {}
-    for sid in list(sessions.keys()):
-        if not os.path.isdir(_session_dir(sid)):
-            continue
-        server = sessions.get(sid, {}).get("server") or INTERNAL_SERVER_URL
-        try:
-            results[sid] = download_tts_files(sid, token, server)
-        except (OSError, ValueError, TypeError) as e:
-            logging.warning("Backfill failed for %s: %s", _short_sid(sid), e)
-            results[sid] = {"error": str(e)}
-
-    save_state()
-    return jsonify({"success": True, "results": results}), 200
+    # Same encoding the direct caller would use, so /session-tts
+    # receives exactly the label it expects.
+    url = f"/session-tts/{session_id}/{quote(label)}"
+    return jsonify({"url": url}), 200
 
 
 @app.route("/session-zip/<path:session_id>", methods=["GET"])
@@ -5284,74 +5022,56 @@ def _internal_cookies(token: str) -> dict:
     return {"_forward_auth": token}
 
 
-def _remote_size(url: str, token: str, timeout: int = 30) -> tuple[int, int]:
-    """Return (size, status_code). size=0 on error.
-
-    KIT's server does not reliably implement HEAD on /archivemediafile
-    (it 500s or times out), so we send a one-byte ranged GET and read
-    Content-Range instead. Content-Range looks like
-        bytes 0-0/12345
-    and the number after the slash is the total size.
-    """
+def _remote_size(url: str, token: str, timeout: int = 20) -> tuple[int, int]:
+    """Return (size, status_code). size=0 on error."""
     headers = _internal_headers(token)
     headers["Range"] = "bytes=0-0"
 
-    for attempt in range(1, 3):
-        try:
-            r = requests.get(
-                url,
-                headers=headers,
-                cookies=_internal_cookies(token),
-                verify=False,
-                timeout=(10, timeout),
-                allow_redirects=True,
-                stream=True,  # never download the body
-            )
+    try:
+        with requests.get(
+            url,
+            headers=headers,
+            cookies=_internal_cookies(token),
+            verify=False,
+            timeout=timeout,
+            stream=True,
+            allow_redirects=True,
+        ) as r:
             status = r.status_code
-
-            # Preferred: Content-Range header on a 206 response.
-            cr = r.headers.get("Content-Range")
-            if cr and "/" in cr:
-                total = cr.rsplit("/", 1)[-1].strip()
-                if total.isdigit():
-                    return int(total), status
-
-            # Fallback: Content-Length on a normal 200.
+            cr = r.headers.get("Content-Range", "")
+            if "/" in cr:
+                try:
+                    return int(cr.rsplit("/", 1)[-1]), status
+                except ValueError:
+                    pass
             cl = r.headers.get("Content-Length")
             if cl:
                 try:
-                    return int(cl), status
+                    n = int(cl)
+                    if n > 1:
+                        return n, status
                 except ValueError:
                     pass
-
             return 0, status
-
-        except requests.exceptions.ReadTimeout as e:
-            if attempt == 1:
-                logging.info(
-                    "ranged GET read timeout for %s (attempt %d/2), retrying",
-                    url,
-                    attempt,
-                )
-                time.sleep(1)
-                continue
-            logging.warning(
-                "ranged GET read timeout for %s after %d attempts: %s",
-                url,
-                attempt,
-                e,
-            )
-            return 0, 0
-        except requests.exceptions.RequestException as e:
-            logging.warning("ranged GET failed for %s: %s", url, e)
-            return 0, 0
-
+    except requests.exceptions.RequestException as e:
+        logging.warning("Range GET failed for %s: %s", url, e)
     return 0, 0
 
 
 # ─── SESSION COMPLETENESS GATES ─────────────────────────────────────────
-MIN_MESSAGES_BYTES = 5_000      # bytes; used in _messages_look_done
-MIN_MESSAGES_COUNT = 1       # messages; used in wait_for_session_ready
+# ─── SESSION COMPLETENESS GATES ─────────────────────────────────────────
+# Byte length threshold used inside _messages_look_done(), which
+# receives the concatenated JSON bytes of the whole transcript.
+MIN_MESSAGES_BYTES = 5_000
+
+# Message-count threshold used inside wait_for_session_ready(),
+# where `size` is the `total` value reported by /archive_messages/.
+# A short lecture is ~50-200 messages; a long one is a few thousand.
+# Anything above 1 is enough to gate the readiness check; the real
+# content check is done by _messages_look_done(), which requires
+# >=5 ASR messages.
+MIN_MESSAGES_COUNT = 1
+
 _STABLE_NEEDED = 3
 
 # How many bytes of growth in one poll still count as "quiet". Below
@@ -5649,138 +5369,6 @@ def _count_messages(raw: bytes) -> int:
     return 0
 
 
-def _fetch_archive_messages_page(session_id, token, server_url, page, limit=1000):
-    """Fetch one page from KIT's live transcript endpoint.
-
-    IMPORTANT: `page` is 1-based. `page=0` returns `data: []` even
-    though `total` is non-zero. Always start at page=1.
-    """
-    if not server_url:
-        server_url = INTERNAL_SERVER_URL
-    server_url = server_url.rstrip("/")
-
-    url = f"{server_url}/archive_messages/{session_id}"
-    try:
-        r = requests.get(
-            url,
-            params={"page": page, "limit": limit},
-            headers=_internal_headers(token),
-            cookies=_internal_cookies(token),
-            verify=False,
-            timeout=60,
-            allow_redirects=True,
-        )
-        if r.status_code != 200:
-            logging.info(
-                "_fetch_archive_messages_page: %s page=%d -> HTTP %s",
-                url,
-                page,
-                r.status_code,
-            )
-            return None
-        return r.json()
-    except (
-        requests.exceptions.RequestException,
-        json.JSONDecodeError,
-        ValueError,
-    ) as e:
-        logging.warning(
-            "_fetch_archive_messages_page: page=%d failed: %s",
-            page,
-            e,
-        )
-        return None
-
-# Last total reported per session, so the "reports total=N" line is
-# printed only when the count actually changes. Keyed by session id.
-_last_reported_total: dict[str, int] = {}
-_last_reported_total_lock = threading.Lock()
-
-
-def _fetch_all_archive_messages(
-    session_id, token, server_url, limit=1000, max_pages=50
-):
-    """Page through /archive_messages/<sid> and return the concatenated list.
-
-    The return value has the same shape as `messages.json`: a list of
-    `[lang_id, "<message_json>"]` pairs. It is a drop-in replacement
-    for the data that `extract_transcripts_from_messages` reads.
-    """
-    all_messages = []
-    page = 1  # 1-based!
-    total = None
-    while page <= max_pages:
-        payload = _fetch_archive_messages_page(
-            session_id,
-            token,
-            server_url,
-            page,
-            limit,
-        )
-        if payload is None:
-            break
-        if total is None:
-            try:
-                total = int(payload.get("total", 0))
-            except (TypeError, ValueError):
-                total = 0
-
-        with _last_reported_total_lock:
-            previous = _last_reported_total.get(session_id)
-            if previous != total:
-                _last_reported_total[session_id] = total
-                should_log = True
-            else:
-                should_log = False
-        if should_log:
-            logging.info(
-                "archive_messages: session %s reports total=%d",
-                _short_sid(session_id), total,
-            )
-        chunk = payload.get("data") or []
-        all_messages.extend(chunk)
-        if not chunk or len(chunk) < limit:
-            break
-        if total is not None and page * limit >= total:
-            break
-        page += 1
-    return all_messages
-
-
-def _fetch_latest_archive_page(session_id, token, server_url, limit=1000):
-    """Fetch only the highest-numbered page of /archive_messages/.
-
-    Uses the `total` from page 1 to compute which page is last, then
-    fetches that one. Returns the list of messages on that page.
-    """
-    probe = _fetch_archive_messages_page(
-        session_id,
-        token,
-        server_url,
-        page=1,
-        limit=1,
-    )
-    if probe is None:
-        return []
-    try:
-        total = int(probe.get("total", 0))
-    except (TypeError, ValueError):
-        total = 0
-    if total <= 0:
-        return []
-    last_page = max(1, (total + limit - 1) // limit)
-    payload = _fetch_archive_messages_page(
-        session_id,
-        token,
-        server_url,
-        page=last_page,
-        limit=limit,
-    )
-    if payload is None:
-        return []
-    return payload.get("data") or []
-
-
 # How often to re-fetch messages.json purely to refresh the progress
 # bar. The stability check already fetches it occasionally; this adds
 # a periodic tick so the bar moves even while the file is growing.
@@ -5823,10 +5411,6 @@ def wait_for_session_ready(
     last_reported_asr_end = 0.0
     last_heartbeat = started
 
-    # Fires the shape-diagnostic log line exactly once per call to this
-    # function — i.e. once per session — instead of once per process.
-    _logged_shape = False
-
     # Cooldown between two events of the same kind. Complements the
     # value-advance check below.
     while True:
@@ -5845,48 +5429,7 @@ def wait_for_session_ready(
             time.sleep(1)
             continue
 
-        # KIT's live transcript endpoint: page 1 is the first page.
-        # Fetching page 1 alone is cheap and gives us both `total` and
-        # a fresh sample of the newest messages, which is enough for
-        # the size / growth tracking that follows.
-        page1 = _fetch_archive_messages_page(
-            session_id,
-            token,
-            server_url,
-            page=1,
-            limit=1,
-        )
-        if page1 is None:
-            # Treat a failed fetch as a transient 5xx: keep waiting
-            # but make the 404/401 bookkeeping happy.
-            status = 503
-            size = 0
-        else:
-            status = 200
-            try:
-                total = int(page1.get("total", 0))
-            except (TypeError, ValueError):
-                total = 0
-            # Use `total` as the "size" signal. It grows monotonically
-            # as KIT produces more messages, so the quiet-period logic
-            # below keeps working unchanged.
-            size = total
-
-        # ── One-time shape log ────────────────────────────────────
-        if page1 is not None and not _logged_shape:
-            _logged_shape = True
-            shape_total = page1.get("total", 0)
-            n = len(page1.get("data") or [])
-            logging.info(
-                "archive_messages: shape check — total=%s, page-1 items=%d",
-                shape_total,
-                n,
-            )
-            if n:
-                logging.info(
-                    "archive_messages: first item preview = %s",
-                    str(page1["data"][0])[:200],
-                )
+        size, status = _fetch_messages_json_size(session_id, token, server_url)
 
         if status == 401:
             unauthorized_count += 1
@@ -5898,6 +5441,8 @@ def wait_for_session_ready(
                 )
         else:
             unauthorized_count = 0
+
+        size_changed = size != last_size
 
         size_changed = size != last_size
 
@@ -5928,7 +5473,7 @@ def wait_for_session_ready(
         if status == 200:
             if size_changed or stable_count in (1, _STABLE_NEEDED):
                 logging.info(
-                    "Session %s: messages=%d (stable=%d/%d)",
+                    "Session %s: messages.json size=%d (stable=%d/%d)",
                     _short_sid(session_id),
                     size,
                     stable_count,
@@ -5936,50 +5481,25 @@ def wait_for_session_ready(
                 )
         elif status != 200 and size_changed:
             logging.info(
-                "Session %s: /archive_messages status=%d "
+                "Session %s: messages.json status=%d "
                 "(waiting for the internal server to publish the session)",
                 _short_sid(session_id),
                 status,
             )
 
-        # ── Persistent-failure early exit ────────────────────────
-        # A run of consecutive failures from /archive_messages/ almost
-        # always means the session id is wrong (the upload succeeded
-        # but the response carried the wrong id, or the fallback path
-        # was used). Fail loudly after 30 attempts instead of polling
-        # until the 30-minute timeout.
-        if page1 is None:
-            with _consecutive_404s_lock:
-                n = _consecutive_404s.get(session_id, 0) + 1
-                _consecutive_404s[session_id] = n
-
-            if n == 1:
-                logging.warning(
-                    "/archive_messages returned a failure for session %s "
-                    "(attempt 1)",
-                    _short_sid(session_id),
-                )
-            elif n == 5:
-                logging.warning(
-                    "/archive_messages still failing for session %s after "
-                    "%d attempts; further failures for this session will "
-                    "be silenced",
-                    _short_sid(session_id),
-                    n,
-                )
-
-            if n >= 30:
-                raise RuntimeError(
-                    f"Session {_short_sid(session_id)} could not be "
-                    f"reached via /archive_messages/ for {n} consecutive "
-                    f"attempts. The session id is almost certainly wrong — "
-                    f"check the upload response in the backend log."
-                )
-        else:
-            # Success — clear the counter so a later transient failure
-            # starts a fresh count.
-            with _consecutive_404s_lock:
-                _consecutive_404s.pop(session_id, None)
+        # A long run of 404s almost always means the session id is
+        # wrong (e.g. the upload succeeded but the response didn't
+        # contain the real id, and a fallback was used). Fail early
+        # instead of polling until the 30-minute timeout.
+        with _consecutive_404s_lock:
+            n404 = _consecutive_404s.get(session_id, 0)
+        if n404 >= 30:
+            raise RuntimeError(
+                f"Session {_short_sid(session_id)} returned HTTP 404 on "
+                f"{n404} consecutive polls to {server_url}. The session "
+                f"id is almost certainly wrong — check the upload "
+                f"response in the backend log."
+            )
 
         # ── Progress tick ────────────────────────────────────────────
         # Fetch the file and push a fraction of the video duration to
@@ -5987,19 +5507,7 @@ def wait_for_session_ready(
         now = time.time()
         if now - last_progress_fetch >= _PROGRESS_FETCH_INTERVAL:
             last_progress_fetch = now
-            # Fetch *all* pages for the progress calculation. This is
-            # heavier than the page-1 probe above, but it runs only
-            # every _PROGRESS_FETCH_INTERVAL seconds (default 30 s).
-            # We only need the newest messages to compute progress.
-            # Fetching just the last page is 10–20× cheaper than the
-            # whole transcript, and the last page is the only one
-            # whose contents change between polls.
-            progress_messages = _fetch_latest_archive_page(
-                session_id,
-                token,
-                server_url,
-            )
-            raw_for_progress = json.dumps(progress_messages).encode("utf-8")
+            raw_for_progress = _fetch_messages_json_bytes(session_id, token, server_url)
             mt_end, asr_end = _compute_translation_progress(raw_for_progress)
             video_dur = _session_video_duration(session_id)
 
@@ -6050,61 +5558,40 @@ def wait_for_session_ready(
                 )
 
         # ── Readiness gate ───────────────────────────────────────────
-        # ── Readiness gate ───────────────────────────────────────────
         if stable_count >= _STABLE_NEEDED:
-            ready_messages = _fetch_all_archive_messages(
-                session_id, token, server_url,
-            )
-            raw = json.dumps(ready_messages).encode("utf-8")
+            raw = _fetch_messages_json_bytes(session_id, token, server_url)
             if _messages_look_done(raw, expected_langs):
+                # Confirm once more after a short pause. A single
+                # passing check can be a lucky moment during a
+                # mid-stream stall; two in a row five seconds apart is
+                # a much stronger signal that the server is really done.
                 time.sleep(5)
-                # Re-check `total` via a cheap probe before doing the
-                # expensive re-fetch. If KIT added messages during the
-                # 5-second window, don't bother fetching; go back to
-                # waiting.
-                probe = _fetch_archive_messages_page(
-                    session_id, token, server_url, page=1, limit=1,
-                )
-                new_total = (probe or {}).get("total", 0) if probe else 0
-                if new_total == total:   # total from this iteration's probe
-                    ready_messages2 = _fetch_all_archive_messages(
-                        session_id, token, server_url,
-                    )
-                    raw2 = json.dumps(ready_messages2).encode("utf-8")
-                    if _messages_look_done(raw2, expected_langs):
-                        logging.info(
-                            "✅ Session %s appears complete (%d msgs)",
-                            _short_sid(session_id), len(ready_messages2),
-                        )
-                        return True
+                raw2 = _fetch_messages_json_bytes(session_id, token, server_url)
+                if _messages_look_done(raw2, expected_langs):
                     logging.info(
-                        "Session %s: second readiness check failed, "
-                        "still growing",
+                        "✅ Session %s appears complete (%d bytes, %d msgs)",
                         _short_sid(session_id),
+                        len(raw2),
+                        _count_messages(raw2),
                     )
-                else:
-                    logging.info(
-                        "Session %s: total grew from %d to %d during "
-                        "the readiness check — continuing to wait",
-                        _short_sid(session_id), size, new_total,
-                    )
+                    return True
+                logging.info(
+                    "Session %s: first ready check passed but the "
+                    "second did not — still growing, continuing to wait",
+                    _short_sid(session_id),
+                )
             else:
                 logging.warning(
                     "Session %s: size stable but content invalid, "
                     "resetting stability counter",
                     _short_sid(session_id),
                 )
+
+            # _messages_look_done logged why it failed, at most once.
+            # Reset the stability gate and try again once the file changes.
             stable_count = 0
-        # Adaptive backoff: 2s while the file is still growing, longer
-        # once it has settled. KIT starts throttling if we hit it every
-        # two seconds for a long session; this keeps the early polls
-        # responsive and the late polls polite.
-        if stable_count >= _STABLE_NEEDED - 1:
-            time.sleep(8)
-        elif last_size <= MIN_MESSAGES_BYTES:
-            time.sleep(5)
-        else:
-            time.sleep(3)
+
+        time.sleep(2)
 
 
 def process_session_in_background(
@@ -6124,14 +5611,6 @@ def process_session_in_background(
     if not server_url:
         server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
     server_url = server_url.rstrip("/")
-
-    effective_token = _effective_token(session_id, fallback=token)
-    if effective_token != token:
-        logging.info(
-            "process_session_in_background: using stored token for %s "
-            "(request-time token differs)",
-            _short_sid(session_id),
-        )
 
     # Fall back to what the upload endpoint recorded for this session.
     if not expected_mt:
@@ -6162,7 +5641,7 @@ def process_session_in_background(
         )
 
         ready = wait_for_session_ready(
-            session_id, effective_token, server_url, expected_langs=expected_mt
+            session_id, token, server_url, expected_langs=expected_mt
         )
         if not ready:
             logging.warning(
@@ -6170,7 +5649,7 @@ def process_session_in_background(
                 _short_sid(session_id),
             )
 
-        ok = download_session_files(session_id, effective_token, server_url)
+        ok = download_session_files(session_id, token, server_url)
 
         job = jobs.get(session_id)
         if job:
@@ -6212,10 +5691,9 @@ def process_session_in_background(
         _job_finish(session_id, error=f"{type(e).__name__}: {e}")
     finally:
         _log_target.reset(token_cv)
+        # Don't leak the 404 counter after the job finishes either way.
         with _consecutive_404s_lock:
             _consecutive_404s.pop(session_id, None)
-        with _last_reported_total_lock:
-            _last_reported_total.pop(session_id, None)
 
 
 @app.route("/extract-video-subtitles/<path:session_id>", methods=["GET"])
@@ -6815,6 +6293,15 @@ def get_videos():
                 if current_score > best_score:
                     best_video = video
 
+            # Also log which ones were removed
+            for video in group:
+                if video != best_video:
+                    logging.info(
+                        "🗑️ Removing duplicate video: %s (keeping: %s)",
+                        video.get("file_name"),
+                        best_video.get("file_name"),
+                    )
+
             unique_videos.append(best_video)
     # ========================================
 
@@ -7293,11 +6780,7 @@ def get_session_output(session_id):
             server_url,
         )
         try:
-            download_session_files(
-                session_id,
-                _effective_token(session_id, fallback=token),
-                server_url,
-            )
+            download_session_files(session_id, token, server_url)
         except _JobCancelled:
             pass
 
@@ -7545,15 +7028,10 @@ def download_youtube_video_adaptive(youtube_url, output_dir, filename=None):
         # 'bv*' = best video-only, 'ba' = best audio-only.
         # The '/' chain tries each option left to right.
         format_selector = (
-            # First choice: H.264 video + M4A audio. This is the one that
-            # plays in every browser including iOS Safari and Chrome-on-iOS.
-            "bv*[vcodec^=avc1][ext=mp4]+ba[ext=m4a]/"
-            "bv*[vcodec^=avc1]+ba/"
-            # Fallbacks: any MP4 pair, then any pair, then progressive MP4.
-            "bv*[ext=mp4]+ba[ext=m4a]/"
-            "bv*[ext=mp4]+ba/"
-            "bv*+ba/"
-            "b[ext=mp4]/b"
+            "bv*[ext=mp4]+ba[ext=m4a]/"  # mp4 video + m4a audio (fastest)
+            "bv*[ext=mp4]+ba/"  # mp4 video + any audio
+            "bv*+ba/"  # any video + any audio
+            "b[ext=mp4]/b"  # single progressive file (<=720p)
         )
 
         ydl_opts = {
@@ -7737,13 +7215,13 @@ def convert_video_to_browser_compatible(input_path, output_path):
             "-profile:v",
             "main",  # Main profile for better compatibility
             "-level",
-            "4.0",  # 4.0 covers 1080p; 3.1 is too tight for many sources
+            "3.1",  # Level 3.1 for broad compatibility
             "-pix_fmt",
             "yuv420p",  # YUV 4:2:0 for compatibility
             "-crf",
-            "26",  # Quality level (18-28, 23 is good)
+            "23",  # Quality level (18-28, 23 is good)
             "-preset",
-            "veryfast",  # Encoding speed vs quality, was "medium" — 5–10× faster
+            "medium",  # Encoding speed vs quality
             "-y",  # Overwrite output file
             output_path,
         ]
@@ -7914,30 +7392,6 @@ def _session_files_look_incomplete(session_dir):
             "_session_files_look_incomplete: %s — local MT coverage "
             "is short, will re-download",
             _short_sid(os.path.basename(session_dir)),
-        )
-        return True
-
-    # Do we have a TTS WAV for every *translation* track that
-    # has a VTT? The ASR track is intentionally excluded: KIT
-    # does not synthesize TTS for the speaker's own language, so
-    # there is no tts_Transcript.wav to expect.
-    vtt_langs = {
-        f[len("subtitles_") : -len(".vtt")]
-        for f in vtt_files
-        if f != "subtitles_Transcript.vtt"
-    }
-    tts_langs = {
-        f[len("tts_") : -len(".wav")]
-        for f in os.listdir(session_dir)
-        if f.startswith("tts_")
-        and f.endswith(".wav")
-        and os.path.getsize(os.path.join(session_dir, f)) > 1000
-    }
-    if vtt_langs - tts_langs:
-        logging.info(
-            "_session_files_look_incomplete: %s missing TTS for %s",
-            _short_sid(os.path.basename(session_dir)),
-            sorted(vtt_langs - tts_langs),
         )
         return True
 
@@ -8335,51 +7789,23 @@ def youtube_download_and_upload():
 
         # ── 6. Save project ──────────────────────────────────────────
         _progress_event(download_id, "Saving project…", stage="saving", progress=0.90)
-
-        existing = next(
-            (v for v in videos if v.get("file_name") == actual_filename),
-            None,
-        )
-
-        if existing is not None:
-            # Reuse the existing entry. Preserve key, uploaded, last_opened,
-            # greenscreen_*, job_history, session_id — only refresh fields
-            # that describe the file on disk.
-            project = existing
-            video_key = existing["key"]
-            project.update(
-                {
-                    "name": display_title,
-                    "file_size": file_size,
-                    "duration": duration,
-                    "fps": fps,
-                    "thumbnail_url": thumbnail_url,
-                }
-            )
-            logging.info(
-                "♻️ Reusing existing project for %s (key=%s)",
-                actual_filename,
-                video_key,
-            )
-        else:
-            video_key = str(uuid.uuid4())
-            project = {
-                "key": video_key,
-                "name": display_title,
-                "file_name": actual_filename,
-                "uploaded": utc_now_iso(),
-                "last_opened": None,
-                "duration": duration,
-                "fps": fps,
-                "file_size": file_size,
-                "segment_count": 0,
-                "languages": ["en"],
-                "thumbnail_url": thumbnail_url,
-                "segmentation_done": auto_segmentation,
-                "segmentation_progress": 100 if auto_segmentation else 0,
-            }
-            videos.append(project)
-
+        video_key = str(uuid.uuid4())
+        project = {
+            "key": video_key,
+            "name": display_title,
+            "file_name": actual_filename,
+            "uploaded": utc_now_iso(),
+            "last_opened": None,
+            "duration": duration,
+            "fps": fps,
+            "file_size": file_size,
+            "segment_count": 0,
+            "languages": ["en"],
+            "thumbnail_url": thumbnail_url,
+            "segmentation_done": auto_segmentation,
+            "segmentation_progress": 100 if auto_segmentation else 0,
+        }
+        videos.append(project)
         save_state()
 
         # ── 7. Optional segmentation job ─────────────────────────────
@@ -8550,49 +7976,6 @@ def generate_video_thumbnail_simple(video_path, thumbnail_path):
         return False
 
 
-def _sanitize_session_name_for_kit(name: str) -> str:
-    """Match what KIT stores as the session path segment."""
-    if not name:
-        return name
-    for src, dst in {
-        "\u2022": "-",
-        "\u2013": "-",
-        "\u2014": "-",
-        "\u2018": "'",
-        "\u2019": "'",
-        "\u201c": '"',
-        "\u201d": '"',
-        "\u00a0": " ",
-    }.items():
-        name = name.replace(src, dst)
-    return re.sub(r"\s+", " ", name).strip()
-
-
-def _norm_session_name(s: str) -> str:
-    """Fold the punctuation KIT normalises in *session names*.
-
-    Deliberately does NOT touch the email or the domain. The caller
-    only ever passes the name segment, but keeping the function
-    narrow prevents a future edit from reaching into the path.
-
-    Do not add a ``@googlemail.com`` / ``@gmail.com`` fold here.
-    That fold would make a session on one domain match a name
-    from the other, and the scrape would return the wrong id.
-    """
-    for src, dst in {
-        "\u2018": "'",
-        "\u2019": "'",
-        "\u201c": '"',
-        "\u201d": '"',
-        "\u2013": "-",
-        "\u2014": "-",
-        "\u2022": "-",
-        "\u00a0": " ",
-    }.items():
-        s = s.replace(src, dst)
-    return re.sub(r"\s+", " ", s).strip()
-
-
 # ─── UPLOAD ENDPOINT ────────────────────────────────────────────────────
 def _upload_to_internal_server_and_register(
     *,
@@ -8624,20 +8007,10 @@ def _upload_to_internal_server_and_register(
     The two callers only differ in what they send in and whether they
     want the stale-session cleanup (``forward_to_internal`` does).
     """
-
-    session_name = _sanitize_session_name_for_kit(session_name)
-
-    _log_token_email(token, "internal_upload")
-
     upload_source_path = local_path
     upload_filename_used = os.path.basename(local_path)
     gs_cleanup: list = []
     temp_multipart_path = None
-    logging.info(
-        "internal_upload: uploading %s (%d bytes) to KIT",
-        os.path.basename(upload_source_path),
-        os.path.getsize(upload_source_path),
-    )
 
     try:
         # ── 1. Decide what to send ────────────────────────────────
@@ -8764,93 +8137,60 @@ def _upload_to_internal_server_and_register(
         session_id = _extract_session_id(resp)
         if session_id:
             logging.info("internal_upload: session id from response: %s", session_id)
-        else:
+
+        if not session_id and session_name:
             logging.error(
                 "internal_upload: NO session id in upload response. "
                 "status=%s url=%s\n"
-                "----- RAW RESPONSE BODY (first 5000 chars) -----\n%s\n"
-                "----- END RAW RESPONSE BODY -----",
+                "----- RAW RESPONSE BODY -----\n%s\n"
+                "----- END RESPONSE BODY -----",
                 resp.status_code,
                 resp.url,
                 resp.text[:5000],
             )
+            home_path = form_data.get("path") or "/home/admin@example.com"
+            full_path = f"{home_path.rstrip('/')}/{session_name}"
+            session_id = base64.b64encode(full_path.encode("utf-8")).decode("ascii")
 
-            # ── Ask KIT's archive browser for the real id ───────────
-            # /archive/<home_b64> lists every session for this user.
-            # The list is NOT ordered by recency — it is grouped by
-            # session name alphabetically. So we can't just take the
-            # first entry; we have to decode each candidate id and
-            # match its last path segment against the session name
-            # we sent to KIT.
-            try:
-                home_path = _user_home_path(token)
-                home_b64 = base64.b64encode(home_path.encode("utf-8")).decode("ascii")
-
-                archive_resp = requests.get(
-                    f"{base_url}/archive/{home_b64}",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "X-Forward-Auth": token,
-                    },
-                    cookies={"_forward_auth": token},
-                    verify=False,
-                    timeout=20,
-                    allow_redirects=True,
-                )
-                if archive_resp.status_code == 200:
-                    candidates = re.findall(
-                        r"/archivesession/([A-Za-z0-9_\-=]+)",
-                        archive_resp.text,
-                    )
-
-                    wanted = _norm_session_name(session_name)
-                    for cand in candidates:
-                        # base64 decode with padding repair
-                        padded = cand + "=" * (-len(cand) % 4)
-                        try:
-                            decoded = base64.b64decode(padded).decode(
-                                "utf-8", errors="ignore"
-                            )
-                        except (ValueError, UnicodeDecodeError):
-                            continue
-                        tail = decoded.rsplit("/", 1)[-1]
-                        if _norm_session_name(tail) == wanted:
-                            session_id = cand
-                            logging.info(
-                                "internal_upload: session id matched "
-                                "by name: %s (email segment preserved "
-                                "verbatim from KIT)",
-                                session_id,
-                            )
-                            break
-            except requests.exceptions.RequestException as e:
-                logging.warning(
-                    "internal_upload: could not scrape archive "
-                    "listing for session id: %s",
-                    e,
-                )
-
-            # Fallback: only used if the scrape above did not find an
-            # id. Reconstructs it from the /home/<user>/<name> path —
-            # kept as a last resort because it is sensitive to how KIT
-            # normalises punctuation.
-            if not session_id:
+            if not session_id and session_name:
                 logging.error(
-                    "internal_upload: KIT did not return a session id. "
-                    "Refusing to fabricate one — a locally-built id would "
-                    "almost certainly 404 on every poll. Raw response:\n%s",
-                    resp.text[:3000],
+                    "internal_upload: NO session id found. status=%s url=%s\n"
+                    "----- BODY (first 5000 chars) -----\n%s\n----- END -----",
+                    resp.status_code, resp.url, resp.text[:5000],
                 )
-                return (
-                    {
-                        "error": (
-                            "KIT accepted the upload but did not return a session id. "
-                            "See the backend log for the raw response body."
-                        ),
-                        "status_code": resp.status_code,
-                    },
-                    502,
-                )
+
+        # Fallback: KIT LT's upload endpoint returned a generic "Success"
+        # page with no id. The real KIT deployment uses base64 of the
+        # full "/home/<user>/<session_name>" path as the session id —
+        # encoding only the session name produces a plausible-looking id
+        # that 404s on every subsequent poll.
+        if not session_id and session_name:
+            home_path = form_data.get("path") or "/home/admin@example.com"
+            full_path = f"{home_path.rstrip('/')}/{session_name}"
+            session_id = base64.b64encode(full_path.encode("utf-8")).decode("ascii")
+            logging.info(
+                "internal_upload: generated session id from path: %s → %s",
+                full_path,
+                session_id,
+            )
+
+        if not session_id:
+            logging.error(
+                "internal_upload: no session id in response. Body:\n%s",
+                resp.text,
+            )
+            return (
+                {
+                    "error": (
+                        "Internal server accepted the upload but did not "
+                        "return a session id. See the backend log for "
+                        "the response body."
+                    ),
+                    "status_code": resp.status_code,
+                    "response_preview": resp.text[:500],
+                },
+                502,
+            )
 
         # ── 5. Optionally clear stale local state ─────────────────
         if clear_stale_session:
@@ -8884,7 +8224,6 @@ def _upload_to_internal_server_and_register(
             "url": f"{base_url}/archivesession/{session_id}",
             "server": base_url,
             "expected_mt": expected_mt,
-            "token": token,  # the token that created this session
         }
         jobs[session_id] = {
             "id": session_id,
@@ -8898,25 +8237,12 @@ def _upload_to_internal_server_and_register(
             "expected_mt": expected_mt,
         }
 
+        # Pre-create the in-memory progress entry *before* returning.
+        # The client starts polling /job-progress the instant it receives
+        # the session id. Without this the first poll can beat the
+        # background worker to _job_start(), fall through to the
+        # "recover after restart" branch and spawn a duplicate worker.
         _job_start(session_id, video_key, session_name)
-
-        # If a worker is already running for this video_key, cancel
-        # it before starting the new one. Without this, every retry
-        # leaves an orphan thread polling a stale session id.
-        for other_sid, other_job in list(jobs.items()):
-            if (
-                other_job.get("video_key") == video_key
-                and other_job.get("status") == "processing"
-                and other_sid != session_id
-            ):
-                logging.info(
-                    "internal_upload: cancelling stale worker for %s",
-                    _short_sid(other_sid),
-                )
-                _request_cancel(other_sid)
-                other_job["status"] = "cancelled"
-                with job_progress_lock:
-                    _job_progress_store.pop(other_sid, None)
 
         threading.Thread(
             target=process_session_in_background,
@@ -9108,10 +8434,7 @@ def upload_to_internal():
                 continue
             values = request.form.getlist(key)
             form_data[key] = values[0] if len(values) == 1 else values
-
-        # Do NOT trust a client-supplied `path`. The old Flutter build sends
-        # "/home/admin@example.com", and setdefault() never replaces it.
-        form_data["path"] = _user_home_path(token)
+        form_data.setdefault("path", "/home/admin@example.com")
 
         expected_mt = request.form.getlist("mtLanguage") or ["de"]
         target_url = _resolve_target_url(request.form.get("targetServer"))
@@ -9151,65 +8474,32 @@ def upload_to_internal():
             or os.path.splitext(file_name)[0]
         )
 
-        # Build the KIT form data from whatever the client sent in
-        # the JSON body, falling back to the previous hard-coded
-        # defaults for anything missing. This keeps old clients that
-        # only send `video_key` working while letting the current UI
-        # pass the full job configuration (languages, features,
-        # post-production, timeouts, …).
-        def _as_list(v):
-            """Normalise a scalar-or-list into a list of strings."""
-            if v is None:
-                return None
-            if isinstance(v, list):
-                return [str(x) for x in v]
-            return [str(v)]
-
         form_data = {
-            "path": _user_home_path(token),  # never trust a client path
+            "path": "/home/admin@example.com",
             "name": session_name,
-            "topicname": data_in.get("topicname") or session_name,
-            "date": (
-                data_in.get("date") or datetime.datetime.now().strftime("%Y-%m-%d")
-            ),
-            "speakername": data_in.get("speakername") or "",
-            "availability": data_in.get("availability") or "private",
-            "format": data_in.get("format") or "mixed",
-            "smartChaptering": data_in.get("smartChaptering") or "online_dynamic",
-            "errorCorrection": data_in.get("errorCorrection") or "None",
-            "ttsQualityMode": data_in.get("ttsQualityMode") or "low_latency",
-            "language": _as_list(data_in.get("language")) or ["en"],
-            "mtLanguage": _as_list(data_in.get("mtLanguage")) or ["de"],
-            "audioLanguage": _as_list(data_in.get("audioLanguage")) or ["de"],
-            "profanity": str(data_in.get("profanity") or "1"),
-            "filter_music": str(data_in.get("filter_music") or "1"),
-            "summarization": str(data_in.get("summarization") or "1"),
-            "logging": str(data_in.get("logging") or "1"),
-            "legals": str(data_in.get("legals") or "1"),
-            "profile": data_in.get("profile") or "profile_1",
-            "profile_names": data_in.get("profile_names") or "",
-            "shorten": data_in.get("shorten") or "",
-            "mute": str(data_in.get("mute") or "120"),
-            "pause": str(data_in.get("pause") or "2"),
+            "topicname": session_name,
+            "date": datetime.datetime.now().strftime("%Y-%m-%d"),
+            "speakername": "",
+            "availability": "private",
+            "format": "mixed",
+            "smartChaptering": "online_dynamic",
+            "errorCorrection": "None",
+            "ttsQualityMode": "low_latency",
+            "language": ["en"],
+            "mtLanguage": ["de"],
+            "audioLanguage": ["de"],
+            "profanity": "1",
+            "filter_music": "1",
+            "summarization": "1",
+            "logging": "1",
+            "legals": "1",
+            "profile": "profile_1",
+            "profile_names": "",
+            "shorten": "",
+            "mute": "120",
+            "pause": "2",
             "save_profile": "1",
         }
-
-        # Optional feature flags — only sent when the client asked
-        # for them. KIT's own defaults apply otherwise.
-        for opt_key in (
-            "notes",
-            "saasr",
-            "aiassistant",
-            "distinguish_unknown_speakers",
-        ):
-            val = data_in.get(opt_key)
-            if val:
-                form_data[opt_key] = str(val)
-
-        # Post-production shortening rates (e.g. ["50", "90"]).
-        postprod = _as_list(data_in.get("postproduction"))
-        if postprod:
-            form_data["postproduction"] = postprod
 
         expected_mt = data_in.get("mtLanguage") or data_in.get("mt_languages") or ["de"]
         if isinstance(expected_mt, str):
@@ -9273,26 +8563,23 @@ def check_session():
 def dex_token():
     """Forward token exchange to the internal server's /dex/token endpoint."""
     requested = request.headers.get("X-Target-Server")
-    server = (
-        requested.rstrip("/") if _is_allowed_server(requested) else INTERNAL_SERVER_URL
-    )
+    server = requested.rstrip("/") if _is_allowed_server(requested) else INTERNAL_SERVER_URL
     resp = requests.post(
         f"{server}/dex/token",
         data=request.get_data(),
         headers={k: v for k, v in request.headers if k.lower() != "host"},
-        allow_redirects=False,
-        timeout=30,
-        verify=False,
+        allow_redirects=False, timeout=30, verify=False,
     )
     return (resp.content, resp.status_code, resp.headers.items())
-
 
 @app.route("/dex/userinfo", methods=["GET"])
 def dex_userinfo():
     """Forward userinfo request to the internal server's /dex/userinfo endpoint."""
     requested = request.headers.get("X-Target-Server")
     server = (
-        requested.rstrip("/") if _is_allowed_server(requested) else INTERNAL_SERVER_URL
+        requested.rstrip("/")
+        if _is_allowed_server(requested)
+        else INTERNAL_SERVER_URL
     )
     try:
         headers = {k: v for k, v in request.headers if k.lower() != "host"}
@@ -9306,7 +8593,6 @@ def dex_userinfo():
         return (resp.content, resp.status_code, resp.headers.items())
     except requests.exceptions.RequestException as e:
         return jsonify({"error": f"Proxy error: {str(e)}"}), 500
-
 
 # ─── DEBUG ENDPOINTS ────────────────────────────────────────────────────
 
@@ -9463,10 +8749,9 @@ users["testuser@example.com"] = {
 # ─────────────────────────────────────────────────────────────────────
 def _initialise_state_once() -> None:
     """Load persisted state and reconcile with disk. Idempotent."""
-    state = _initialise_state_once.__dict__
-    if state.get("_done", False):
+    if getattr(_initialise_state_once, "_done", False):
         return
-    state["_done"] = True
+    _initialise_state_once._done = True  # type: ignore[attr-defined]
 
     try:
         loaded = load_state()
@@ -9478,25 +8763,25 @@ def _initialise_state_once() -> None:
             len(jobs),
             len(sessions),
         )
-    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+    except Exception:
         logging.exception("startup: load_state() failed; continuing with empty state")
 
     # Reconciliation: safe to run every startup. Adding missing entries,
     # pruning deleted files, regenerating thumbnails.
     try:
         rebuild_videos_from_disk()
-    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+    except Exception:
         logging.exception("startup: rebuild_videos_from_disk() failed")
 
     try:
         clean_missing_videos()
         cleanup_orphaned_data()
-    except (OSError, ValueError, TypeError, KeyError, RuntimeError, AttributeError):
+    except Exception:
         logging.exception("startup: cleanup failed")
 
     try:
         regenerate_missing_thumbnails()
-    except (OSError, ValueError, TypeError, KeyError, RuntimeError, AttributeError):
+    except Exception:
         logging.exception("startup: thumbnail regeneration failed")
 
 
@@ -9505,17 +8790,27 @@ _initialise_state_once()
 
 if __name__ == "__main__":
     try:
+        import urllib3
+
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     except ImportError:
         pass
 
-    # ── One-time session cleanup ──────────────────────────────────
-    # Remove any stray files from the old versioned-name scheme.
-    # Keep only "video.mp4" and "video_subtitled.mp4" inside each
-    # session directory.
-    #
-    # This MUST run before app.run(): app.run() blocks forever, so
-    # any code placed after it is never reached.
+    # Initialisation already ran at import time above, so we don't
+    # repeat load_state() here — but the __main__ path is otherwise
+    # unchanged.
+    logging.info("Starting merged server on 0.0.0.0:5000")
+    logging.info("State file: %s", STATE_FILE)
+    app.run(host="0.0.0.0", port=5000, debug=True)
+    try:
+        import urllib3
+
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    except ImportError:
+        pass
+
+    # Remove any stray files from the old versioned-name scheme, keep
+    # only "video.mp4" and "video_subtitled.mp4".
     _KEEP_VIDEO_FILES = {"video.mp4", "video_subtitled.mp4"}
 
     for sess_id in list(sessions.keys()):
@@ -9539,10 +8834,6 @@ if __name__ == "__main__":
             except OSError:
                 pass
 
-    # ── Start the server ──────────────────────────────────────────
-    # Initialisation already ran at import time (see
-    # _initialise_state_once() above), so load_state() is not repeated
-    # here. The __main__ path is otherwise unchanged.
     logging.info("Starting merged server on 0.0.0.0:5000")
     logging.info("State file: %s", STATE_FILE)
     app.run(host="0.0.0.0", port=5000, debug=True)
