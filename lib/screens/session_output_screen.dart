@@ -731,6 +731,66 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   }
   // ─── END OF VTT PARSING ─────────────────────────────────────────────
 
+  /// Trigger an explicit TTS backfill from the backend.
+  ///
+  /// The backend retries internally (4 attempts, 20 s apart) and skips
+  /// files that already exist. It uses the per-session bearer token it
+  /// stored when the session was created, so this works even after a
+  /// backend restart and even for sessions uploaded by a different user
+  /// (as long as KIT still has the WAVs).
+  Future<void> _backfillTtsFiles() async {
+    try {
+      final token = await InternalAuthService.getToken();
+      final url =
+          '$flaskServerUrl/session-tts-backfill/${widget.sessionId}';
+
+      final response = await http.post(
+        Uri.parse(url),
+        headers: {
+          if (token != null && token.isNotEmpty)
+            'Authorization': 'Bearer $token',
+        },
+      );
+
+      if (response.statusCode != 200) {
+        debugPrint(
+          'TTS backfill: HTTP ${response.statusCode} — ${response.body}',
+        );
+        return;
+      }
+
+      final data = jsonDecode(response.body);
+      final count = (data['count'] as num?)?.toInt() ?? 0;
+
+      if (count > 0) {
+        debugPrint('TTS backfill: downloaded $count file(s)');
+        await _loadSessionData();
+        await _loadTTSTracks();
+      }
+    } catch (e) {
+      debugPrint('TTS backfill failed: $e');
+    }
+  }
+
+  /// Fire-and-forget wrapper: only hits the backend when the local file
+  /// list is missing TTS WAVs for a language we know KIT synthesises.
+  ///
+  /// Doesn't block the UI. Doesn't show a snackbar. Never throws.
+  Future<void> _autoBackfillTtsIfNeeded() async {
+    // Nothing to fetch if the dropdown wouldn't show any TTS options.
+    if (_ttsTracks.isEmpty) return;
+
+    // Already have every WAV we expect? Skip.
+    final haveTts = _files.any(
+      (f) => f.name.startsWith('tts_') && f.name.endsWith('.wav'),
+    );
+    if (haveTts) return;
+
+    debugPrint('Auto-backfilling TTS files for ${widget.sessionId}');
+    await _backfillTtsFiles();
+  }
+
+
   Future<void> _loadSessionData() async {
     setState(() {
       _isLoading = true;
@@ -810,11 +870,11 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       await _loadSubtitleTracks();
       await _loadTTSTracks();
 
-      // NEW: Auto-backfill TTS if we have tracks but no local files
-      if (_ttsTracks.isNotEmpty) {
-        _autoBackfillTtsIfNeeded();
-      }
+      // NEW: pull TTS WAVs from the backend if this session doesn't
+      // already have them locally. Best-effort; never blocks the UI.
+      unawaited(_autoBackfillTtsIfNeeded());
 
+      
       setState(() => _isLoading = false);
     } catch (e) {
       setState(() {
@@ -847,7 +907,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       
       if (!hasTtsFiles && _ttsTracks.isNotEmpty) {
         debugPrint('Auto-backfilling TTS files...');
-        await _backfillTtsFiles();
+        await _autoBackfillTtsIfNeeded();
       }
     } catch (e) {
       debugPrint('Auto-backfill check failed: $e');
