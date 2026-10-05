@@ -5350,7 +5350,8 @@ def _remote_size(url: str, token: str, timeout: int = 30) -> tuple[int, int]:
 
 
 # ─── SESSION COMPLETENESS GATES ─────────────────────────────────────────
-MIN_MESSAGES_BYTES = 5_000  # tune to your smallest realistic session
+MIN_MESSAGES_BYTES = 5_000      # bytes; used in _messages_look_done
+MIN_MESSAGES_COUNT = 1       # messages; used in wait_for_session_ready
 _STABLE_NEEDED = 3
 
 # How many bytes of growth in one poll still count as "quiet". Below
@@ -5912,7 +5913,7 @@ def wait_for_session_ready(
             _quiet_since = now
 
         quiet_for = now - _quiet_since
-        plausible = size >= MIN_MESSAGES_BYTES
+        plausible = size >= MIN_MESSAGES_COUNT
         if plausible and quiet_for >= _STABLE_QUIET_SECONDS:
             stable_count += 1
         else:
