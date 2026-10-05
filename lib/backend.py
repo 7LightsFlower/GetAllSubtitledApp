@@ -4655,23 +4655,31 @@ def session_tts_backfill_all():
     if request.method == "OPTIONS":
         return ("", 204)
 
-    token = _state.get("token") or ""
-    if not token:
-        return jsonify({"error": "no_token"}), 400
+    request_token = (
+        request.headers.get("Authorization", "").replace("Bearer ", "")
+        or request.cookies.get("_forward_auth", "")
+    )
 
     results = {}
     for sid in list(sessions.keys()):
         if not os.path.isdir(_session_dir(sid)):
             continue
+        # Per-session token — this is what makes old sessions work.
+        token = _effective_token(sid, fallback=request_token)
+        if not token:
+            results[sid] = {"error": "no_token_for_session"}
+            continue
         server = sessions.get(sid, {}).get("server") or INTERNAL_SERVER_URL
         try:
             results[sid] = download_tts_files(sid, token, server)
-        except (OSError, ValueError, TypeError) as e:
+        except (OSError, ValueError, TypeError,
+                requests.exceptions.RequestException) as e:
             logging.warning("Backfill failed for %s: %s", _short_sid(sid), e)
             results[sid] = {"error": str(e)}
 
     save_state()
     return jsonify({"success": True, "results": results}), 200
+
 
 @app.route(
     "/session-tts-diagnose/<path:session_id>/<path:label>",
@@ -6544,6 +6552,18 @@ def process_session_in_background(
             job["status"] = "completed" if ok else "partial"
             job["progress"] = 1.0
         save_state()
+
+        tts = download_tts_files(session_id, token, server_url)
+        if not tts:
+            # Session is downloaded but TTS is incomplete — mark it partial
+            # so the user sees it and can retry later.
+            ok = False
+            _job_log(
+                session_id,
+                "Session files saved, but no TTS tracks could be fetched. "
+                "KIT may not have generated them yet, or they may have expired.",
+                level="warning",
+            )
 
         _job_finish(session_id, error=None if ok else "Partial download")
         logging.info("✅ Background download finished for %s", _short_sid(session_id))
