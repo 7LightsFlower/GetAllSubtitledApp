@@ -1106,7 +1106,8 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
       // No Authorization header → no CORS preflight → no 30 MB ceiling.
       // Works whether the backend serves a local file or proxies KIT.
-      await _ttsPlayer.setSourceUrl(track.url);
+      // Explicitly declare the source as a WAV file
+      await _ttsPlayer.play(UrlSource(track.url, mimeType: 'audio/wav'));
 
       if (video != null && video.value.isInitialized) {
         await _ttsPlayer.seek(video.value.position);

@@ -1903,9 +1903,16 @@ def get_video_metadata(video_path):
     return 120.0, 30.0
 
 
-def curl_download(url, output_path, token, *, cookie_only=False):
-    """Download a file using curl. Returns True on a 2xx response
-    with a plausible body, False otherwise."""
+def curl_download(url, output_path, token, *,
+                  cookie_only=False, media=False, referer=None):
+    """Download a file using curl.
+
+    media=True  → send the headers an <audio> element would send.
+                  Use this for KIT's /archivemediafile/ and
+                  /archivemedia/ routes.
+    cookie_only=True → send only the `_forward_auth` cookie, no
+                  Authorization / X-Forward-Auth headers.
+    """
     try:
         auth_headers = []
         if not cookie_only:
@@ -1914,20 +1921,24 @@ def curl_download(url, output_path, token, *, cookie_only=False):
                 "-H", f"Authorization: Bearer {token}",
             ]
 
+        media_headers = []
+        if media:
+            media_headers = [
+                "-H", "Accept: audio/webm,audio/ogg,audio/*;q=0.9,*/*;q=0.5",
+                "-H", "Accept-Encoding: identity;q=1, *;q=0",
+                "-H", "Range: bytes=0-",
+            ]
+            if referer:
+                media_headers += ["-H", f"Referer: {referer}"]
+
         cmd = [
-            "curl",
-            "-s",
-            "-L",
-            "--insecure",
+            "curl", "-s", "-L", "--insecure",
             *auth_headers,
-            "-H",
-            "User-Agent: Mozilla/5.0 (compatible; LT-Uploader/1.0)",
-            "--cookie",
-            f"_forward_auth={token}",
-            "-w",
-            "%{http_code}",
-            "-o",
-            output_path,
+            *media_headers,
+            "-H", "User-Agent: Mozilla/5.0 (compatible; LT-Uploader/1.0)",
+            "--cookie", f"_forward_auth={token}",
+            "-w", "%{http_code}",
+            "-o", output_path,
             url,
         ]
         result = subprocess.run(
@@ -1939,30 +1950,20 @@ def curl_download(url, output_path, token, *, cookie_only=False):
         except ValueError:
             status = 0
 
-        if (
-            status == 200
-            and os.path.exists(output_path)
-            and os.path.getsize(output_path) > 1000
-        ):
-            # KIT returns 200 with an HTML error page for files it does
-            # not have. Refuse to treat that as a successful download,
-            # otherwise the HTML is written into a .wav / .vtt / .mp4
-            # slot and the browser chokes on it. index.html is
-            # intentionally HTML, so skip the check for that filename.
+        if (status == 200
+                and os.path.exists(output_path)
+                and os.path.getsize(output_path) > 1000):
             if not output_path.endswith(".html"):
                 try:
                     with open(output_path, "rb") as f:
                         head = f.read(32)
                     stripped = head.lstrip().lower()
-                    if (
-                        stripped.startswith(b"<!doctype html")
-                        or stripped.startswith(b"<html")
-                        or stripped.startswith(b"<!doctype")
-                    ):
+                    if (stripped.startswith(b"<!doctype html")
+                            or stripped.startswith(b"<html")
+                            or stripped.startswith(b"<!doctype")):
                         logging.info(
                             "curl_download: %s → 200 but body is HTML; "
-                            "treating as failure",
-                            url,
+                            "treating as failure", url,
                         )
                         os.remove(output_path)
                         return False
@@ -1971,7 +1972,8 @@ def curl_download(url, output_path, token, *, cookie_only=False):
             return True
 
         if status != 200:
-            logging.info("curl_download: %s → HTTP %s (discarding)", url, status)
+            logging.info("curl_download: %s → HTTP %s (discarding)",
+                         url, status)
         else:
             logging.info("curl_download: %s → 200 but body too small", url)
 
@@ -1984,8 +1986,8 @@ def curl_download(url, output_path, token, *, cookie_only=False):
     except OSError as e:
         logging.warning("Curl error for %s: %s", url, str(e))
         return False
-
-
+    
+    
 def curl_download_with_headers(url, output_path, token):
     """Download a file using curl with an Accept: application/json header.
 
@@ -2440,17 +2442,40 @@ def _download_session_files_locked(session_id, token, server_url):
     )
     return len(files) > 0
 
+# Minimum plausible size for a real KIT TTS WAV. The HTML error page
+# KIT returns for a TTS track that is not yet available (or that we
+# are not authorized to fetch) is ~1.3 KB and starts with "<!DOCTYPE".
+# A real TTS WAV is tens of MB. 50 KB sits comfortably between.
+_MIN_WAV_BYTES = 50_000
 
-def download_tts_files(session_id, token, server_url=None, languages=None):
+
+def _looks_like_wav(path: str) -> bool:
+    """True iff the file starts with the RIFF/WAVE magic bytes."""
+    try:
+        with open(path, "rb") as f:
+            header = f.read(12)
+    except OSError:
+        return False
+    if len(header) < 12:
+        return False
+    return header[0:4] == b"RIFF" and header[8:12] == b"WAVE"
+
+
+def download_tts_files(session_id, token, server_url=None, languages=None,
+                       *, retries=4, delay=20):
     """Download per-language TTS WAVs into the session folder.
 
-    Naming mirrors what the frontend already builds: label =
-    "<Simple Language> Audio", local file = "tts_<Simple>.wav".
-    Skips the ASR "Transcript" track — KIT has no TTS for it.
+    URL used (matches what KIT's own archive page uses):
+        /archivemediafile/<session_id>/<Language>%20Audio.wav
+
+    Retries languages whose WAV is missing or invalid. KIT generates
+    TTS asynchronously, so a session can become "ready" for
+    transcripts before every WAV is on disk.
     """
     session_dir = _session_dir(session_id)
     server_url = (server_url or INTERNAL_SERVER_URL).rstrip("/")
 
+    # ---- which languages do we want? ----
     if languages is None:
         json_path = os.path.join(session_dir, "transcripts.json")
         if not os.path.exists(json_path):
@@ -2462,17 +2487,14 @@ def download_tts_files(session_id, token, server_url=None, languages=None):
             return []
         languages = [t.get("language", "") for t in transcripts]
 
-    downloaded = []
+    wanted = []
     seen = set()
     for lang in languages:
         if not lang:
             continue
-        # KIT only serves TTS for real translation targets. The
-        # speaker's own track ("Transcript", "Original ASR") has no
-        # matching audio.
+        # KIT has no TTS for the ASR track itself.
         if lang == "Transcript" or "Original ASR" in lang:
             continue
-
         simple = _extract_simple_language_name(lang)
         if not simple or simple == "Unknown":
             continue
@@ -2480,85 +2502,83 @@ def download_tts_files(session_id, token, server_url=None, languages=None):
         if label in seen:
             continue
         seen.add(label)
+        wanted.append((simple, label))
 
-        local_name = f"tts_{simple}.wav"
-        local_path = os.path.join(session_dir, local_name)
+    referer = f"{server_url}/archivesession/{session_id}"
+    downloaded = []
+    last_missing = list(wanted)
 
-        if os.path.exists(local_path) and os.path.getsize(local_path) > 1000:
-            downloaded.append(local_name)
-            continue
+    for attempt in range(1, retries + 1):
+        still_missing = []
 
-        # KIT has changed its TTS URL layout several times across
-        # releases, and the media route is gated by the Dex session
-        # cookie rather than the bearer token. Try every URL variant
-        # that KIT is known to have used, with the Dex cookie if one
-        # is configured, then fall back to the bearer token. The
-        # first candidate that returns real audio wins.
-        kit_name = f"{label}.wav"
-        enc_name = quote(kit_name)
-        candidates = [
-            f"{server_url}/archivemediafile/{session_id}/{enc_name}",
-            f"{server_url}/archivemedia/{session_id}/{enc_name}",
-            f"{server_url}/archivemedia/{session_id}/tts/{quote(label)}",
-            f"{server_url}/archivemedia/{session_id}/{quote(label)}",
-            f"{server_url}/archivemediafile/{session_id}/"
-            f"tts_{simple.replace(' ', '_')}.wav",
-        ]
+        for simple, label in wanted:
+            local_name = f"tts_{simple}.wav"
+            local_path = os.path.join(session_dir, local_name)
 
-        got_it = False
-        for kit_url in candidates:
-            for cookie_only in (True, False):
-                # Skip the credential variant we have already tried
-                # with the other mode.
-                if cookie_only and not _media_cookie_is_dex():
-                    # Without a Dex cookie, cookie_only=True would just
-                    # resend the bearer token; skip it.
-                    continue
-                if curl_download(
-                    kit_url,
-                    local_path,
-                    _media_cookie(token),
-                    cookie_only=cookie_only,
-                ):
-                    got_it = True
-                    break
-            if got_it:
-                break
+            # Already on disk and valid → count it, skip the fetch.
+            if (os.path.exists(local_path)
+                    and os.path.getsize(local_path) > _MIN_WAV_BYTES
+                    and _looks_like_wav(local_path)):
+                if local_name not in downloaded:
+                    downloaded.append(local_name)
+                continue
 
-        if got_it and not (
-            os.path.getsize(local_path) > _MIN_WAV_BYTES
-            and _looks_like_wav(local_path)
-        ):
-            # KIT returned its "session not ready" HTML page, or
-            # something else that is not a WAV. Discard and treat
-            # as a failed download so the retry logic kicks in.
-            logging.warning(
-                "TTS %s downloaded but is not a valid WAV "
-                "(%d bytes) — discarding",
-                local_name,
-                os.path.getsize(local_path),
+            # Drop any stale/broken file so curl has a clean target.
+            if os.path.exists(local_path):
+                try:
+                    os.remove(local_path)
+                except OSError:
+                    pass
+
+            kit_name = f"{label}.wav"     # "Korean Audio.wav"
+            kit_url = (f"{server_url}/archivemediafile/"
+                       f"{session_id}/{quote(kit_name)}")
+
+            ok = curl_download(
+                kit_url, local_path,
+                _media_cookie(token),
+                cookie_only=True,
+                media=True,
+                referer=referer,
             )
-            try:
-                os.remove(local_path)
-            except OSError:
-                pass
-            got_it = False
 
-        if got_it:
-            size = os.path.getsize(local_path)
+            if ok and _looks_like_wav(local_path):
+                size = os.path.getsize(local_path)
+                logging.info(
+                    "Downloaded TTS %s (%d bytes) from %s",
+                    local_name, size, kit_url,
+                )
+                _job_log(session_id, f"Downloaded {local_name}")
+                _job_add_file(session_id, local_name, size)
+                downloaded.append(local_name)
+            else:
+                if os.path.exists(local_path):
+                    try:
+                        os.remove(local_path)
+                    except OSError:
+                        pass
+                still_missing.append((simple, label))
+
+        last_missing = still_missing
+        if not still_missing:
+            break
+        if attempt < retries:
             logging.info(
-                "Downloaded TTS %s (%d bytes) from %s",
-                local_name, size, kit_url,
+                "download_tts_files: %d language(s) still missing for %s "
+                "— retrying in %ds (attempt %d/%d): %s",
+                len(still_missing), _short_sid(session_id),
+                delay, attempt, retries,
+                [lbl for _, lbl in still_missing],
             )
-            _job_log(session_id, f"Downloaded {local_name}")
-            _job_add_file(session_id, local_name, size)
-            downloaded.append(local_name)
-        else:
-            logging.info(
-                "No TTS available for %s (%s) — tried %d URLs",
-                simple, label, len(candidates),
-            )
+            time.sleep(delay)
+            wanted = still_missing
 
+    if last_missing:
+        logging.warning(
+            "download_tts_files: gave up on %s after %d attempt(s): %s",
+            _short_sid(session_id), retries,
+            [lbl for _, lbl in last_missing],
+        )
     return downloaded
 
 
