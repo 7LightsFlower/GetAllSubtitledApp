@@ -2413,10 +2413,44 @@ def _download_session_files_locked(session_id, token, server_url):
         raise _JobCancelled(
             f"Session {_short_sid(session_id)} cancelled before TTS download"
         )
+    _job_log(
+        session_id,
+        "Downloading TTS audio tracks…",
+        stage="downloading",
+        progress=0.95,
+    )
     try:
-        download_tts_files(session_id, token, server_url)
-    except (OSError, ValueError, TypeError) as e:
-        logging.warning("TTS download failed for %s: %s", _short_sid(session_id), e)
+        tts_files = download_tts_files(session_id, token, server_url)
+        if tts_files:
+            logging.info(
+                "Downloaded %d TTS file(s) for %s: %s",
+                len(tts_files), _short_sid(session_id), tts_files,
+            )
+            _job_log(
+                session_id,
+                f"Downloaded {len(tts_files)} TTS track(s)",
+                progress=0.97,
+            )
+        else:
+            logging.info(
+                "No TTS files downloaded for %s "
+                "(languages may not have TTS available)",
+                _short_sid(session_id),
+            )
+            _job_log(
+                session_id,
+                "No TTS tracks available for this session",
+                level="warning",
+            )
+    except (OSError, ValueError, TypeError, requests.exceptions.RequestException) as e:
+        logging.warning(
+            "TTS download failed for %s: %s", _short_sid(session_id), e
+        )
+        _job_log(
+            session_id,
+            f"TTS download failed: {e}",
+            level="warning",
+        )
 
     files = [
         f
@@ -2479,11 +2513,19 @@ def download_tts_files(session_id, token, server_url=None, languages=None,
     if languages is None:
         json_path = os.path.join(session_dir, "transcripts.json")
         if not os.path.exists(json_path):
+            logging.warning(
+                "download_tts_files: no transcripts.json for %s, "
+                "cannot determine languages",
+                _short_sid(session_id),
+            )
             return []
         try:
             with open(json_path, "r", encoding="utf-8") as f:
                 transcripts = json.load(f)
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError) as e:
+            logging.warning(
+                "download_tts_files: could not read transcripts.json: %s", e
+            )
             return []
         languages = [t.get("language", "") for t in transcripts]
 
@@ -2503,6 +2545,21 @@ def download_tts_files(session_id, token, server_url=None, languages=None,
             continue
         seen.add(label)
         wanted.append((simple, label))
+
+    if not wanted:
+        logging.info(
+            "download_tts_files: no TTS-eligible languages for %s "
+            "(languages=%s)",
+            _short_sid(session_id),
+            languages,
+        )
+        return []
+
+    logging.info(
+        "download_tts_files: want TTS for %d language(s): %s",
+        len(wanted),
+        [lbl for _, lbl in wanted],
+    )
 
     referer = f"{server_url}/archivesession/{session_id}"
     downloaded = []
@@ -2533,6 +2590,11 @@ def download_tts_files(session_id, token, server_url=None, languages=None,
             kit_name = f"{label}.wav"     # "Korean Audio.wav"
             kit_url = (f"{server_url}/archivemediafile/"
                        f"{session_id}/{quote(kit_name)}")
+
+            logging.info(
+                "download_tts_files: fetching %s (attempt %d/%d)",
+                kit_url, attempt, retries,
+            )
 
             ok = curl_download(
                 kit_url, local_path,
