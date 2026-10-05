@@ -618,6 +618,34 @@ def parse_html_with_bs4(html_content):
     return None
 
 
+# Dex session cookie for the internal server. When set, TTS and other
+# media fetches send this cookie instead of the bearer token — which is
+# what a browser does when it plays audio from the archive page. The
+# bearer token continues to be used for /upload_lecture and
+# /archive_messages/, where it is required.
+#
+# Extract the cookie from a signed-in browser:
+#   DevTools → Application → Cookies → https://lt2srv.iar.kit.edu
+#   copy the value of `_forward_auth`.
+#
+# When empty, the backend falls back to the bearer token in the cookie
+# slot, which is what the rest of the code already does.
+_kit_session_cookie: str = os.environ.get("KIT_SESSION_COOKIE", "").strip()
+
+
+def _media_cookie(token: str) -> str:
+    """Return the cookie value to use for a media fetch.
+
+    Prefers the Dex session cookie when one is configured; otherwise
+    falls back to the bearer token, matching legacy behaviour.
+    """
+    return _kit_session_cookie or token
+
+
+def _media_cookie_is_dex() -> bool:
+    """True when the configured media cookie is a Dex session cookie."""
+    return bool(_kit_session_cookie)
+
 def ensure_authenticated(token: str) -> bool:
     """Check if the current session has a valid cookie."""
     if token == _state["token"] and internal_session.cookies:
@@ -1875,25 +1903,29 @@ def get_video_metadata(video_path):
     return 120.0, 30.0
 
 
-def curl_download(url, output_path, token):
+def curl_download(url, output_path, token, *, cookie_only=False):
     """Download a file using curl. Returns True on a 2xx response
     with a plausible body, False otherwise."""
     try:
+        auth_headers = []
+        if not cookie_only:
+            auth_headers = [
+                "-H", f"X-Forward-Auth: {token}",
+                "-H", f"Authorization: Bearer {token}",
+            ]
+
         cmd = [
             "curl",
             "-s",
             "-L",
             "--insecure",
-            "-H",
-            f"X-Forward-Auth: {token}",
-            "-H",
-            f"Authorization: Bearer {token}",
+            *auth_headers,
             "-H",
             "User-Agent: Mozilla/5.0 (compatible; LT-Uploader/1.0)",
             "--cookie",
             f"_forward_auth={token}",
             "-w",
-            "%{http_code}",  # ← write status code to stdout
+            "%{http_code}",
             "-o",
             output_path,
             url,
@@ -1912,6 +1944,30 @@ def curl_download(url, output_path, token):
             and os.path.exists(output_path)
             and os.path.getsize(output_path) > 1000
         ):
+            # KIT returns 200 with an HTML error page for files it does
+            # not have. Refuse to treat that as a successful download,
+            # otherwise the HTML is written into a .wav / .vtt / .mp4
+            # slot and the browser chokes on it. index.html is
+            # intentionally HTML, so skip the check for that filename.
+            if not output_path.endswith(".html"):
+                try:
+                    with open(output_path, "rb") as f:
+                        head = f.read(32)
+                    stripped = head.lstrip().lower()
+                    if (
+                        stripped.startswith(b"<!doctype html")
+                        or stripped.startswith(b"<html")
+                        or stripped.startswith(b"<!doctype")
+                    ):
+                        logging.info(
+                            "curl_download: %s → 200 but body is HTML; "
+                            "treating as failure",
+                            url,
+                        )
+                        os.remove(output_path)
+                        return False
+                except OSError:
+                    pass
             return True
 
         if status != 200:
@@ -1971,8 +2027,31 @@ def curl_download_with_headers(url, output_path, token):
             and os.path.exists(output_path)
             and os.path.getsize(output_path) > 1000
         ):
+            # KIT returns 200 with an HTML error page for files it does
+            # not have. Refuse to treat that as a successful download,
+            # otherwise the HTML is written into a .wav / .vtt / .mp4
+            # slot and the browser chokes on it. index.html is
+            # intentionally HTML, so skip the check for that filename.
+            if not output_path.endswith(".html"):
+                try:
+                    with open(output_path, "rb") as f:
+                        head = f.read(32)
+                    stripped = head.lstrip().lower()
+                    if (
+                        stripped.startswith(b"<!doctype html")
+                        or stripped.startswith(b"<html")
+                        or stripped.startswith(b"<!doctype")
+                    ):
+                        logging.info(
+                            "curl_download: %s → 200 but body is HTML; "
+                            "treating as failure",
+                            url,
+                        )
+                        os.remove(output_path)
+                        return False
+                except OSError:
+                    pass
             return True
-
         if status != 200:
             logging.info(
                 "curl_download_with_headers: %s → HTTP %s (discarding)",
@@ -2409,17 +2488,57 @@ def download_tts_files(session_id, token, server_url=None, languages=None):
             downloaded.append(local_name)
             continue
 
+        # KIT has changed its TTS URL layout several times across
+        # releases, and the media route is gated by the Dex session
+        # cookie rather than the bearer token. Try every URL variant
+        # that KIT is known to have used, with the Dex cookie if one
+        # is configured, then fall back to the bearer token. The
+        # first candidate that returns real audio wins.
         kit_name = f"{label}.wav"
-        kit_url = f"{server_url}/archivemediafile/{session_id}/{quote(kit_name)}"
+        enc_name = quote(kit_name)
+        candidates = [
+            f"{server_url}/archivemediafile/{session_id}/{enc_name}",
+            f"{server_url}/archivemedia/{session_id}/{enc_name}",
+            f"{server_url}/archivemedia/{session_id}/tts/{quote(label)}",
+            f"{server_url}/archivemedia/{session_id}/{quote(label)}",
+            f"{server_url}/archivemediafile/{session_id}/"
+            f"tts_{simple.replace(' ', '_')}.wav",
+        ]
 
-        if curl_download(kit_url, local_path, token):
+        got_it = False
+        for kit_url in candidates:
+            for cookie_only in (True, False):
+                # Skip the credential variant we have already tried
+                # with the other mode.
+                if cookie_only and not _media_cookie_is_dex():
+                    # Without a Dex cookie, cookie_only=True would just
+                    # resend the bearer token; skip it.
+                    continue
+                if curl_download(
+                    kit_url,
+                    local_path,
+                    _media_cookie(token),
+                    cookie_only=cookie_only,
+                ):
+                    got_it = True
+                    break
+            if got_it:
+                break
+
+        if got_it:
             size = os.path.getsize(local_path)
-            logging.info("Downloaded TTS %s (%d bytes)", local_name, size)
+            logging.info(
+                "Downloaded TTS %s (%d bytes) from %s",
+                local_name, size, kit_url,
+            )
             _job_log(session_id, f"Downloaded {local_name}")
             _job_add_file(session_id, local_name, size)
             downloaded.append(local_name)
         else:
-            logging.info("No TTS available for %s (%s)", simple, label)
+            logging.info(
+                "No TTS available for %s (%s) — tried %d URLs",
+                simple, label, len(candidates),
+            )
 
     return downloaded
 
@@ -4295,6 +4414,19 @@ def session_tts(session_id, label):
             jsonify({"error": f"Upstream returned {r.status_code}"}),
             r.status_code,
         )
+    
+    # KIT returns 200 with an HTML error page when a TTS file is
+    # missing. Forwarding that as audio/wav causes the browser's
+    # <audio> element to fail with DEMUXER_ERROR_COULD_NOT_OPEN.
+    # Return a clean 404 instead.
+    upstream_type = r.headers.get("Content-Type", "").lower()
+    if "html" in upstream_type:
+        logging.info(
+            "session_tts: upstream returned HTML for %s (label=%r)",
+            kit_url,
+            label,
+        )
+        return jsonify({"error": "upstream_html"}), 404
 
     # Pass through the headers the <audio> element cares about.
     passthrough = {}
@@ -4424,6 +4556,125 @@ def session_tts_backfill_all():
 
     save_state()
     return jsonify({"success": True, "results": results}), 200
+
+@app.route(
+    "/session-tts-diagnose/<path:session_id>/<path:label>",
+    methods=["GET"],
+)
+def session_tts_diagnose(session_id, label):
+    """Probe every known TTS URL with both credential sets and
+    report status / content-type / content-length for each.
+
+    Read-only. Never writes a file. Use this once to discover which
+    URL KIT actually serves TTS from on a given host, then trim
+    `download_tts_files`'s candidate list accordingly.
+    """
+    server = (
+        sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
+    ).rstrip("/")
+
+    token = _effective_token(session_id, fallback="")
+    if not token:
+        return jsonify({
+            "error": "no_token",
+            "message": (
+                "Open the session screen once so the backend caches a "
+                "token, then retry."
+            ),
+        }), 400
+
+    enc = quote(f"{label}.wav")
+    enc_label = quote(label)
+
+    candidates = [
+        f"{server}/archivemediafile/{session_id}/{enc}",
+        f"{server}/archivemedia/{session_id}/{enc}",
+        f"{server}/archivemedia/{session_id}/tts/{enc_label}",
+        f"{server}/archivemedia/{session_id}/{enc_label}",
+        f"{server}/archivesession/{session_id}/{enc}",
+    ]
+
+    results = []
+    for url in candidates:
+        for mode in ("dex_cookie", "bearer"):
+            if mode == "dex_cookie" and not _media_cookie_is_dex():
+                continue
+
+            headers = [
+                "-H", "User-Agent: Mozilla/5.0 (diagnostic)",
+            ]
+            if mode == "bearer":
+                headers += [
+                    "-H", f"X-Forward-Auth: {token}",
+                    "-H", f"Authorization: Bearer {token}",
+                ]
+            cookie_value = (
+                _media_cookie(token) if mode == "dex_cookie" else token
+            )
+            headers += ["--cookie", f"_forward_auth={cookie_value}"]
+
+            try:
+                proc = subprocess.run(
+                    [
+                        "curl",
+                        "-s",
+                        "-L",
+                        "--insecure",
+                        "-o", "/dev/null",
+                        "-D", "-",
+                        *headers,
+                        url,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+            except (subprocess.TimeoutExpired, OSError) as e:
+                results.append({
+                    "url": url,
+                    "mode": mode,
+                    "error": str(e),
+                })
+                continue
+
+            head = proc.stdout or ""
+            first_line = head.split("\n", 1)[0].strip()
+            ctype = ""
+            clen = ""
+            for line in head.splitlines():
+                if line.lower().startswith("content-type:"):
+                    ctype = line.split(":", 1)[1].strip()
+                elif line.lower().startswith("content-length:"):
+                    clen = line.split(":", 1)[1].strip()
+
+            verdict = "unknown"
+            if "audio" in ctype.lower():
+                verdict = "real_audio"
+            elif "html" in ctype.lower():
+                verdict = "kit_error_page"
+            elif first_line.startswith("HTTP") and " 404" in first_line:
+                verdict = "not_found"
+            elif first_line.startswith("HTTP") and " 401" in first_line:
+                verdict = "unauthorized"
+            elif first_line.startswith("HTTP") and " 200" in first_line:
+                verdict = "html_or_other"
+
+            results.append({
+                "url": url,
+                "mode": mode,
+                "status_line": first_line,
+                "content_type": ctype,
+                "content_length": clen,
+                "verdict": verdict,
+            })
+
+    return jsonify({
+        "session_id": session_id,
+        "label": label,
+        "has_dex_cookie": _media_cookie_is_dex(),
+        "results": results,
+    }), 200
 
 
 @app.route("/session-zip/<path:session_id>", methods=["GET"])
