@@ -810,6 +810,11 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       await _loadSubtitleTracks();
       await _loadTTSTracks();
 
+      // NEW: Auto-backfill TTS if we have tracks but no local files
+      if (_ttsTracks.isNotEmpty) {
+        _autoBackfillTtsIfNeeded();
+      }
+
       setState(() => _isLoading = false);
     } catch (e) {
       setState(() {
@@ -818,6 +823,37 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       });
     }
   }
+
+  /// Fire-and-forget: check if TTS files exist locally, and if not,
+  /// trigger a background download. Doesn't block the UI.
+  void _autoBackfillTtsIfNeeded() async {
+    try {
+      final token = await InternalAuthService.getToken();
+      if (token == null || token.isEmpty) return;
+      
+      // Check if any TTS file is missing
+      final url = '$flaskServerUrl/session-output/${widget.sessionId}';
+      final response = await http.get(
+        Uri.parse(url),
+        headers: {'Authorization': 'Bearer $token'},
+      );
+      
+      if (response.statusCode != 200) return;
+      
+      final data = jsonDecode(response.body);
+      final files = (data['files'] as List?) ?? [];
+      final hasTtsFiles = files.any((f) => 
+          (f['name'] as String?)?.startsWith('tts_') == true);
+      
+      if (!hasTtsFiles && _ttsTracks.isNotEmpty) {
+        debugPrint('Auto-backfilling TTS files...');
+        await _backfillTtsFiles();
+      }
+    } catch (e) {
+      debugPrint('Auto-backfill check failed: $e');
+    }
+  }
+
 
   void _extractChapters() {
     _chapters.clear();
