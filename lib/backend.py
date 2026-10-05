@@ -2525,6 +2525,25 @@ def download_tts_files(session_id, token, server_url=None, languages=None):
             if got_it:
                 break
 
+        if got_it and not (
+            os.path.getsize(local_path) > _MIN_WAV_BYTES
+            and _looks_like_wav(local_path)
+        ):
+            # KIT returned its "session not ready" HTML page, or
+            # something else that is not a WAV. Discard and treat
+            # as a failed download so the retry logic kicks in.
+            logging.warning(
+                "TTS %s downloaded but is not a valid WAV "
+                "(%d bytes) — discarding",
+                local_name,
+                os.path.getsize(local_path),
+            )
+            try:
+                os.remove(local_path)
+            except OSError:
+                pass
+            got_it = False
+
         if got_it:
             size = os.path.getsize(local_path)
             logging.info(
@@ -4349,14 +4368,29 @@ def session_tts(session_id, label):
     simple = label[: -len(" Audio")] if label.endswith(" Audio") else label
     for name in (f"tts_{simple}.wav", f"{label}.wav"):
         path = os.path.join(session_dir, name)
-        if os.path.exists(path) and os.path.getsize(path) > 1000:
-            logging.info("session_tts: serving local %s", name)
-            return send_file(
-                path,
-                mimetype="audio/wav",
-                conditional=True,  # gives Range support → seeking works
-                as_attachment=False,
+        if not os.path.exists(path):
+            continue
+        if os.path.getsize(path) <= _MIN_WAV_BYTES:
+            logging.warning(
+                "session_tts: %s is only %d bytes — not a real WAV, "
+                "treating as missing",
+                name, os.path.getsize(path),
             )
+            continue
+        if not _looks_like_wav(path):
+            logging.warning(
+                "session_tts: %s exists but has no RIFF/WAVE header "
+                "— not a real WAV, treating as missing",
+                name,
+            )
+            continue
+        logging.info("session_tts: serving local %s", name)
+        return send_file(
+            path,
+            mimetype="audio/wav",
+            conditional=True,
+            as_attachment=False,
+        )
 
     # ── 2. Live proxy (unchanged) ─────────────────────────────────
     filename = f"{label}.wav"
@@ -7515,6 +7549,31 @@ def _is_meaningful_file(path: str) -> bool:
         return size > 20
     return size > 1000
 
+# Minimum plausible size for a real KIT TTS WAV. Real files are
+# tens of MB; the HTML error page KIT returns for a not-yet-ready
+# session is ~1.3 KB. 50 KB is comfortably above the error page and
+# comfortably below the shortest legitimate TTS clip.
+_MIN_WAV_BYTES = 50_000
+
+
+def _looks_like_wav(path: str) -> bool:
+    """True iff the file starts with the RIFF/WAVE magic bytes.
+
+    KIT returns a 200 with an HTML status page when a TTS track is
+    not (yet) available. The page is ~1.3 KB and starts with
+    '<!DOCTYPE html>'. Saving that as a .wav poisons the session:
+    the browser then fails to decode it and audioplayers raises
+    WebAudioError Code 4. This check is the gate that stops it.
+    """
+    try:
+        with open(path, "rb") as f:
+            header = f.read(12)
+    except OSError:
+        return False
+    if len(header) < 12:
+        return False
+    return header[0:4] == b"RIFF" and header[8:12] == b"WAVE"
+
 
 @app.route("/session-output/<path:session_id>", methods=["GET"])
 def get_session_output(session_id):
@@ -8182,7 +8241,8 @@ def _session_files_look_incomplete(session_dir):
         for f in os.listdir(session_dir)
         if f.startswith("tts_")
         and f.endswith(".wav")
-        and os.path.getsize(os.path.join(session_dir, f)) > 1000
+        and os.path.getsize(os.path.join(session_dir, f)) > _MIN_WAV_BYTES
+        and _looks_like_wav(os.path.join(session_dir, f))
     }
     if vtt_langs - tts_langs:
         logging.info(
