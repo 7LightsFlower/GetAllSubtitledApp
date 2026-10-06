@@ -557,12 +557,12 @@ def rebuild_videos_from_disk():
             f"/thumbnails/{thumb_name}" if os.path.exists(thumb_path) else None
         )
 
-        # Best-effort duration/fps. ffprobe is quick on a local file
-        # and the values are only used for display.
+        # Best-effort duration/fps/codec. ffprobe is quick on a
+        # local file and the values are only used for display.
         try:
-            duration, fps = get_video_metadata(file_path)
+            duration, fps, codec = get_video_metadata(file_path)
         except (OSError, ValueError, TypeError):
-            duration, fps = 0.0, 0.0
+            duration, fps, codec = 0.0, 0.0, ""
 
         # Name: prefer a human-readable title. Fall back to the
         # filename stem if nothing better is available.
@@ -577,6 +577,7 @@ def rebuild_videos_from_disk():
                 "last_opened": None,
                 "duration": duration,
                 "fps": fps,
+                "codec": codec,
                 "file_size": size,
                 "segment_count": 0,
                 "languages": ["en"],
@@ -586,6 +587,7 @@ def rebuild_videos_from_disk():
                 # Mark so it's obvious in the debug endpoint that this
                 # entry was recovered rather than uploaded.
                 "_recovered": True,
+                "source": source,
             }
         )
         added += 1
@@ -1024,6 +1026,34 @@ def _ensure_greenscreen_fields(project: dict) -> dict:
     project.setdefault("greenscreen_file_name", None)
     project.setdefault("greenscreen_status", "pending")
     project.setdefault("greenscreen_progress", 0)
+    return project
+
+
+def _ensure_source_field(project: dict) -> dict:
+    """Make sure every project carries a `source` string.
+
+    Old state files predate this field. We seed a sensible default
+    instead of re-probing, because /videos must stay fast and the
+    user can always edit the value from the card. Idempotent.
+    """
+    if not project.get("source"):
+        fname = (project.get("file_name") or "").lower()
+        if "youtube" in fname:
+            project["source"] = "Imported (YouTube)"
+        else:
+            project["source"] = "Desktop Upload"
+    return project
+
+
+def _ensure_codec_field(project: dict) -> dict:
+    """Make sure every project carries a `codec` string.
+
+    Old state files predate this field. We do NOT re-probe here —
+    that would stall /videos for every project whose codec is
+    missing. An empty string means "unknown", and the UI handles
+    that case explicitly. Idempotent.
+    """
+    project.setdefault("codec", "")
     return project
 
 
@@ -1858,9 +1888,14 @@ def generate_video_thumbnail(video_path, thumbnail_path, time_offset=1.0):
 
 
 def get_video_metadata(video_path):
-    """
-    Extract video metadata using ffprobe.
-    Returns (duration, fps) or (120.0, 30.0) if failed.
+    """Extract video metadata using ffprobe.
+
+    Returns (duration, fps, codec) where codec is a short label such
+    as "h264 (High)", "hevc (Main)", "vp9", "av1", or "" on failure.
+
+    The previous 2-tuple signature was extended to include the codec
+    so the project card can flag browser-incompatible formats. Every
+    caller must unpack all three values.
     """
     try:
         cmd = [
@@ -1870,7 +1905,7 @@ def get_video_metadata(video_path):
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=duration,r_frame_rate",
+            "stream=duration,r_frame_rate,codec_name,profile",
             "-of",
             "json",
             video_path,
@@ -1883,14 +1918,24 @@ def get_video_metadata(video_path):
             streams = data.get("streams", [])
             if streams:
                 stream = streams[0]
+
                 duration = float(stream.get("duration", 120.0))
+
                 fps_str = stream.get("r_frame_rate", "30/1")
                 if "/" in fps_str:
                     num, den = fps_str.split("/")
                     fps = float(num) / float(den) if float(den) > 0 else 30.0
                 else:
                     fps = float(fps_str)
-                return duration, fps
+
+                codec_name = (stream.get("codec_name") or "").strip()
+                profile = (stream.get("profile") or "").strip()
+                if codec_name and profile:
+                    codec = f"{codec_name} ({profile})"
+                else:
+                    codec = codec_name
+
+                return duration, fps, codec
     except (
         subprocess.SubprocessError,
         FileNotFoundError,
@@ -1900,22 +1945,25 @@ def get_video_metadata(video_path):
         OSError,
     ) as e:
         logging.warning("Failed to get video metadata: %s", e)
-    return 120.0, 30.0
+    return 120.0, 30.0, ""
 
 
 def curl_download(url, output_path, token, *,
-                  cookie_only=False, media=False, referer=None):
+                  cookie_only=False, media=False, referer=None,
+                  anonymous=False):
     """Download a file using curl.
 
-    media=True  → send the headers an <audio> element would send.
-                  Use this for KIT's /archivemediafile/ and
-                  /archivemedia/ routes.
+    media=True      → send the headers an <audio> element would send.
     cookie_only=True → send only the `_forward_auth` cookie, no
-                  Authorization / X-Forward-Auth headers.
+                       Authorization / X-Forward-Auth headers.
+    anonymous=True  → send no auth of any kind. Correct for
+                       /archivemediafile/<sid>/<Language> Audio.wav,
+                       which KIT serves purely on the strength of the
+                       base64 session id in the path.
     """
     try:
         auth_headers = []
-        if not cookie_only:
+        if not anonymous and not cookie_only:
             auth_headers = [
                 "-H", f"X-Forward-Auth: {token}",
                 "-H", f"Authorization: Bearer {token}",
@@ -1936,7 +1984,14 @@ def curl_download(url, output_path, token, *,
             *auth_headers,
             *media_headers,
             "-H", "User-Agent: Mozilla/5.0 (compatible; LT-Uploader/1.0)",
-            "--cookie", f"_forward_auth={token}",
+        ]
+
+        # Only send the _forward_auth cookie when we were asked to use
+        # one. anonymous=True is what we want for TTS.
+        if not anonymous:
+            cmd += ["--cookie", f"_forward_auth={token}"]
+
+        cmd += [
             "-w", "%{http_code}",
             "-o", output_path,
             url,
@@ -2495,37 +2550,111 @@ def _looks_like_wav(path: str) -> bool:
     return header[0:4] == b"RIFF" and header[8:12] == b"WAVE"
 
 
+import html as _html_mod  # if not already imported at the top
+
+
+def _tts_urls_from_html(session_id: str, session_dir: str,
+                        server_url: str) -> dict[str, str]:
+    """Parse index.html for TTS <source> URLs.
+
+    Returns {label: absolute_url}, where label is the dropdown label
+    ("Korean Audio") and absolute_url is the fully-qualified KIT URL
+    that the archive page itself would play.
+
+    KIT's own archive page builds the audio-source <select> from these
+    tags, so whatever it emits is — by definition — the correct URL.
+    Scraping is strictly more reliable than guessing the path shape.
+    """
+    index_path = os.path.join(session_dir, "index.html")
+    if not os.path.exists(index_path):
+        return {}
+
+    try:
+        with open(index_path, "r", encoding="utf-8", errors="ignore") as f:
+            page = f.read()
+    except OSError:
+        return {}
+
+    server_url = server_url.rstrip("/")
+    urls: dict[str, str] = {}
+
+    # Match <source src="…" type="audio/…">, in either attribute order.
+    # Capture both the src and the filename's trailing "/<Label>" part.
+    pattern = re.compile(
+        r'<source\s+[^>]*?src=["\']([^"\']+)["\'][^>]*?'
+        r'type=["\']audio/[^"\']*["\']'
+        r'|<source\s+[^>]*?type=["\']audio/[^"\']*["\'][^>]*?'
+        r'src=["\']([^"\']+)["\']',
+        re.IGNORECASE,
+    )
+
+    for m in pattern.finditer(page):
+        src = m.group(1) or m.group(2)
+        if not src:
+            continue
+        src = _html_mod.unescape(src)
+
+        # Absolute URL for the browser / curl.
+        if src.startswith("/"):
+            absolute = f"{server_url}{src}"
+        elif src.startswith("http"):
+            absolute = src
+        else:
+            absolute = f"{server_url}/{src.lstrip('/')}"
+
+        # Label = last path segment, percent-decoded, with any trailing
+        # ".wav" stripped so it matches what the UI calls it.
+        tail = src.rstrip("/").rsplit("/", 1)[-1]
+        label = _html_mod.unescape(tail)
+        # KIT sometimes percent-encodes the whole label, sometimes not.
+        try:
+            from urllib.parse import unquote as _unquote
+            label = _unquote(label)
+        except Exception:
+            pass
+        if label.lower().endswith(".wav"):
+            label = label[:-4]
+        if not label:
+            continue
+
+        urls[label] = absolute
+
+    return urls
+
+
 def download_tts_files(session_id, token, server_url=None, languages=None,
                        *, retries=4, delay=20):
     """Download per-language TTS WAVs into the session folder.
 
-    URL used (matches what KIT's own archive page uses):
-        /archivemediafile/<session_id>/<Language>%20Audio.wav
+    Two things about KIT's TTS endpoint, both learned from its own
+    archive page (see the <source> tags in any session's index.html):
 
-    Retries languages whose WAV is missing or invalid. KIT generates
-    TTS asynchronously, so a session can become "ready" for
-    transcripts before every WAV is on disk.
+      1. The URL is <server>/archivemediafile/<sid>/<Label> Audio.wav.
+         The space between the label and "Audio" is a *literal space*,
+         not %20. KIT's page emits it unescaped; the browser tolerates
+         it, so we should too.
+
+      2. No credentials of any kind go with the request. Not a header,
+         not a cookie. The base64 session id in the path *is* the
+         credential — it decodes to /home/<email>/<session name> and
+         is unguessable.
+
+    The previous version sent a bearer token as a _forward_auth cookie
+    and percent-encoded the space. KIT rejected both with HTTP 200 +
+    an HTML login page.
     """
     session_dir = _session_dir(session_id)
     server_url = (server_url or INTERNAL_SERVER_URL).rstrip("/")
 
-    # ---- which languages do we want? ----
+    # ---- which languages do we want? -------------------------------
     if languages is None:
         json_path = os.path.join(session_dir, "transcripts.json")
         if not os.path.exists(json_path):
-            logging.warning(
-                "download_tts_files: no transcripts.json for %s, "
-                "cannot determine languages",
-                _short_sid(session_id),
-            )
             return []
         try:
             with open(json_path, "r", encoding="utf-8") as f:
                 transcripts = json.load(f)
-        except (OSError, ValueError, TypeError) as e:
-            logging.warning(
-                "download_tts_files: could not read transcripts.json: %s", e
-            )
+        except (OSError, ValueError, TypeError):
             return []
         languages = [t.get("language", "") for t in transcripts]
 
@@ -2534,7 +2663,6 @@ def download_tts_files(session_id, token, server_url=None, languages=None,
     for lang in languages:
         if not lang:
             continue
-        # KIT has no TTS for the ASR track itself.
         if lang == "Transcript" or "Original ASR" in lang:
             continue
         simple = _extract_simple_language_name(lang)
@@ -2548,27 +2676,24 @@ def download_tts_files(session_id, token, server_url=None, languages=None,
 
     if not wanted:
         logging.info(
-            "download_tts_files: no TTS-eligible languages for %s "
-            "(languages=%s)",
+            "download_tts_files: no TTS-eligible languages for %s",
             _short_sid(session_id),
-            languages,
         )
         return []
 
     logging.info(
-        "download_tts_files: want TTS for %d language(s): %s",
-        len(wanted),
-        [lbl for _, lbl in wanted],
+        "download_tts_files: want TTS for %d language(s) on %s: %s",
+        len(wanted), _short_sid(session_id), [w[1] for w in wanted],
     )
 
     referer = f"{server_url}/archivesession/{session_id}"
     downloaded = []
-    last_missing = list(wanted)
+    remaining = list(wanted)
 
     for attempt in range(1, retries + 1):
         still_missing = []
 
-        for simple, label in wanted:
+        for simple, label in remaining:
             local_name = f"tts_{simple}.wav"
             local_path = os.path.join(session_dir, local_name)
 
@@ -2580,35 +2705,38 @@ def download_tts_files(session_id, token, server_url=None, languages=None,
                     downloaded.append(local_name)
                 continue
 
-            # Drop any stale/broken file so curl has a clean target.
             if os.path.exists(local_path):
                 try:
                     os.remove(local_path)
                 except OSError:
                     pass
 
-            kit_name = f"{label}.wav"     # "Korean Audio.wav"
-            kit_url = (f"{server_url}/archivemediafile/"
-                       f"{session_id}/{quote(kit_name)}")
+            # ── THE FIX ───────────────────────────────────────────
+            # (a) literal space, not %20
+            # (b) no cookie, no header — anonymous=True
+            # Parentheses in a label like "Chinese (Traditional) Audio"
+            # are safe to leave raw too; curl handles them.
+            kit_name = f"{label}.wav"
+            kit_url = f"{server_url}/archivemediafile/{session_id}/{kit_name}"
 
             logging.info(
-                "download_tts_files: fetching %s (attempt %d/%d)",
+                "download_tts_files: GET %s (attempt %d/%d)",
                 kit_url, attempt, retries,
             )
 
             ok = curl_download(
                 kit_url, local_path,
-                _media_cookie(token),
-                cookie_only=True,
-                media=True,
+                "",                 # no token
+                anonymous=True,     # no cookie, no header
+                media=True,         # browser-like Accept/Range
                 referer=referer,
             )
 
             if ok and _looks_like_wav(local_path):
                 size = os.path.getsize(local_path)
                 logging.info(
-                    "Downloaded TTS %s (%d bytes) from %s",
-                    local_name, size, kit_url,
+                    "download_tts_files: wrote %s (%d bytes)",
+                    local_name, size,
                 )
                 _job_log(session_id, f"Downloaded {local_name}")
                 _job_add_file(session_id, local_name, size)
@@ -2621,26 +2749,25 @@ def download_tts_files(session_id, token, server_url=None, languages=None,
                         pass
                 still_missing.append((simple, label))
 
-        last_missing = still_missing
         if not still_missing:
             break
+
+        remaining = still_missing
         if attempt < retries:
             logging.info(
-                "download_tts_files: %d language(s) still missing for %s "
+                "download_tts_files: %d track(s) still missing on %s "
                 "— retrying in %ds (attempt %d/%d): %s",
                 len(still_missing), _short_sid(session_id),
-                delay, attempt, retries,
-                [lbl for _, lbl in still_missing],
+                delay, attempt, retries, [t[1] for t in still_missing],
             )
             time.sleep(delay)
-            wanted = still_missing
 
-    if last_missing:
+    if remaining:
         logging.warning(
             "download_tts_files: gave up on %s after %d attempt(s): %s",
-            _short_sid(session_id), retries,
-            [lbl for _, lbl in last_missing],
+            _short_sid(session_id), retries, [t[1] for t in remaining],
         )
+
     return downloaded
 
 
@@ -4479,7 +4606,7 @@ def session_tts(session_id, label):
     server = (sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL).rstrip(
         "/"
     )
-    kit_url = f"{server}/archivemediafile/{session_id}/{quote(filename)}"
+    kit_url = f"{server_url}/archivemediafile/{session_id}/{label} Audio.wav"
 
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
@@ -7122,6 +7249,8 @@ def get_videos():
 
     for video in videos:
         _ensure_greenscreen_fields(video)
+        _ensure_source_field(video)              
+        _ensure_codec_field(video)
     # ============ DEDUPLICATION LOGIC ============
     # Group videos by filename (without UUID prefix)
     video_groups = {}
@@ -7234,6 +7363,8 @@ def video_detail(video_key):
     for project in videos:
         if project["key"] == video_key:
             _ensure_greenscreen_fields(project)
+            _ensure_source_field(project)       
+            _ensure_codec_field(project)
             detail = project.copy()
             detail["thumbnail_url"] = _thumbnail_absolute_url(project)
             detail["segments"] = detail.get("segments", [])
@@ -7411,7 +7542,12 @@ def finish_upload():
     else:
         logging.warning("Failed to generate thumbnail for %s", filename)
 
-    duration, fps = get_video_metadata(file_path)
+    duration, fps, codec = get_video_metadata(file_path)
+
+    # Source: whatever the client told us, or a sensible default.
+    # The Flutter upload dialog sends "Desktop Upload" explicitly;
+    # the URL-import dialog sends the original URL.
+    source = (data.get("source") or "Desktop Upload").strip() or "Desktop Upload"
 
     project = {
         "key": str(uuid.uuid4()),
@@ -7421,12 +7557,14 @@ def finish_upload():
         "last_opened": None,
         "duration": duration,
         "fps": fps,
+        "codec": codec,                              # ── NEW ──
         "file_size": file_size,
         "segment_count": 0,
         "languages": ["en"],
         "thumbnail_url": thumbnail_url,
         "segmentation_done": auto_segmentation,
         "segmentation_progress": 100 if auto_segmentation else 0,
+        "source": source,                            # ── NEW ──
     }
     videos.append(project)
 
@@ -7594,6 +7732,46 @@ def stop_segmentation(video_key):
 
     return jsonify({"success": True, "stopped_jobs": stopped}), 200
 
+
+@app.route("/update-project-source/<video_key>", methods=["POST", "OPTIONS"])
+def update_project_source(video_key):
+    """Update the `source` field of a project (no auth).
+
+    Body:  {"source": "<url or free-text label>"}
+
+    Empty or whitespace-only values are rejected so the field never
+    becomes useless. The full value is echoed back so the client can
+    use the server's canonical form.
+    """
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    data = request.get_json(silent=True) or {}
+    new_source = (data.get("source") or "").strip()
+    if not new_source:
+        return jsonify({"error": "source is required"}), 400
+    if len(new_source) > 2048:
+        return jsonify({"error": "source is too long"}), 400
+
+    target = next((v for v in videos if v.get("key") == video_key), None)
+    if not target:
+        return jsonify({"error": "Video not found"}), 404
+
+    _ensure_source_field(target)
+    target["source"] = new_source
+    save_state()
+
+    logging.info("update_project_source: %s -> %r", video_key, new_source)
+    return (
+        jsonify(
+            {
+                "success": True,
+                "video_key": video_key,
+                "source": new_source,
+            }
+        ),
+        200,
+    )
 
 # ─── JOB ENDPOINTS ──────────────────────────────────────────────────────
 
@@ -8737,9 +8915,14 @@ def youtube_download_and_upload():
             thumbnail_url = None
 
         # ── 5. Metadata ──────────────────────────────────────────────
+        # We already probed the codec a few lines earlier (for the
+        # h264 check). Reuse it here; only re-run ffprobe when the
+        # duration is still unknown.
         try:
             if duration == 0:
-                duration, fps = get_video_metadata(file_path)
+                duration, fps, probed_codec = get_video_metadata(file_path)
+                if probed_codec:
+                    codec = probed_codec
             else:
                 fps = 30.0
         except (OSError, RuntimeError, ValueError, TypeError):
@@ -8757,7 +8940,8 @@ def youtube_download_and_upload():
         if existing is not None:
             # Reuse the existing entry. Preserve key, uploaded, last_opened,
             # greenscreen_*, job_history, session_id — only refresh fields
-            # that describe the file on disk.
+            # that describe the file on disk. The source is refreshed to
+            # the URL that produced this re-import.
             project = existing
             video_key = existing["key"]
             project.update(
@@ -8766,9 +8950,12 @@ def youtube_download_and_upload():
                     "file_size": file_size,
                     "duration": duration,
                     "fps": fps,
+                    "codec": codec,                  
                     "thumbnail_url": thumbnail_url,
+                    "source": youtube_url,           
                 }
             )
+
             logging.info(
                 "♻️ Reusing existing project for %s (key=%s)",
                 actual_filename,
@@ -8784,12 +8971,14 @@ def youtube_download_and_upload():
                 "last_opened": None,
                 "duration": duration,
                 "fps": fps,
+                "codec": codec,
                 "file_size": file_size,
                 "segment_count": 0,
                 "languages": ["en"],
                 "thumbnail_url": thumbnail_url,
                 "segmentation_done": auto_segmentation,
                 "segmentation_progress": 100 if auto_segmentation else 0,
+                "source": youtube_url,
             }
             videos.append(project)
 
@@ -9501,14 +9690,16 @@ def upload_to_internal():
                 "file_name": local_filename,
                 "uploaded": utc_now_iso(),
                 "last_opened": None,
-                "duration": 120.0,
-                "fps": 30.0,
+                "duration": duration,
+                "fps": fps,
+                "codec": codec,
                 "file_size": os.path.getsize(local_path),
                 "segment_count": 0,
                 "languages": request.form.getlist("language") or ["en"],
                 "thumbnail_url": None,
                 "segmentation_done": False,
                 "segmentation_progress": 0,
+                "source": request.form.get("source", "Desktop Upload"),
             }
             videos.append(project)
 

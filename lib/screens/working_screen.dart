@@ -17,14 +17,18 @@ import 'package:http_parser/http_parser.dart';
 
 // ─── Helper for robust date parsing ────────────────────────────
 DateTime _parseDateTime(String dateStr) {
+  // Try ISO 8601 first
   try {
     return DateTime.parse(dateStr).toLocal();
   } catch (_) {
+    // KIT occasionally emits "+00:00Z" which Dart's parser rejects
     final cleaned = dateStr.replaceFirst(RegExp(r'\+00:00(?=Z)'), '');
     try {
       return DateTime.parse(cleaned).toLocal();
     } catch (_) {
-      return DateTime.now();
+      // As a last resort, treat it as epoch so it's obviously wrong
+      // rather than masquerading as "just now".
+      return DateTime.fromMillisecondsSinceEpoch(0);
     }
   }
 }
@@ -38,6 +42,7 @@ class VideoProject {
   final DateTime? lastOpened;
   final double duration;
   final double fps;
+  final String codec;
   final int fileSize;
   final int segmentCount;
   final List<String> languages;
@@ -50,6 +55,7 @@ class VideoProject {
   final String? greenscreenFileName;
   final String greenscreenStatus;   // pending | building | ready | failed
   final int greenscreenProgress;    // 0..100
+  final String source;
 
   VideoProject({
     required this.key,
@@ -59,6 +65,7 @@ class VideoProject {
     this.lastOpened,
     required this.duration,
     required this.fps,
+    required this.codec,
     required this.fileSize,
     required this.segmentCount,
     required this.languages,
@@ -68,6 +75,7 @@ class VideoProject {
     required this.greenscreenFileName,
     required this.greenscreenStatus,
     required this.greenscreenProgress,
+    required this.source,
   });
 
   factory VideoProject.fromJson(Map<String, dynamic> json) {
@@ -84,6 +92,7 @@ class VideoProject {
           : null,
       duration: (json['duration'] as num?)?.toDouble() ?? 0.0,
       fps: (json['fps'] as num?)?.toDouble() ?? 0.0,
+      codec:  json['codec']  as String? ?? '',
       fileSize: json['file_size'] as int? ?? 0,
       segmentCount: json['segment_count'] as int? ?? 0,
       languages: (json['languages'] as List?)?.cast<String>() ?? [],
@@ -94,6 +103,7 @@ class VideoProject {
       greenscreenStatus:
           json['greenscreen_status'] as String? ?? 'pending',
       greenscreenProgress: json['greenscreen_progress'] as int? ?? 0,
+      source: json['source'] as String? ?? 'Desktop Upload',
     );
   }
 }
@@ -677,6 +687,9 @@ class _WorkingScreenState extends State<WorkingScreen> {
       builder: (ctx) => _ImportVideosDialog(
         urls: finalUrls,
         autoSegmentation: autoSegmentation,
+        importSource: resolvedUrls.isNotEmpty
+            ? resolvedUrls.first['original']
+            : null,
         onComplete: () {
           if (mounted) {
             Navigator.pop(ctx);
@@ -782,6 +795,14 @@ class _WorkingScreenState extends State<WorkingScreen> {
                 _editProjectName(project);
               },
             ),
+            ListTile(
+              leading: const Icon(Icons.link),
+              title: const Text('Edit Source'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _editProjectSource(project);
+              },
+            ),
             const Divider(),
             ListTile(
               leading: const Icon(Icons.delete, color: Colors.red),
@@ -805,21 +826,31 @@ class _WorkingScreenState extends State<WorkingScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Video Information'),
-        content: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text('Name: ${project.name}'),
-            Text('File: ${project.fileName}'),
-            Text('Duration: ${project.duration.toStringAsFixed(2)} s'),
-            Text('FPS: ${project.fps.toStringAsFixed(1)}'),
-            Text('File Size: ${_formatBytes(project.fileSize)}'),
-            Text('Uploaded: ${_formatJobTimestamp(project.uploaded)}'),
-            if (project.lastOpened != null)
-              Text('Last Opened: ${_formatJobTimestamp(project.lastOpened!)}'),
-            Text('Segments: ${project.segmentCount}'),
-            Text('Green-screen: ${project.greenscreenStatus}'),
-          ],
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('Name: ${project.name}'),
+              Text('File: ${project.fileName}'),
+              Text('Source: ${project.source}'),
+              Text(
+                'Codec: '
+                '${project.codec.isEmpty ? "unknown" : project.codec}',
+              ),
+              Text('Duration: ${project.duration.toStringAsFixed(2)} s'),
+              Text('FPS: ${project.fps.toStringAsFixed(1)}'),
+              Text('File Size: ${_formatBytes(project.fileSize)}'),
+              Text('Uploaded: ${_formatExactTimestamp(project.uploaded)}'),
+              if (project.lastOpened != null)
+                Text(
+                  'Last Opened: '
+                  '${_formatExactTimestamp(project.lastOpened!)}',
+                ),
+              Text('Segments: ${project.segmentCount}'),
+              Text('Green-screen: ${project.greenscreenStatus}'),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -942,6 +973,192 @@ class _WorkingScreenState extends State<WorkingScreen> {
       }
     }
   }
+
+  // ─── Edit source ─────────────────────────────────────────────
+  Future<void> _editProjectSource(VideoProject project) async {
+    if (!mounted) return;
+
+    final controller = TextEditingController(text: project.source);
+    String? errorText;
+
+    final newSource = await showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Edit Source'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Where did this video come from?',
+                style: TextStyle(fontSize: 13, color: Colors.grey),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                maxLines: 2,
+                minLines: 1,
+                decoration: InputDecoration(
+                  labelText: 'Source',
+                  hintText:
+                      'https://youtube.com/watch?v=…  or  Desktop Upload',
+                  border: const OutlineInputBorder(),
+                  errorText: errorText,
+                ),
+                onChanged: (_) {
+                  if (errorText != null) {
+                    setDialogState(() => errorText = null);
+                  }
+                },
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  ActionChip(
+                    avatar: const Icon(Icons.upload_file, size: 16),
+                    label: const Text('Desktop Upload'),
+                    onPressed: () => setDialogState(() {
+                      controller.text = 'Desktop Upload';
+                      errorText = null;
+                    }),
+                  ),
+                  ActionChip(
+                    avatar: const Icon(Icons.clear, size: 16),
+                    label: const Text('Clear'),
+                    onPressed: () => setDialogState(() {
+                      controller.text = '';
+                    }),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                final v = controller.text.trim();
+                if (v.isEmpty) {
+                  setDialogState(
+                      () => errorText = 'Source cannot be empty.');
+                  return;
+                }
+                Navigator.pop(ctx, v);
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (newSource == null || newSource.isEmpty) return;
+    if (newSource == project.source) return;
+
+    try {
+      final response = await http.post(
+        Uri.parse('$authBaseUrl/update-project-source/${project.key}'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'source': newSource}),
+      );
+      if (!mounted) return;
+      if (response.statusCode == 200) {
+        // Optimistic local update so the UI feels instant. The next
+        // refresh will re-sync with the server's canonical value.
+        setState(() {
+          final i = _projects.indexWhere((p) => p.key == project.key);
+          if (i >= 0) {
+            _projects[i] = _copyProjectWithSource(_projects[i], newSource);
+          }
+        });
+        _showSnackBar('Source updated.');
+      } else {
+        _showSnackBar(
+          'Failed to update source (HTTP ${response.statusCode}).',
+          isError: true,
+        );
+      }
+    } catch (e) {
+      if (mounted) _showSnackBar('Error: $e', isError: true);
+    }
+  }
+
+  /// Returns a copy of `p` with a new `source`. Keeps `VideoProject`
+  /// immutable and avoids a large copyWith.
+  VideoProject _copyProjectWithSource(VideoProject p, String source) {
+    return VideoProject(
+      key: p.key,
+      name: p.name,
+      fileName: p.fileName,
+      uploaded: p.uploaded,
+      lastOpened: p.lastOpened,
+      duration: p.duration,
+      fps: p.fps,
+      codec: p.codec,
+      fileSize: p.fileSize,
+      segmentCount: p.segmentCount,
+      languages: p.languages,
+      thumbnailUrl: p.thumbnailUrl,
+      segmentationDone: p.segmentationDone,
+      segmentationProgress: p.segmentationProgress,
+      greenscreenFileName: p.greenscreenFileName,
+      greenscreenStatus: p.greenscreenStatus,
+      greenscreenProgress: p.greenscreenProgress,
+      source: source,
+    );
+  }
+
+  /// Small colour-coded chip that flags the codec at a glance.
+  Widget _buildCodecChip(String codec, Responsive r) {
+    final lower = codec.toLowerCase();
+
+    Color bg;
+    Color fg;
+    if (lower.startsWith('h264') || lower.startsWith('avc')) {
+      // Green: universal browser support.
+      bg = Colors.green.shade50;
+      fg = Colors.green.shade800;
+    } else if (lower.startsWith('hevc') || lower.startsWith('h265')) {
+      // Orange: playable, but not everywhere.
+      bg = Colors.orange.shade50;
+      fg = Colors.orange.shade800;
+    } else if (lower.startsWith('av1')) {
+      bg = Colors.blue.shade50;
+      fg = Colors.blue.shade800;
+    } else if (lower.startsWith('vp9') || lower.startsWith('vp8')) {
+      bg = Colors.purple.shade50;
+      fg = Colors.purple.shade800;
+    } else {
+      bg = Colors.grey.shade200;
+      fg = Colors.grey.shade800;
+    }
+
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: r.spaceXS,
+        vertical: 1,
+      ),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(r.spaceXS),
+      ),
+      child: Text(
+        codec,
+        style: TextStyle(
+          fontSize: r.fontCaption - 1,
+          color: fg,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }  
 
   // ─── Upload ───────────────────────────────────────────────────
   Future<void> _uploadVideo() async {
@@ -1361,6 +1578,51 @@ class _WorkingScreenState extends State<WorkingScreen> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
+
+                  // ── Editable source line ─────────────────────
+                  const SizedBox(height: 2),
+                  InkWell(
+                    onTap: () => _editProjectSource(project),
+                    borderRadius: BorderRadius.circular(r.spaceXS),
+                    child: Padding(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: r.spaceXS,
+                        vertical: 2,
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            _isYouTubeUrl(project.source)
+                                ? Icons.smart_display_outlined
+                                : Icons.upload_file,
+                            size: r.fontCaption + 2,
+                            color: Colors.blueGrey,
+                          ),
+                          SizedBox(width: r.spaceXS / 2),
+                          Expanded(
+                            child: Text(
+                              project.source,
+                              style: TextStyle(
+                                fontSize: r.fontCaption,
+                                color: Colors.blue[700],
+                                decoration: TextDecoration.underline,
+                                decorationStyle:
+                                    TextDecorationStyle.dotted,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          Icon(
+                            Icons.edit,
+                            size: r.fontCaption,
+                            color: Colors.grey[400],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+
                   SizedBox(height: r.spaceXS / 2),
                   Row(
                     children: [
@@ -1379,12 +1641,19 @@ class _WorkingScreenState extends State<WorkingScreen> {
                           color: Colors.grey[500],
                         ),
                       ),
+                      if (project.codec.isNotEmpty) ...[
+                        SizedBox(width: r.spaceXS),
+                        _buildCodecChip(project.codec, r),
+                      ],
                       const Spacer(),
-                      Text(
-                        _formatJobTimestamp(project.uploaded),
-                        style: TextStyle(
-                          fontSize: r.fontCaption,
-                          color: Colors.grey[400],
+                      Tooltip(
+                        message: _formatExactTimestamp(project.uploaded),
+                        child: Text(
+                          _formatJobTimestamp(project.uploaded),
+                          style: TextStyle(
+                            fontSize: r.fontCaption,
+                            color: Colors.grey[400],
+                          ),
                         ),
                       ),
                     ],
@@ -1607,17 +1876,35 @@ class _WorkingScreenState extends State<WorkingScreen> {
 
     final hh = dt.hour.toString().padLeft(2, '0');
     final mm = dt.minute.toString().padLeft(2, '0');
+    final ss = dt.second.toString().padLeft(2, '0');
     final dd = dt.day.toString().padLeft(2, '0');
     final mo = dt.month.toString().padLeft(2, '0');
     final yyyy = dt.year.toString();
 
     if (diff.inDays < 7) {
-      return '$dd/$mo/$yyyy $hh:$mm';
+      // Recent: full timestamp with seconds
+      return '$dd/$mo/$yyyy $hh:$mm:$ss';
     }
     if (diff.inDays < 30) {
-      return '$dd/$mo/$yyyy';
+      // This month: date + time, seconds hidden
+      return '$dd/$mo/$yyyy $hh:$mm';
     }
-    return yyyy;
+    // Older: still show the time, just drop the year's leading digits
+    // if you like — but keep HH:MM, it's cheap and useful.
+    return '$dd/$mo/$yyyy $hh:$mm';
+  }
+
+  /// Always shows the full date + time. Used where precision matters
+  /// (info dialogs, tooltips), as opposed to the compact card label.
+  String _formatExactTimestamp(DateTime dt) {
+    if (dt.millisecondsSinceEpoch == 0) return 'unknown';
+    final dd = dt.day.toString().padLeft(2, '0');
+    final mo = dt.month.toString().padLeft(2, '0');
+    final yyyy = dt.year.toString();
+    final hh = dt.hour.toString().padLeft(2, '0');
+    final mm = dt.minute.toString().padLeft(2, '0');
+    final ss = dt.second.toString().padLeft(2, '0');
+    return '$dd/$mo/$yyyy $hh:$mm:$ss';
   }
 
   String _formatDuration(double seconds) {
@@ -1646,11 +1933,17 @@ class _ImportVideosDialog extends StatefulWidget {
   final VoidCallback onComplete;
   final Function(String) onError;
 
+  /// Optional: the source URL to record on the project (e.g. the
+  /// original YouTube URL when the downloader resolved it to a
+  /// direct-link URL). Passed straight through to `finish-upload`.
+  final String? importSource;
+
   const _ImportVideosDialog({
     required this.urls,
     required this.autoSegmentation,
     required this.onComplete,
     required this.onError,
+    this.importSource,
   });
 
   @override
@@ -1660,6 +1953,11 @@ class _ImportVideosDialog extends StatefulWidget {
 class _ImportVideosDialogState extends State<_ImportVideosDialog> {
   List<ImportVideoStatus> _statuses = [];
   bool _isComplete = false;
+
+  /// Shorthand for `widget.importSource`. The finish-upload payload
+  /// records this so the backend can store it as the project's
+  /// `source` field.
+  String? get _importSource => widget.importSource;
 
   @override
   void initState() {
@@ -1780,6 +2078,9 @@ class _ImportVideosDialogState extends State<_ImportVideosDialog> {
       body: jsonEncode({
         'filename': fileName,
         'auto_segmentation': autoSegmentation,
+        // The URL-import dialog passes the URL it was asked to
+        // download from, not the resolved direct-link URL.
+        'source': _importSource ?? 'Imported',
       }),
     );
     if (finishResponse.statusCode != 200) {
@@ -1991,6 +2292,7 @@ class _UploadDialogState extends State<_UploadDialog> {
         body: jsonEncode({
           'filename': widget.fileName,
           'auto_segmentation': _autoSegmentation,
+          'source': 'Desktop Upload',
         }),
       );
       if (finishResponse.statusCode != 200) {
