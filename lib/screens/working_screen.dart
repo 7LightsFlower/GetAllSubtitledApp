@@ -1234,65 +1234,82 @@ class _WorkingScreenState extends State<WorkingScreen> {
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
-          : Column(
-              children: [
+          : CustomScrollView(
+              // Header, storage bar and grid all live in one scroll
+              // view. On a tall window everything fits and no
+              // scrollbar appears; on a short window the header and
+              // storage bar scroll off the top instead of squeezing
+              // the grid into a negative height.
+              slivers: [
                 // ─── Header: search / sort / upload ───────────────
-                Padding(
-                  padding: EdgeInsets.all(r.spaceL),
-                  child: _buildHeaderRow(r),
-                ),
-
-                // ─── Storage bar ──────────────────────────────────
-                Padding(
-                  padding: EdgeInsets.symmetric(horizontal: r.spaceL),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Flexible(
-                            child: Text(
-                              'Storage used (input videos)',
-                              style: TextStyle(
-                                fontSize: r.fontBodySmall,
-                                color: Colors.grey[600],
-                              ),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            '${_storageUsed.toStringAsFixed(2)} GB / '
-                            '${_storageLimit.toStringAsFixed(0)} GB',
-                            style: TextStyle(
-                              fontSize: r.fontBodySmall,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
-                      ),
-                      SizedBox(height: r.spaceXS),
-                      LinearProgressIndicator(
-                        value: _storageLimit > 0
-                            ? _storageUsed / _storageLimit
-                            : 0,
-                        backgroundColor: Colors.grey[300],
-                        valueColor:
-                            const AlwaysStoppedAnimation(Colors.blue),
-                        minHeight: 4,
-                      ),
-                    ],
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.all(r.spaceL),
+                    child: _buildHeaderRow(r),
                   ),
                 ),
 
-                SizedBox(height: r.spaceS),
-                Expanded(child: _buildGrid()),
+                // ─── Storage bar ──────────────────────────────────
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: r.spaceL),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisAlignment:
+                              MainAxisAlignment.spaceBetween,
+                          children: [
+                            Flexible(
+                              child: Text(
+                                'Storage used (input videos)',
+                                style: TextStyle(
+                                  fontSize: r.fontBodySmall,
+                                  color: Colors.grey[600],
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              '${_storageUsed.toStringAsFixed(2)} GB / '
+                              '${_storageLimit.toStringAsFixed(0)} GB',
+                              style: TextStyle(
+                                fontSize: r.fontBodySmall,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                        SizedBox(height: r.spaceXS),
+                        LinearProgressIndicator(
+                          value: _storageLimit > 0
+                              ? _storageUsed / _storageLimit
+                              : 0,
+                          backgroundColor: Colors.grey[300],
+                          valueColor: const AlwaysStoppedAnimation(
+                              Colors.blue),
+                          minHeight: 4,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
+                // ─── Grid ─────────────────────────────────────────
+                SliverPadding(
+                  padding: EdgeInsets.only(
+                    left: r.spaceL,
+                    right: r.spaceL,
+                    top: r.spaceS,
+                    bottom: r.spaceL,
+                  ),
+                  sliver: _buildGridSliver(),
+                ),
               ],
             ),
     );
   }
-
   /// Search field, sort dropdown and upload button. Wraps to two lines
   /// on compact viewports so nothing gets crushed.
   Widget _buildHeaderRow(Responsive r) {
@@ -1370,11 +1387,15 @@ class _WorkingScreenState extends State<WorkingScreen> {
     );
   }
 
-  Widget _buildGrid() {
+  /// The grid, as a sliver so it can sit inside the CustomScrollView
+  /// in build(). Error and empty states are wrapped in
+  /// SliverToBoxAdapter so the whole thing stays a sliver.
+  Widget _buildGridSliver() {
     final r = Responsive.of(context);
 
+    // ── Error state ─────────────────────────────────────────────
     if (_listError != null) {
-      return Center(
+      return SliverToBoxAdapter(
         child: Padding(
           padding: EdgeInsets.all(r.spaceXL),
           child: ConstrainedBox(
@@ -1444,6 +1465,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
       );
     }
 
+    // ── Filter + sort ────────────────────────────────────────────
     final filtered = _projects.where((p) {
       final q = _searchQuery.toLowerCase();
       return p.name.toLowerCase().contains(q) ||
@@ -1469,40 +1491,65 @@ class _WorkingScreenState extends State<WorkingScreen> {
       }
     });
 
+    // ── Empty state ─────────────────────────────────────────────
     if (filtered.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.folder_open, size: r.iconExtraLarge, color: Colors.grey),
-            SizedBox(height: r.spaceL),
-            Text('No projects found',
-                style: TextStyle(fontSize: r.fontSubtitle)),
-            Text(
-              'Upload a video to get started.',
-              style: TextStyle(fontSize: r.fontBody, color: Colors.grey),
+      return SliverToBoxAdapter(
+        child: Padding(
+          padding: EdgeInsets.symmetric(vertical: r.spaceXL),
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.folder_open,
+                    size: r.iconExtraLarge, color: Colors.grey),
+                SizedBox(height: r.spaceL),
+                Text('No projects found',
+                    style: TextStyle(fontSize: r.fontSubtitle)),
+                Text(
+                  'Upload a video to get started.',
+                  style: TextStyle(fontSize: r.fontBody, color: Colors.grey),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       );
     }
 
+    // ── Card height ──────────────────────────────────────────────
     final columns = r.gridColumns();
     final cardWidth = (r.width - r.spaceL * 2) / columns;
 
-    return GridView.builder(
-      padding: EdgeInsets.all(r.spaceL),
+    // Fixed thumbnail height for this column width (16:9).
+    final thumbnailHeight = cardWidth * 9 / 16;
+
+    // Fixed height of everything below the thumbnail:
+    //   name, filename, source, meta row, pipeline status, paddings
+    const metadataHeight = 110.0;
+
+    // Fixed height of the bottom action row.
+    final actionHeight = r.iconMedium + r.spaceS + r.spaceXS * 2;
+
+    // mainAxisExtent gives every cell a fixed pixel height that no
+    // longer swings with the viewport. The card is exactly as tall
+    // as its content and no taller.
+    final cellHeight = thumbnailHeight + metadataHeight + actionHeight;
+
+    // ── The grid itself ──────────────────────────────────────────
+    return SliverGrid(
       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: columns,
-        childAspectRatio: r.gridCardAspectRatio(columnWidth: cardWidth),
+        mainAxisExtent: cellHeight,
         crossAxisSpacing: r.spaceM,
         mainAxisSpacing: r.spaceM,
       ),
-      itemCount: filtered.length,
-      itemBuilder: (context, index) => _buildCard(filtered[index]),
+      delegate: SliverChildBuilderDelegate(
+        (context, index) => _buildCard(filtered[index]),
+        childCount: filtered.length,
+      ),
     );
   }
-
+  
   Widget _buildCard(VideoProject project) {
     final r = Responsive.of(context);
 
@@ -1549,121 +1596,144 @@ class _WorkingScreenState extends State<WorkingScreen> {
             ),
 
             // ── Metadata ───────────────────────────────────────────
-            Padding(
-              padding: EdgeInsets.fromLTRB(
-                r.spaceS, r.spaceXS, r.spaceS, 0,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  GestureDetector(
-                    onTap: () => _editProjectName(project),
-                    child: Text(
-                      project.name,
+            // Expanded so this block claims all vertical space between
+            // the thumbnail and the action row. Any extra height the
+            // grid cell has (from mainAxisExtent) lands here rather
+            // than as an empty strip below the action row.
+            Expanded(
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                  r.spaceS, r.spaceXS, r.spaceS, 0,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    GestureDetector(
+                      onTap: () => _editProjectName(project),
+                      child: Text(
+                        project.name,
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: r.fontBodySmall,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    Text(
+                      project.fileName,
                       style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: r.fontBodySmall,
+                        fontSize: r.fontCaption,
+                        color: Colors.grey[600],
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
-                  ),
-                  Text(
-                    project.fileName,
-                    style: TextStyle(
-                      fontSize: r.fontCaption,
-                      color: Colors.grey[600],
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
 
-                  // ── Editable source line ─────────────────────
-                  const SizedBox(height: 2),
-                  InkWell(
-                    onTap: () => _editProjectSource(project),
-                    borderRadius: BorderRadius.circular(r.spaceXS),
-                    child: Padding(
-                      padding: EdgeInsets.symmetric(
-                        horizontal: r.spaceXS,
-                        vertical: 2,
+                    // ── Editable source line ───────────────────────
+                    const SizedBox(height: 2),
+                    InkWell(
+                      onTap: () => _editProjectSource(project),
+                      borderRadius: BorderRadius.circular(r.spaceXS),
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: r.spaceXS,
+                          vertical: 2,
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              _isYouTubeUrl(project.source)
+                                  ? Icons.smart_display_outlined
+                                  : Icons.upload_file,
+                              size: r.fontCaption + 2,
+                              color: Colors.blueGrey,
+                            ),
+                            SizedBox(width: r.spaceXS / 2),
+                            Expanded(
+                              child: Text(
+                                project.source,
+                                style: TextStyle(
+                                  fontSize: r.fontCaption,
+                                  color: Colors.blue[700],
+                                  decoration: TextDecoration.underline,
+                                  decorationStyle:
+                                      TextDecorationStyle.dotted,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            Icon(
+                              Icons.edit,
+                              size: r.fontCaption,
+                              color: Colors.grey[400],
+                            ),
+                          ],
+                        ),
                       ),
-                      child: Row(
-                        children: [
-                          Icon(
-                            _isYouTubeUrl(project.source)
-                                ? Icons.smart_display_outlined
-                                : Icons.upload_file,
-                            size: r.fontCaption + 2,
-                            color: Colors.blueGrey,
+                    ),
+
+                    SizedBox(height: r.spaceXS / 2),
+
+                    // ── Meta row: duration • segs • codec • date ──
+                    Row(
+                      children: [
+                        Text(
+                          _formatDuration(project.duration),
+                          style: TextStyle(
+                            fontSize: r.fontCaption,
+                            color: Colors.grey[500],
                           ),
-                          SizedBox(width: r.spaceXS / 2),
-                          Expanded(
+                        ),
+                        SizedBox(width: r.spaceXS),
+                        Text(
+                          '• ${project.segmentCount} segs',
+                          style: TextStyle(
+                            fontSize: r.fontCaption,
+                            color: Colors.grey[500],
+                          ),
+                        ),
+                        if (project.codec.isNotEmpty) ...[
+                          SizedBox(width: r.spaceXS),
+                          // Flexible so the chip can shrink (and the
+                          // inner Text ellipsize) instead of forcing
+                          // the whole Row to overflow.
+                          Flexible(
+                            child: _buildCodecChip(project.codec, r),
+                          ),
+                        ],
+                        SizedBox(width: r.spaceXS),
+                        // Expanded + right alignment replaces the old
+                        // Spacer(). When the card is narrow the
+                        // timestamp ellipsizes rather than pushing
+                        // the Row past its constraint.
+                        Expanded(
+                          child: Tooltip(
+                            message:
+                                _formatExactTimestamp(project.uploaded),
                             child: Text(
-                              project.source,
+                              _formatJobTimestamp(project.uploaded),
                               style: TextStyle(
                                 fontSize: r.fontCaption,
-                                color: Colors.blue[700],
-                                decoration: TextDecoration.underline,
-                                decorationStyle:
-                                    TextDecorationStyle.dotted,
+                                color: Colors.grey[400],
                               ),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.right,
                             ),
                           ),
-                          Icon(
-                            Icons.edit,
-                            size: r.fontCaption,
-                            color: Colors.grey[400],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-
-                  SizedBox(height: r.spaceXS / 2),
-                  Row(
-                    children: [
-                      Text(
-                        _formatDuration(project.duration),
-                        style: TextStyle(
-                          fontSize: r.fontCaption,
-                          color: Colors.grey[500],
                         ),
-                      ),
-                      SizedBox(width: r.spaceXS),
-                      Text(
-                        '• ${project.segmentCount} segs',
-                        style: TextStyle(
-                          fontSize: r.fontCaption,
-                          color: Colors.grey[500],
-                        ),
-                      ),
-                      if (project.codec.isNotEmpty) ...[
-                        SizedBox(width: r.spaceXS),
-                        _buildCodecChip(project.codec, r),
                       ],
-                      const Spacer(),
-                      Tooltip(
-                        message: _formatExactTimestamp(project.uploaded),
-                        child: Text(
-                          _formatJobTimestamp(project.uploaded),
-                          style: TextStyle(
-                            fontSize: r.fontCaption,
-                            color: Colors.grey[400],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  SizedBox(height: r.spaceXS / 2),
-                  _buildPipelineStatus(project),
-                ],
-              ),
-            ),
+                    ),
 
+                    SizedBox(height: r.spaceXS / 2),
+                    _buildPipelineStatus(project),
+                  ],
+                ),
+              ),
+            ),         
             // ── Action row ─────────────────────────────────────────
             Padding(
               padding: EdgeInsets.fromLTRB(

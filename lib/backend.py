@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from tokenize import String
 import uuid
 import zipfile
 from urllib.parse import quote
@@ -138,8 +139,17 @@ _KNOWN_SERVERS = {
     "https://lt2srv-backup.iar.kit.edu",
     "https://lt2srv-sscherrer.isl.iar.kit.edu",
 }
-ALLOWED_TARGET_SERVERS = frozenset(_KNOWN_SERVERS)
 
+# Friendly labels for the servers we know about. The client also has
+# its own copy; this one is only used when the backend records a job
+# without the client having supplied a label.
+_SERVER_LABELS = {
+    "https://lt2srv.iar.kit.edu": "KIT Lecture Translator",
+    "https://lt2srv-backup.iar.kit.edu": "Backup Server",
+    "https://lt2srv-sscherrer.isl.iar.kit.edu": "Developer Own (SScherer)",
+}
+
+ALLOWED_TARGET_SERVERS = frozenset(_KNOWN_SERVERS)
 
 def _is_allowed_server(url: str) -> bool:
     """True if we are willing to forward an upload to this host.
@@ -567,6 +577,15 @@ def rebuild_videos_from_disk():
         # Name: prefer a human-readable title. Fall back to the
         # filename stem if nothing better is available.
         display_name = stem
+        # Source label. Matches the rule in _ensure_source_field():
+        # a filename that mentions YouTube is treated as an import;
+        # everything else is a desktop upload. Recovered entries are
+        # still tagged "_recovered" so the debug endpoint can tell
+        # them apart from fresh uploads.
+        if "youtube" in filename.lower():
+            source = "Imported (YouTube)"
+        else:
+            source = "Desktop Upload"
 
         videos.append(
             {
@@ -923,6 +942,21 @@ def _log_token_email(token: str, where: str) -> None:
             len(parts),
         )
 
+def _email_from_token(token: str) -> str:
+    """Extract the email from a KIT bearer token of the form
+    ``<opaque>|<expiry>|<email>``.
+
+    Returns an empty string when the token is missing or malformed,
+    so the caller can store whatever it has without special-casing.
+    """
+    if not token:
+        return ""
+    parts = token.split("|")
+    if len(parts) >= 3:
+        email = parts[-1].strip()
+        if "@" in email:
+            return email
+    return ""
 
 def _user_home_path(token: str) -> str:
     """Build the LTKIT upload path from the authenticated user.
@@ -4603,10 +4637,10 @@ def session_tts(session_id, label):
 
     # ── 2. Live proxy (unchanged) ─────────────────────────────────
     filename = f"{label}.wav"
-    server = (sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL).rstrip(
-        "/"
-    )
-    kit_url = f"{server_url}/archivemediafile/{session_id}/{label} Audio.wav"
+    server = (
+        sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
+    ).rstrip("/")
+    kit_url = f"{server}/archivemediafile/{session_id}/{label} Audio.wav"
 
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
@@ -7452,6 +7486,51 @@ def video_job_history(video_key):
     )
     return jsonify({"success": True, "count": len(cleaned)}), 200
 
+@app.route(
+    "/video-job-remarks/<video_key>/<session_id>",
+    methods=["POST", "OPTIONS"],
+)
+def update_job_remarks(video_key, session_id):
+    """Set or update the free-text remarks on one job-history entry.
+
+    Body: ``{"remarks": "..."}``. Empty string clears the field.
+    Returns the updated entry so the client can replace its copy
+    without a full re-fetch.
+    """
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    project = next((v for v in videos if v.get("key") == video_key), None)
+    if project is None:
+        return jsonify({"error": "Video not found"}), 404
+
+    _ensure_job_history(project)
+
+    payload = request.get_json(silent=True) or {}
+    if "remarks" not in payload:
+        return jsonify({"error": "remarks is required"}), 400
+
+    remarks = str(payload["remarks"])
+    if len(remarks) > 4096:
+        return jsonify({"error": "remarks is too long (max 4096)"}), 400
+
+    entry = next(
+        (e for e in project["job_history"] if e.get("session_id") == session_id),
+        None,
+    )
+    if entry is None:
+        return jsonify({"error": "Job not found in history"}), 404
+
+    entry["remarks"] = remarks
+    save_state()
+
+    logging.info(
+        "job-remarks: updated for %s (len=%d)",
+        _short_sid(session_id),
+        len(remarks),
+    )
+    return jsonify({"success": True, "job": entry}), 200
+
 
 @app.route("/media/<video_key>")
 def serve_video(video_key):
@@ -9225,16 +9304,41 @@ def _upload_to_internal_server_and_register(
 
     The two callers only differ in what they send in and whether they
     want the stale-session cleanup (``forward_to_internal`` does).
+
+    Session/job records now also carry:
+      * ``pipeline_label`` — a friendly name for the internal server
+        the upload was forwarded to (e.g. "LT2SRV (primary)").
+      * ``pipeline_url``   — the raw base URL of that server.
+      * ``email_used``     — the login email pulled out of the bearer
+        token (``<opaque>|<expiry>|<email>``). Empty string when the
+        token is missing or does not match that shape.
+      * ``remarks``        — free-text note the user can edit later
+        via ``/video-job-remarks/<video_key>/<session_id>``.
     """
 
     session_name = _sanitize_session_name_for_kit(session_name)
 
     _log_token_email(token, "internal_upload")
 
+    # ── Identity + pipeline bookkeeping ─────────────────────────
+    # Captured once, up front, so the same values land on the session
+    # record, the job record, and any log line we emit along the way.
+    email_used = _email_from_token(token)
+    pipeline_url = base_url
+    pipeline_label = _SERVER_LABELS.get(base_url, base_url)
+
+    logging.info(
+        "internal_upload: pipeline=%s url=%s email=%s",
+        pipeline_label,
+        pipeline_url,
+        email_used or "<none>",
+    )
+
     upload_source_path = local_path
     upload_filename_used = os.path.basename(local_path)
     gs_cleanup: list = []
     temp_multipart_path = None
+
     logging.info(
         "internal_upload: uploading %s (%d bytes) to KIT",
         os.path.basename(upload_source_path),
@@ -9358,6 +9462,9 @@ def _upload_to_internal_server_and_register(
                 {
                     "error": f"Internal server returned {resp.status_code}",
                     "response": resp.text[:1000],
+                    "pipeline": pipeline_label,
+                    "pipeline_url": pipeline_url,
+                    "email": email_used,
                 },
                 502,
             )
@@ -9450,6 +9557,9 @@ def _upload_to_internal_server_and_register(
                             "See the backend log for the raw response body."
                         ),
                         "status_code": resp.status_code,
+                        "pipeline": pipeline_label,
+                        "pipeline_url": pipeline_url,
+                        "email": email_used,
                     },
                     502,
                 )
@@ -9487,6 +9597,10 @@ def _upload_to_internal_server_and_register(
             "server": base_url,
             "expected_mt": expected_mt,
             "token": token,  # the token that created this session
+            # ── NEW: pipeline + identity, for display and audit ──
+            "pipeline_label": pipeline_label,
+            "pipeline_url": pipeline_url,
+            "email_used": email_used,
         }
         jobs[session_id] = {
             "id": session_id,
@@ -9498,6 +9612,11 @@ def _upload_to_internal_server_and_register(
             "created_at": utc_now_iso(),
             "config": {"source": "internal_upload"},
             "expected_mt": expected_mt,
+            # ── NEW: pipeline + identity, plus a scratch notes field ──
+            "pipeline_label": pipeline_label,
+            "pipeline_url": pipeline_url,
+            "email_used": email_used,
+            "remarks": "",
         }
 
         _job_start(session_id, video_key, session_name)
@@ -9528,8 +9647,11 @@ def _upload_to_internal_server_and_register(
         save_state()
 
         logging.info(
-            "internal_upload: session %s registered, worker started",
+            "internal_upload: session %s registered, worker started "
+            "(pipeline=%s, email=%s)",
             _short_sid(session_id),
+            pipeline_label,
+            email_used or "<none>",
         )
 
         # ── 7. Build the client response ──────────────────────────
@@ -9552,13 +9674,25 @@ def _upload_to_internal_server_and_register(
                 "session_url": f"{base_url}/archivesession/{session_id}",
                 "output_url": f"/session-output/{session_id}",
                 "download_url": f"/session-zip/{session_id}",
+                # ── NEW: echo the pipeline + identity back to the client ──
+                "pipeline_label": pipeline_label,
+                "pipeline_url": pipeline_url,
+                "email": email_used,
             }
         )
         return response_data, resp.status_code
 
     except requests.exceptions.Timeout:
         logging.error("internal_upload: request timed out", exc_info=True)
-        return {"error": "Request timeout - file may be too large"}, 504
+        return (
+            {
+                "error": "Request timeout - file may be too large",
+                "pipeline": pipeline_label,
+                "pipeline_url": pipeline_url,
+                "email": email_used,
+            },
+            504,
+        )
     except requests.exceptions.RequestException as e:
         logging.error(
             "internal_upload: request error (%s): %s",
@@ -9567,7 +9701,12 @@ def _upload_to_internal_server_and_register(
             exc_info=True,
         )
         return (
-            {"error": f"Request failed: {type(e).__name__}: {e}"},
+            {
+                "error": f"Request failed: {type(e).__name__}: {e}",
+                "pipeline": pipeline_label,
+                "pipeline_url": pipeline_url,
+                "email": email_used,
+            },
             500,
         )
     except OSError as e:
@@ -9578,7 +9717,12 @@ def _upload_to_internal_server_and_register(
             exc_info=True,
         )
         return (
-            {"error": f"Upload failed: {type(e).__name__}: {e}"},
+            {
+                "error": f"Upload failed: {type(e).__name__}: {e}",
+                "pipeline": pipeline_label,
+                "pipeline_url": pipeline_url,
+                "email": email_used,
+            },
             500,
         )
     finally:
@@ -9594,7 +9738,6 @@ def _upload_to_internal_server_and_register(
                     logging.info("🧹 Cleaned up temp file: %s", p)
             except OSError:
                 pass
-
 
 @app.route("/upload", methods=["POST", "OPTIONS"])
 def upload_to_internal():
@@ -9682,6 +9825,12 @@ def upload_to_internal():
                 counter += 1
             file_storage.save(local_path)
             logging.info("✅ New video saved: %s", local_filename)
+
+            # Probe duration / fps / codec now that the file is on
+            # disk. get_video_metadata() is a quick local ffprobe and
+            # its fallbacks (120.0, 30.0, "") keep the dict valid even
+            # if the probe fails.
+            duration, fps, codec = get_video_metadata(local_path)
 
             video_key = str(uuid.uuid4())
             project = {

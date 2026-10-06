@@ -40,6 +40,9 @@ class SessionDetail {
   final DateTime? greenscreenCreatedAt;  // null until ready
   final String greenscreenStatus;     // pending | building | ready | failed
 
+  // identity of the last job run for this video
+  final List<Map<String, dynamic>> jobHistory;
+
   SessionDetail({
     required this.key,
     required this.name,
@@ -57,6 +60,7 @@ class SessionDetail {
     this.greenscreenFileSize = 0,
     this.greenscreenCreatedAt,
     this.greenscreenStatus = 'pending',
+    this.jobHistory = const [],
   });
 
   static DateTime _parseDateTime(String dateStr) {
@@ -100,6 +104,11 @@ class SessionDetail {
             greenscreenFileSize: json['greenscreen_file_size'] as int? ?? 0,
       greenscreenStatus:
           json['greenscreen_status'] as String? ?? 'pending',
+      jobHistory: (json['job_history'] as List?)
+              ?.whereType<Map>()
+              .map((e) => e.cast<String, dynamic>())
+              .toList() ??
+          const [],
     );
   }
 }
@@ -363,6 +372,22 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     }
     return 'admin@example.com';  // legacy fallback
   }  
+
+  /// Read the login email out of the stored bearer token.
+  ///
+  /// KIT tokens look like `<opaque>|<expiry>|<email>`. Returns an
+  /// empty string when the token is missing or malformed, so the UI
+  /// can render "—" without special-casing.
+  Future<String> _tokenEmail() async {
+    final token = await InternalAuthService.getToken();
+    if (token == null || token.isEmpty) return '';
+    final parts = token.split('|');
+    if (parts.length >= 3) {
+      final email = parts.last.trim();
+      if (email.contains('@')) return email;
+    }
+    return '';
+  }
 
   // ═══════════════════════════════════════════════════════════════════
   //  JOB SETTINGS PERSISTENCE
@@ -643,6 +668,8 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           _jobHistory.sort((a, b) =>
               (b['timestamp'] ?? '').compareTo(a['timestamp'] ?? ''));
         });
+        // backfill display fields on legacy entries
+        await _backfillJobHistoryFields();
       } else if (response.statusCode == 404) {
         setState(() => _jobHistory = []);
       } else {
@@ -652,6 +679,75 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       debugPrint('Error loading job history: $e');
     } finally {
       if (mounted) setState(() => _isLoadingHistory = false);
+    }
+  }
+
+  /// Fill in / refresh derived fields on every job-history entry.
+  ///
+  /// `pipeline` is treated as *derived*, not stored: it is recomputed
+  /// from `pipeline_url` and the current `internalServerLabels` map on
+  /// every load. That's what lets a change in `constants.dart` (e.g.
+  /// dropping "(Default for now)" from a label) propagate to entries
+  /// that were saved long before the change.
+  ///
+  /// Everything else here (email, remarks, audio_languages) is written
+  /// only when missing, because those fields record facts about the
+  /// job that the user may have customised — they are not derivable
+  /// from the current state.
+  Future<void> _backfillJobHistoryFields() async {
+    final currentEmail = await _tokenEmail();
+    var changed = false;
+
+    for (final job in _jobHistory) {
+      // ── pipeline_url ─────────────────────────────────────────────
+      // Resolve the URL first: it's the input to the label lookup.
+      // Legacy entries without a URL fall back to the current server.
+      final rawUrl = (job['pipeline_url'] ?? '').toString().trim();
+      final resolvedUrl =
+          rawUrl.isEmpty ? internalServerUrl : rawUrl;
+      if (rawUrl.isEmpty) {
+        job['pipeline_url'] = resolvedUrl;
+        changed = true;
+      }
+
+      // ── pipeline (label) ────────────────────────────────────────
+      // Always recomputed. If the label map in constants.dart changes,
+      // this entry picks up the new text on the very next load.
+      final desiredLabel =
+          internalServerLabels[resolvedUrl] ?? resolvedUrl;
+      if (job['pipeline'] != desiredLabel) {
+        job['pipeline'] = desiredLabel;
+        changed = true;
+      }
+
+      // ── remarks ─────────────────────────────────────────────────
+      if (job['remarks'] == null) {
+        job['remarks'] = '';
+        changed = true;
+      }
+
+      // ── audio_languages (TTS) ──────────────────────────────────
+      if (job['audio_languages'] == null) {
+        job['audio_languages'] = _audioLanguages.join(',');
+        changed = true;
+      }
+
+      // ── email ───────────────────────────────────────────────────
+      // Only filled in; never overwritten once set, because the
+      // email records who actually ran the job at submission time.
+      final existing = (job['email'] ?? '').toString().trim();
+      if (existing.isEmpty && currentEmail.isNotEmpty) {
+        job['email'] = currentEmail;
+        changed = true;
+      } else if (job['email'] == null) {
+        job['email'] = '';
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      if (mounted) setState(() {});
+      await _saveJobHistoryToServer();
     }
   }
 
@@ -714,7 +810,13 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     required String status,
     required bool hasOutput,
     int outputFiles = 0,
+    String remarks = '',
   }) async {
+    // Resolve the pipeline label + token email once.
+    final pipelineLabel =
+        internalServerLabels[internalServerUrl] ?? internalServerUrl;
+    final emailUsed = await _tokenEmail();
+
     final existingIndex = _jobHistory
         .indexWhere((job) => job['session_id'] == sessionId);
 
@@ -723,6 +825,12 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       _jobHistory[existingIndex]['has_output'] = hasOutput;
       if (outputFiles > 0) {
         _jobHistory[existingIndex]['output_files'] = outputFiles;
+      }
+      _jobHistory[existingIndex]['pipeline'] = pipelineLabel;
+      _jobHistory[existingIndex]['pipeline_url'] = internalServerUrl;
+      _jobHistory[existingIndex]['email'] = emailUsed;
+      if (remarks.isNotEmpty) {
+        _jobHistory[existingIndex]['remarks'] = remarks;
       }
     } else {
       final jobEntry = {
@@ -736,7 +844,12 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         'output_files': outputFiles,
         'input_languages': _inputLanguages.join(','),
         'output_languages': _outputLanguages.join(','),
+        'audio_languages': _audioLanguages.join(','), 
         'availability': _availability,
+        'pipeline': pipelineLabel,
+        'pipeline_url': internalServerUrl,
+        'email': emailUsed,
+        'remarks': remarks,
       };
       _jobHistory.insert(0, jobEntry);
     }
@@ -767,6 +880,128 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       }
     } catch (e) {
       debugPrint('Error saving job history: $e');
+    }
+  }
+
+  /// Edit the free-text remarks on one job-history entry.
+  ///
+  /// Saves straight to the backend via /video-job-remarks so the note
+  /// survives a page reload and is shared with every browser that
+  /// opens this video.
+  Future<void> _editJobRemarks(String sessionId) async {
+    final index = _jobHistory
+        .indexWhere((job) => job['session_id'] == sessionId);
+    if (index == -1) return;
+
+    final existing = (_jobHistory[index]['remarks'] ?? '').toString();
+    final controller = TextEditingController(text: existing);
+
+    final saved = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.edit_note, color: Colors.brown),
+            SizedBox(width: 8),
+            Text('Edit remarks'),
+          ],
+        ),
+        content: SizedBox(
+          width: 480,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Job: ${_jobHistory[index]['session_name'] ?? sessionId}',
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                maxLines: 6,
+                minLines: 3,
+                maxLength: 4096,
+                decoration: const InputDecoration(
+                  hintText:
+                      'Notes about this run — quality, speaker notes, '
+                      'which sections to revisit…',
+                  border: OutlineInputBorder(),
+                  alignLabelWithHint: true,
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          if (existing.isNotEmpty)
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, ''),
+              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              child: const Text('Clear'),
+            ),
+          ElevatedButton.icon(
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            icon: const Icon(Icons.save, size: 18),
+            label: const Text('Save'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.brown,
+              foregroundColor: Colors.white,
+            ),
+          ),
+        ],
+      ),
+    );
+
+    controller.dispose();
+    if (saved == null) return;
+
+    // Optimistic local update so the list reflects the change
+    // immediately, then persist. If the server rejects it we roll
+    // back and show the error.
+    final previous = _jobHistory[index]['remarks'];
+    setState(() => _jobHistory[index]['remarks'] = saved);
+
+    try {
+      final url = Uri.parse(
+        '$flaskServerUrl/video-job-remarks/'
+        '${widget.videoKey}/${Uri.encodeComponent(sessionId)}',
+      );
+      final response = await http
+          .post(
+            url,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'remarks': saved}),
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode != 200) {
+        throw Exception('HTTP ${response.statusCode}');
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Remarks saved'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _jobHistory[index]['remarks'] = previous);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to save remarks: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 
@@ -2744,10 +2979,125 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                         'ID: ${sessionId.length > 20 ? '${sessionId.substring(0, 20)}...' : sessionId}',
                         style: TextStyle(fontSize: 11, color: Colors.grey[600]),
                       ),
-                      Text(
-                        '📅 $dateStr • ${job['input_languages'] ?? 'N/A'} → ${job['output_languages'] ?? 'N/A'}',
-                        style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+                      // One line: date • input → output • TTS languages.
+                      // The TTS segment is omitted entirely when the
+                      // job asked for no synthesized audio, so the
+                      // line stays short for translation-only runs.
+                      Builder(
+                        builder: (_) {
+                          final rawAudio =
+                              (job['audio_languages'] ?? '').toString().trim();
+                          final ttsSuffix = rawAudio.isEmpty
+                              ? ''
+                              : '  •  🔊 $rawAudio';
+                          return Text(
+                            '📅 $dateStr'
+                            '  •  ${job['input_languages'] ?? 'N/A'}'
+                            ' → ${job['output_languages'] ?? 'N/A'}'
+                            '$ttsSuffix',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey[500],
+                            ),
+                          );
+                        },
                       ),
+                      // ── Pipeline ──
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Row(
+                          children: [
+                            Icon(Icons.dns_outlined,
+                                size: 11, color: Colors.blueGrey[400]),
+                            const SizedBox(width: 3),
+                            Expanded(
+                              child: Text(
+                                '${job['pipeline'] ?? internalServerUrl}',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.blueGrey[600],
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      // ── Email used for the KIT token ──
+                      // Always rendered so the field is visible even on
+                      // entries whose token has not been captured yet.
+                      // An empty value shows as a muted placeholder
+                      // instead of disappearing.
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Builder(
+                          builder: (_) {
+                            final rawEmail =
+                                (job['email'] ?? '').toString().trim();
+                            final hasEmail = rawEmail.isNotEmpty;
+                            return Row(
+                              children: [
+                                Icon(
+                                  Icons.alternate_email,
+                                  size: 11,
+                                  color: hasEmail
+                                      ? Colors.indigo[400]
+                                      : Colors.grey[400],
+                                ),
+                                const SizedBox(width: 3),
+                                Expanded(
+                                  child: Text(
+                                    hasEmail
+                                        ? rawEmail
+                                        : '— no email in token',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: hasEmail
+                                          ? Colors.indigo[600]
+                                          : Colors.grey[500],
+                                      fontStyle: hasEmail
+                                          ? FontStyle.normal
+                                          : FontStyle.italic,
+                                      fontWeight: hasEmail
+                                          ? FontWeight.w500
+                                          : FontWeight.normal,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                      ),
+                      // ── NEW: remarks (rendered only when set) ──
+                      if ((job['remarks'] ?? '').toString().trim().isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(Icons.sticky_note_2_outlined,
+                                  size: 11, color: Colors.amber[700]),
+                              const SizedBox(width: 3),
+                              Expanded(
+                                child: Text(
+                                  job['remarks'].toString(),
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.brown[600],
+                                    fontStyle: FontStyle.italic,
+                                  ),
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       if (hasOutput)
                         Text(
                           '📁 $outputFiles file${outputFiles > 1 ? 's' : ''} available',
@@ -2783,6 +3133,8 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                           } else if (value == 'check' &&
                               sessionId.isNotEmpty) {
                             _checkHistoricalOutput(sessionId);
+                          } else if (value == 'remarks') {
+                            _editJobRemarks(sessionId);
                           } else if (value == 'delete') {
                             _deleteJobFromHistory(sessionId);
                           } else if (value == 'open' &&
@@ -2815,6 +3167,19 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                                 ],
                               ),
                             ),
+                          // ── NEW ──
+                          const PopupMenuItem(
+                            value: 'remarks',
+                            child: Row(
+                              children: [
+                                Icon(Icons.edit_note,
+                                    size: 18, color: Colors.brown),
+                                SizedBox(width: 8),
+                                Text('Edit remarks',
+                                    style: TextStyle(color: Colors.brown)),
+                              ],
+                            ),
+                          ),
                           if (sessionUrl.isNotEmpty)
                             const PopupMenuItem(
                               value: 'open',
@@ -2865,8 +3230,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
  // session_detail_screen.dart  (replacement)
 
   Widget _buildServerPicker() {
-    final currentLabel =
-        internalServerLabels[internalServerUrl] ?? internalServerUrl;
+    final currentLabel =  labelForServer(internalServerUrl);
 
     // Built-ins first, then user-added ones.
     final allServers = ServerConfigService.allServers;
@@ -2937,7 +3301,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                 for (final url in allServers) {
                   final isSelected = url == internalServerUrl;
                   final isCustom = customSet.contains(url);
-                  final label = internalServerLabels[url] ?? url;
+                  final label = labelForServer(url);
 
                   items.add(
                     PopupMenuItem<String>(

@@ -32,20 +32,27 @@ const String publicServerUrl = 'https://get-all-subtitled.isl.iar.kit.edu';
 // ─── Internal backend server (video processing + Dex OAuth) ────
 // Options the user may pick from. No trailing slash.
 const List<String> internalServerOptions = <String>[
-  'https://lt2srv-sscherrer.isl.iar.kit.edu',
   'https://lt2srv.iar.kit.edu',
   'https://lt2srv-backup.iar.kit.edu',
+  'https://lt2srv-sscherrer.isl.iar.kit.edu',
 ];
 
 const String defaultInternalServerUrl =
     'https://lt2srv-sscherrer.isl.iar.kit.edu';
 
 const Map<String, String> internalServerLabels = {
+  // Mirrors `_SERVER_LABELS` in backend.py. Keep the two in sync —
+  // if a label here disagrees with the backend, the job-history rows
+  // will show whichever one the side that wrote them had at the time.
+  'https://lt2srv.iar.kit.edu': 'KIT Lecture Translator',
+  'https://lt2srv-backup.iar.kit.edu': 'Backup Server',
   'https://lt2srv-sscherrer.isl.iar.kit.edu':
-      'lt2srv-sscherrer (Default for now)',
-  'https://lt2srv.iar.kit.edu': 'LT Main',
-  'https://lt2srv-backup.iar.kit.edu': 'LT Backup',
+      'Developer Own (SScherer)',
 };
+
+/// Label for a server, falling back to the raw URL for unknown hosts.
+String labelForServer(String url) =>
+    internalServerLabels[url] ?? url;
 
 /// The server the app is currently pointing at. Mutable on purpose:
 /// `ServerConfigService.setServer()` updates this after the user picks
