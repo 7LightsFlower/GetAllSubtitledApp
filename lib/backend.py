@@ -6,6 +6,7 @@ import contextvars
 import datetime
 import importlib
 import hashlib
+import html as _html_mod
 import io
 import json
 import logging
@@ -18,13 +19,12 @@ import subprocess
 import tempfile
 import threading
 import time
-from tokenize import String
+import urllib
 import uuid
 import zipfile
 from urllib.parse import quote
 
 import requests
-import urllib
 import yt_dlp
 from flask import (
     Flask,
@@ -88,6 +88,7 @@ _USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
+
 
 def _curl_safe_url(url: str) -> str:
     """Percent-encode a URL so curl can parse it.
@@ -165,6 +166,7 @@ _SERVER_LABELS = {
 }
 
 ALLOWED_TARGET_SERVERS = frozenset(_KNOWN_SERVERS)
+
 
 def _is_allowed_server(url: str) -> bool:
     """True if we are willing to forward an upload to this host.
@@ -682,6 +684,7 @@ def _media_cookie_is_dex() -> bool:
     """True when the configured media cookie is a Dex session cookie."""
     return bool(_kit_session_cookie)
 
+
 def ensure_authenticated(token: str) -> bool:
     """Check if the current session has a valid cookie."""
     if token == _state["token"] and internal_session.cookies:
@@ -957,6 +960,7 @@ def _log_token_email(token: str, where: str) -> None:
             len(parts),
         )
 
+
 def _email_from_token(token: str) -> str:
     """Extract the email from a KIT bearer token of the form
     ``<opaque>|<expiry>|<email>``.
@@ -972,6 +976,7 @@ def _email_from_token(token: str) -> str:
         if "@" in email:
             return email
     return ""
+
 
 def _user_home_path(token: str) -> str:
     """Build the LTKIT upload path from the authenticated user.
@@ -1121,6 +1126,7 @@ def _ensure_job_history(project: dict) -> dict:
 # client-side cap so the two never drift.
 MAX_JOB_HISTORY_ENTRIES = 20
 
+
 # Consecutive HTTP 404s per session. Used to keep a wrong or stale
 # session id from spamming the log and the progress panel while the
 # background worker spins. Reset as soon as the session responds.
@@ -1266,8 +1272,10 @@ def _capture_auth_token():
     if auth.startswith("Bearer "):
         token = auth[7:].strip()
         if token:
-            logging.debug("before_request: token email = %r",
-                      token.split("|")[-1].strip() if "|" in token else "<none>")
+            logging.debug(
+                "before_request: token email = %r",
+                token.split("|")[-1].strip() if "|" in token else "<none>",
+            )
             _state["token"] = token
             return
     cookie = request.cookies.get("_forward_auth", "")
@@ -1997,9 +2005,16 @@ def get_video_metadata(video_path):
     return 120.0, 30.0, ""
 
 
-def curl_download(url, output_path, token, *,
-                  cookie_only=False, media=False, referer=None,
-                  anonymous=False):
+def curl_download(
+    url,
+    output_path,
+    token,
+    *,
+    cookie_only=False,
+    media=False,
+    referer=None,
+    anonymous=False,
+):
     """Download a file using curl.
 
     media=True      → send the headers an <audio> element would send.
@@ -2015,27 +2030,38 @@ def curl_download(url, output_path, token, *,
         auth_headers = []
         if not anonymous and not cookie_only:
             auth_headers = [
-                "-H", f"X-Forward-Auth: {token}",
-                "-H", f"Authorization: Bearer {token}",
+                "-H",
+                f"X-Forward-Auth: {token}",
+                "-H",
+                f"Authorization: Bearer {token}",
             ]
 
         media_headers = []
         if media:
             media_headers = [
-                "-H", "Accept: audio/webm,audio/ogg,audio/*;q=0.9,*/*;q=0.5",
-                "-H", "Accept-Encoding: identity;q=1, *;q=0",
-                "-H", "Range: bytes=0-",
+                "-H",
+                "Accept: audio/webm,audio/ogg,audio/*;q=0.9,*/*;q=0.5",
+                "-H",
+                "Accept-Encoding: identity;q=1, *;q=0",
+                "-H",
+                "Range: bytes=0-",
             ]
             if referer:
                 media_headers += ["-H", f"Referer: {referer}"]
 
         cmd = [
-            "curl", "-s", "-L", "--insecure",
-            "--connect-timeout", "30",
-            "--max-time", "3600",
+            "curl",
+            "-s",
+            "-L",
+            "--insecure",
+            "--connect-timeout",
+            "30",
+            "--max-time",
+            "3600",
             *auth_headers,
             *media_headers,
-            "-H", "User-Agent: Mozilla/5.0 (compatible; LT-Uploader/1.0)",
+            "-H",
+            "User-Agent: Mozilla/5.0 (compatible; LT-Uploader/1.0)",
         ]
 
         # Only send the _forward_auth cookie when we were asked to use
@@ -2044,8 +2070,10 @@ def curl_download(url, output_path, token, *,
             cmd += ["--cookie", f"_forward_auth={token}"]
 
         cmd += [
-            "-w", "%{http_code}",
-            "-o", output_path,
+            "-w",
+            "%{http_code}",
+            "-o",
+            output_path,
             url,
         ]
         result = subprocess.run(
@@ -2059,27 +2087,31 @@ def curl_download(url, output_path, token, *,
 
         if not status_str:
             logging.warning(
-                "curl_download: curl produced no status for %s — "
-                "rc=%s stderr=%r",
+                "curl_download: curl produced no status for %s — rc=%s stderr=%r",
                 url,
                 result.returncode,
                 (result.stderr or "")[:300],
             )
 
-        if (status in (200, 206)
-                and os.path.exists(output_path)
-                and os.path.getsize(output_path) > 1000):
+        if (
+            status in (200, 206)
+            and os.path.exists(output_path)
+            and os.path.getsize(output_path) > 1000
+        ):
             if not output_path.endswith(".html"):
                 try:
                     with open(output_path, "rb") as f:
                         head = f.read(32)
                     stripped = head.lstrip().lower()
-                    if (stripped.startswith(b"<!doctype html")
-                            or stripped.startswith(b"<html")
-                            or stripped.startswith(b"<!doctype")):
+                    if (
+                        stripped.startswith(b"<!doctype html")
+                        or stripped.startswith(b"<html")
+                        or stripped.startswith(b"<!doctype")
+                    ):
                         logging.info(
                             "curl_download: %s → 200 but body is HTML; "
-                            "treating as failure", url,
+                            "treating as failure",
+                            url,
                         )
                         os.remove(output_path)
                         return False
@@ -2088,11 +2120,11 @@ def curl_download(url, output_path, token, *,
             return True
 
         if status not in (200, 206):
-            logging.info("curl_download: %s → HTTP %s (discarding)",
-                         url, status)
+            logging.info("curl_download: %s → HTTP %s (discarding)", url, status)
         else:
-            logging.info("curl_download: %s → %s but body too small or HTML",
-                         url, status)
+            logging.info(
+                "curl_download: %s → %s but body too small or HTML", url, status
+            )
 
         if os.path.exists(output_path):
             os.remove(output_path)
@@ -2103,8 +2135,8 @@ def curl_download(url, output_path, token, *,
     except OSError as e:
         logging.warning("Curl error for %s: %s", url, str(e))
         return False
-    
-    
+
+
 def curl_download_with_headers(url, output_path, token):
     """Download a file using curl with an Accept: application/json header.
 
@@ -2541,7 +2573,9 @@ def _download_session_files_locked(session_id, token, server_url):
         if tts_files:
             logging.info(
                 "Downloaded %d TTS file(s) for %s: %s",
-                len(tts_files), _short_sid(session_id), tts_files,
+                len(tts_files),
+                _short_sid(session_id),
+                tts_files,
             )
             _job_log(
                 session_id,
@@ -2560,9 +2594,7 @@ def _download_session_files_locked(session_id, token, server_url):
                 level="warning",
             )
     except (OSError, ValueError, TypeError, requests.exceptions.RequestException) as e:
-        logging.warning(
-            "TTS download failed for %s: %s", _short_sid(session_id), e
-        )
+        logging.warning("TTS download failed for %s: %s", _short_sid(session_id), e)
         _job_log(
             session_id,
             f"TTS download failed: {e}",
@@ -2593,15 +2625,26 @@ def _download_session_files_locked(session_id, token, server_url):
     )
     return len(files) > 0
 
+
 # Minimum plausible size for a real KIT TTS WAV. The HTML error page
 # KIT returns for a TTS track that is not yet available (or that we
 # are not authorized to fetch) is ~1.3 KB and starts with "<!DOCTYPE".
 # A real TTS WAV is tens of MB. 50 KB sits comfortably between.
+# _MIN_WAV_BYTES and _looks_like_wav are defined near the TTS
+# download helpers, above — they are used by /session-tts and
+# _session_files_look_incomplete too.
 _MIN_WAV_BYTES = 50_000
 
 
 def _looks_like_wav(path: str) -> bool:
-    """True iff the file starts with the RIFF/WAVE magic bytes."""
+    """True iff the file starts with the RIFF/WAVE magic bytes.
+
+    KIT returns a 200 with an HTML status page when a TTS track is
+    not (yet) available. The page is ~1.3 KB and starts with
+    '<!DOCTYPE html>'. Saving that as a .wav poisons the session:
+    the browser then fails to decode it and audioplayers raises
+    WebAudioError Code 4. This check is the gate that stops it.
+    """
     try:
         with open(path, "rb") as f:
             header = f.read(12)
@@ -2612,11 +2655,9 @@ def _looks_like_wav(path: str) -> bool:
     return header[0:4] == b"RIFF" and header[8:12] == b"WAVE"
 
 
-import html as _html_mod  # if not already imported at the top
-
-
-def _tts_urls_from_html(session_id: str, session_dir: str,
-                        server_url: str) -> dict[str, str]:
+def _tts_urls_from_html(
+    _session_id: str, session_dir: str, server_url: str
+) -> dict[str, str]:
     """Parse index.html for TTS <source> URLs.
 
     Returns {label: absolute_url}, where label is the dropdown label
@@ -2669,11 +2710,7 @@ def _tts_urls_from_html(session_id: str, session_dir: str,
         tail = src.rstrip("/").rsplit("/", 1)[-1]
         label = _html_mod.unescape(tail)
         # KIT sometimes percent-encodes the whole label, sometimes not.
-        try:
-            from urllib.parse import unquote as _unquote
-            label = _unquote(label)
-        except Exception:
-            pass
+        label = urllib.parse.unquote(label)
         if label.lower().endswith(".wav"):
             label = label[:-4]
         if not label:
@@ -2684,8 +2721,9 @@ def _tts_urls_from_html(session_id: str, session_dir: str,
     return urls
 
 
-def download_tts_files(session_id, token, server_url=None, languages=None,
-                       *, retries=4, delay=20):
+def download_tts_files(
+    session_id, _token, server_url=None, languages=None, *, retries=4, delay=20
+):
     """Download per-language TTS WAVs into the session folder.
 
     Two things about KIT's TTS endpoint, both learned from its own
@@ -2745,7 +2783,9 @@ def download_tts_files(session_id, token, server_url=None, languages=None,
 
     logging.info(
         "download_tts_files: want TTS for %d language(s) on %s: %s",
-        len(wanted), _short_sid(session_id), [w[1] for w in wanted],
+        len(wanted),
+        _short_sid(session_id),
+        [w[1] for w in wanted],
     )
 
     referer = f"{server_url}/archivesession/{session_id}"
@@ -2760,9 +2800,11 @@ def download_tts_files(session_id, token, server_url=None, languages=None,
             local_path = os.path.join(session_dir, local_name)
 
             # Already on disk and valid → count it, skip the fetch.
-            if (os.path.exists(local_path)
-                    and os.path.getsize(local_path) > _MIN_WAV_BYTES
-                    and _looks_like_wav(local_path)):
+            if (
+                os.path.exists(local_path)
+                and os.path.getsize(local_path) > _MIN_WAV_BYTES
+                and _looks_like_wav(local_path)
+            ):
                 if local_name not in downloaded:
                     downloaded.append(local_name)
                 continue
@@ -2783,14 +2825,17 @@ def download_tts_files(session_id, token, server_url=None, languages=None,
 
             logging.info(
                 "download_tts_files: GET %s (attempt %d/%d)",
-                kit_url, attempt, retries,
+                kit_url,
+                attempt,
+                retries,
             )
 
             ok = curl_download(
-                kit_url, local_path,
-                "",                 # no token
-                anonymous=True,     # no cookie, no header
-                media=True,         # browser-like Accept/Range
+                kit_url,
+                local_path,
+                "",  # no token
+                anonymous=True,  # no cookie, no header
+                media=True,  # browser-like Accept/Range
                 referer=referer,
             )
 
@@ -2798,7 +2843,8 @@ def download_tts_files(session_id, token, server_url=None, languages=None,
                 size = os.path.getsize(local_path)
                 logging.info(
                     "download_tts_files: wrote %s (%d bytes)",
-                    local_name, size,
+                    local_name,
+                    size,
                 )
                 _job_log(session_id, f"Downloaded {local_name}")
                 _job_add_file(session_id, local_name, size)
@@ -2819,15 +2865,21 @@ def download_tts_files(session_id, token, server_url=None, languages=None,
             logging.info(
                 "download_tts_files: %d track(s) still missing on %s "
                 "— retrying in %ds (attempt %d/%d): %s",
-                len(still_missing), _short_sid(session_id),
-                delay, attempt, retries, [t[1] for t in still_missing],
+                len(still_missing),
+                _short_sid(session_id),
+                delay,
+                attempt,
+                retries,
+                [t[1] for t in still_missing],
             )
             time.sleep(delay)
 
     if remaining:
         logging.warning(
             "download_tts_files: gave up on %s after %d attempt(s): %s",
-            _short_sid(session_id), retries, [t[1] for t in remaining],
+            _short_sid(session_id),
+            retries,
+            [t[1] for t in remaining],
         )
 
     return downloaded
@@ -4645,7 +4697,8 @@ def session_tts(session_id, label):
             logging.warning(
                 "session_tts: %s is only %d bytes — not a real WAV, "
                 "treating as missing",
-                name, os.path.getsize(path),
+                name,
+                os.path.getsize(path),
             )
             continue
         if not _looks_like_wav(path):
@@ -4664,10 +4717,9 @@ def session_tts(session_id, label):
         )
 
     # ── 2. Live proxy (unchanged) ─────────────────────────────────
-    filename = f"{label}.wav"
-    server = (
-        sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
-    ).rstrip("/")
+    server = (sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL).rstrip(
+        "/"
+    )
     kit_url = f"{server}/archivemediafile/{session_id}/{label} Audio.wav"
 
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
@@ -4719,7 +4771,7 @@ def session_tts(session_id, label):
             jsonify({"error": f"Upstream returned {r.status_code}"}),
             r.status_code,
         )
-    
+
     # KIT returns 200 with an HTML error page when a TTS file is
     # missing. Forwarding that as audio/wav causes the browser's
     # <audio> element to fail with DEMUXER_ERROR_COULD_NOT_OPEN.
@@ -4844,10 +4896,9 @@ def session_tts_backfill_all():
     if request.method == "OPTIONS":
         return ("", 204)
 
-    request_token = (
-        request.headers.get("Authorization", "").replace("Bearer ", "")
-        or request.cookies.get("_forward_auth", "")
-    )
+    request_token = request.headers.get("Authorization", "").replace(
+        "Bearer ", ""
+    ) or request.cookies.get("_forward_auth", "")
 
     results = {}
     for sid in list(sessions.keys()):
@@ -4861,8 +4912,12 @@ def session_tts_backfill_all():
         server = sessions.get(sid, {}).get("server") or INTERNAL_SERVER_URL
         try:
             results[sid] = download_tts_files(sid, token, server)
-        except (OSError, ValueError, TypeError,
-                requests.exceptions.RequestException) as e:
+        except (
+            OSError,
+            ValueError,
+            TypeError,
+            requests.exceptions.RequestException,
+        ) as e:
             logging.warning("Backfill failed for %s: %s", _short_sid(sid), e)
             results[sid] = {"error": str(e)}
 
@@ -4882,19 +4937,24 @@ def session_tts_diagnose(session_id, label):
     URL KIT actually serves TTS from on a given host, then trim
     `download_tts_files`'s candidate list accordingly.
     """
-    server = (
-        sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
-    ).rstrip("/")
+    server = (sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL).rstrip(
+        "/"
+    )
 
     token = _effective_token(session_id, fallback="")
     if not token:
-        return jsonify({
-            "error": "no_token",
-            "message": (
-                "Open the session screen once so the backend caches a "
-                "token, then retry."
+        return (
+            jsonify(
+                {
+                    "error": "no_token",
+                    "message": (
+                        "Open the session screen once so the backend caches a "
+                        "token, then retry."
+                    ),
+                }
             ),
-        }), 400
+            400,
+        )
 
     enc = quote(f"{label}.wav")
     enc_label = quote(label)
@@ -4914,16 +4974,17 @@ def session_tts_diagnose(session_id, label):
                 continue
 
             headers = [
-                "-H", "User-Agent: Mozilla/5.0 (diagnostic)",
+                "-H",
+                "User-Agent: Mozilla/5.0 (diagnostic)",
             ]
             if mode == "bearer":
                 headers += [
-                    "-H", f"X-Forward-Auth: {token}",
-                    "-H", f"Authorization: Bearer {token}",
+                    "-H",
+                    f"X-Forward-Auth: {token}",
+                    "-H",
+                    f"Authorization: Bearer {token}",
                 ]
-            cookie_value = (
-                _media_cookie(token) if mode == "dex_cookie" else token
-            )
+            cookie_value = _media_cookie(token) if mode == "dex_cookie" else token
             headers += ["--cookie", f"_forward_auth={cookie_value}"]
 
             try:
@@ -4933,8 +4994,10 @@ def session_tts_diagnose(session_id, label):
                         "-s",
                         "-L",
                         "--insecure",
-                        "-o", "/dev/null",
-                        "-D", "-",
+                        "-o",
+                        "/dev/null",
+                        "-D",
+                        "-",
                         *headers,
                         url,
                     ],
@@ -4944,11 +5007,13 @@ def session_tts_diagnose(session_id, label):
                     check=False,
                 )
             except (subprocess.TimeoutExpired, OSError) as e:
-                results.append({
-                    "url": url,
-                    "mode": mode,
-                    "error": str(e),
-                })
+                results.append(
+                    {
+                        "url": url,
+                        "mode": mode,
+                        "error": str(e),
+                    }
+                )
                 continue
 
             head = proc.stdout or ""
@@ -4973,21 +5038,28 @@ def session_tts_diagnose(session_id, label):
             elif first_line.startswith("HTTP") and " 200" in first_line:
                 verdict = "html_or_other"
 
-            results.append({
-                "url": url,
-                "mode": mode,
-                "status_line": first_line,
-                "content_type": ctype,
-                "content_length": clen,
-                "verdict": verdict,
-            })
+            results.append(
+                {
+                    "url": url,
+                    "mode": mode,
+                    "status_line": first_line,
+                    "content_type": ctype,
+                    "content_length": clen,
+                    "verdict": verdict,
+                }
+            )
 
-    return jsonify({
-        "session_id": session_id,
-        "label": label,
-        "has_dex_cookie": _media_cookie_is_dex(),
-        "results": results,
-    }), 200
+    return (
+        jsonify(
+            {
+                "session_id": session_id,
+                "label": label,
+                "has_dex_cookie": _media_cookie_is_dex(),
+                "results": results,
+            }
+        ),
+        200,
+    )
 
 
 @app.route("/session-zip/<path:session_id>", methods=["GET"])
@@ -5921,8 +5993,8 @@ def _remote_size(url: str, token: str, timeout: int = 30) -> tuple[int, int]:
 
 
 # ─── SESSION COMPLETENESS GATES ─────────────────────────────────────────
-MIN_MESSAGES_BYTES = 5_000      # bytes; used in _messages_look_done
-MIN_MESSAGES_COUNT = 1       # messages; used in wait_for_session_ready
+MIN_MESSAGES_BYTES = 5_000  # bytes; used in _messages_look_done
+MIN_MESSAGES_COUNT = 1  # messages; used in wait_for_session_ready
 _STABLE_NEEDED = 3
 
 # How many bytes of growth in one poll still count as "quiet". Below
@@ -6262,6 +6334,7 @@ def _fetch_archive_messages_page(session_id, token, server_url, page, limit=1000
         )
         return None
 
+
 # Last total reported per session, so the "reports total=N" line is
 # printed only when the count actually changes. Keyed by session id.
 _last_reported_total: dict[str, int] = {}
@@ -6306,7 +6379,8 @@ def _fetch_all_archive_messages(
         if should_log:
             logging.info(
                 "archive_messages: session %s reports total=%d",
-                _short_sid(session_id), total,
+                _short_sid(session_id),
+                total,
             )
         chunk = payload.get("data") or []
         all_messages.extend(chunk)
@@ -6621,10 +6695,11 @@ def wait_for_session_ready(
                 )
 
         # ── Readiness gate ───────────────────────────────────────────
-        # ── Readiness gate ───────────────────────────────────────────
         if stable_count >= _STABLE_NEEDED:
             ready_messages = _fetch_all_archive_messages(
-                session_id, token, server_url,
+                session_id,
+                token,
+                server_url,
             )
             raw = json.dumps(ready_messages).encode("utf-8")
             if _messages_look_done(raw, expected_langs):
@@ -6634,30 +6709,38 @@ def wait_for_session_ready(
                 # 5-second window, don't bother fetching; go back to
                 # waiting.
                 probe = _fetch_archive_messages_page(
-                    session_id, token, server_url, page=1, limit=1,
+                    session_id,
+                    token,
+                    server_url,
+                    page=1,
+                    limit=1,
                 )
                 new_total = (probe or {}).get("total", 0) if probe else 0
-                if new_total == total:   # total from this iteration's probe
+                if new_total == total:  # total from this iteration's probe
                     ready_messages2 = _fetch_all_archive_messages(
-                        session_id, token, server_url,
+                        session_id,
+                        token,
+                        server_url,
                     )
                     raw2 = json.dumps(ready_messages2).encode("utf-8")
                     if _messages_look_done(raw2, expected_langs):
                         logging.info(
                             "✅ Session %s appears complete (%d msgs)",
-                            _short_sid(session_id), len(ready_messages2),
+                            _short_sid(session_id),
+                            len(ready_messages2),
                         )
                         return True
                     logging.info(
-                        "Session %s: second readiness check failed, "
-                        "still growing",
+                        "Session %s: second readiness check failed, still growing",
                         _short_sid(session_id),
                     )
                 else:
                     logging.info(
                         "Session %s: total grew from %d to %d during "
                         "the readiness check — continuing to wait",
-                        _short_sid(session_id), size, new_total,
+                        _short_sid(session_id),
+                        size,
+                        new_total,
                     )
             else:
                 logging.warning(
@@ -6741,25 +6824,48 @@ def process_session_in_background(
                 _short_sid(session_id),
             )
 
+        # download_session_files() already attempts TTS as part of its
+        # normal flow (see _download_session_files_locked). If any TTS
+        # WAV is missing after it returns, retry once here — that's the
+        # case KIT's "TTS not generated yet" behaviour produces, and a
+        # second pass is the only thing that recovers it. Otherwise a
+        # second download_tts_files() call is pure duplicated work.
         ok = download_session_files(session_id, effective_token, server_url)
+
+        if ok:
+            tts_dir = _session_dir(session_id)
+            have_tts = any(
+                f.startswith("tts_")
+                and f.endswith(".wav")
+                and os.path.getsize(os.path.join(tts_dir, f)) > _MIN_WAV_BYTES
+                and _looks_like_wav(os.path.join(tts_dir, f))
+                for f in os.listdir(tts_dir)
+            ) if os.path.isdir(tts_dir) else False
+
+            if not have_tts:
+                # Try one more time — the first pass may have run before
+                # KIT finished synthesizing.
+                logging.info(
+                    "process_session_in_background: no valid TTS after "
+                    "download_session_files, retrying for %s",
+                    _short_sid(session_id),
+                )
+                tts = download_tts_files(session_id, effective_token, server_url)
+                if not tts:
+                    ok = False
+                    _job_log(
+                        session_id,
+                        "Session files saved, but no TTS tracks could be "
+                        "fetched. KIT may not have generated them yet, or "
+                        "they may have expired.",
+                        level="warning",
+                    )
 
         job = jobs.get(session_id)
         if job:
             job["status"] = "completed" if ok else "partial"
             job["progress"] = 1.0
         save_state()
-
-        tts = download_tts_files(session_id, token, server_url)
-        if not tts:
-            # Session is downloaded but TTS is incomplete — mark it partial
-            # so the user sees it and can retry later.
-            ok = False
-            _job_log(
-                session_id,
-                "Session files saved, but no TTS tracks could be fetched. "
-                "KIT may not have generated them yet, or they may have expired.",
-                level="warning",
-            )
 
         _job_finish(session_id, error=None if ok else "Partial download")
         logging.info("✅ Background download finished for %s", _short_sid(session_id))
@@ -7318,7 +7424,7 @@ def get_videos():
 
     for video in videos:
         _ensure_greenscreen_fields(video)
-        _ensure_source_field(video)              
+        _ensure_source_field(video)
         _ensure_codec_field(video)
     # ============ DEDUPLICATION LOGIC ============
     # Group videos by filename (without UUID prefix)
@@ -7432,7 +7538,7 @@ def video_detail(video_key):
     for project in videos:
         if project["key"] == video_key:
             _ensure_greenscreen_fields(project)
-            _ensure_source_field(project)       
+            _ensure_source_field(project)
             _ensure_codec_field(project)
             detail = project.copy()
             detail["thumbnail_url"] = _thumbnail_absolute_url(project)
@@ -7520,6 +7626,7 @@ def video_job_history(video_key):
         video_key,
     )
     return jsonify({"success": True, "count": len(cleaned)}), 200
+
 
 @app.route(
     "/video-job-remarks/<video_key>/<session_id>",
@@ -7671,14 +7778,14 @@ def finish_upload():
         "last_opened": None,
         "duration": duration,
         "fps": fps,
-        "codec": codec,                              # ── NEW ──
+        "codec": codec,  # ── NEW ──
         "file_size": file_size,
         "segment_count": 0,
         "languages": ["en"],
         "thumbnail_url": thumbnail_url,
         "segmentation_done": auto_segmentation,
         "segmentation_progress": 100 if auto_segmentation else 0,
-        "source": source,                            # ── NEW ──
+        "source": source,  # ── NEW ──
     }
     videos.append(project)
 
@@ -7887,6 +7994,7 @@ def update_project_source(video_key):
         200,
     )
 
+
 # ─── JOB ENDPOINTS ──────────────────────────────────────────────────────
 
 
@@ -7942,31 +8050,6 @@ def _is_meaningful_file(path: str) -> bool:
     if name.endswith(".vtt") or name.endswith(".txt") or name.endswith(".json"):
         return size > 20
     return size > 1000
-
-# Minimum plausible size for a real KIT TTS WAV. Real files are
-# tens of MB; the HTML error page KIT returns for a not-yet-ready
-# session is ~1.3 KB. 50 KB is comfortably above the error page and
-# comfortably below the shortest legitimate TTS clip.
-_MIN_WAV_BYTES = 50_000
-
-
-def _looks_like_wav(path: str) -> bool:
-    """True iff the file starts with the RIFF/WAVE magic bytes.
-
-    KIT returns a 200 with an HTML status page when a TTS track is
-    not (yet) available. The page is ~1.3 KB and starts with
-    '<!DOCTYPE html>'. Saving that as a .wav poisons the session:
-    the browser then fails to decode it and audioplayers raises
-    WebAudioError Code 4. This check is the gate that stops it.
-    """
-    try:
-        with open(path, "rb") as f:
-            header = f.read(12)
-    except OSError:
-        return False
-    if len(header) < 12:
-        return False
-    return header[0:4] == b"RIFF" and header[8:12] == b"WAVE"
 
 
 @app.route("/session-output/<path:session_id>", methods=["GET"])
@@ -9064,9 +9147,9 @@ def youtube_download_and_upload():
                     "file_size": file_size,
                     "duration": duration,
                     "fps": fps,
-                    "codec": codec,                  
+                    "codec": codec,
                     "thumbnail_url": thumbnail_url,
-                    "source": youtube_url,           
+                    "source": youtube_url,
                 }
             )
 
@@ -9773,6 +9856,7 @@ def _upload_to_internal_server_and_register(
                     logging.info("🧹 Cleaned up temp file: %s", p)
             except OSError:
                 pass
+
 
 @app.route("/upload", methods=["POST", "OPTIONS"])
 def upload_to_internal():
