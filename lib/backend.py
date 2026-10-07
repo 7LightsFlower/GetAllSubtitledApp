@@ -2066,7 +2066,7 @@ def curl_download(url, output_path, token, *,
                 (result.stderr or "")[:300],
             )
 
-        if (status == 200
+        if (status in (200, 206)
                 and os.path.exists(output_path)
                 and os.path.getsize(output_path) > 1000):
             if not output_path.endswith(".html"):
@@ -2087,11 +2087,12 @@ def curl_download(url, output_path, token, *,
                     pass
             return True
 
-        if status != 200:
+        if status not in (200, 206):
             logging.info("curl_download: %s → HTTP %s (discarding)",
                          url, status)
         else:
-            logging.info("curl_download: %s → 200 but body too small", url)
+            logging.info("curl_download: %s → %s but body too small or HTML",
+                         url, status)
 
         if os.path.exists(output_path):
             os.remove(output_path)
