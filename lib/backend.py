@@ -146,7 +146,7 @@ _KNOWN_SERVERS = {
 _SERVER_LABELS = {
     "https://lt2srv.iar.kit.edu": "KIT Lecture Translator",
     "https://lt2srv-backup.iar.kit.edu": "Backup Server",
-    "https://lt2srv-sscherrer.isl.iar.kit.edu": "Developer Own (SScherer)",
+    "https://lt2srv-sscherrer.isl.iar.kit.edu": "Developer Own (SScherrer)",
 }
 
 ALLOWED_TARGET_SERVERS = frozenset(_KNOWN_SERVERS)

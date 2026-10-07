@@ -47,7 +47,7 @@ const Map<String, String> internalServerLabels = {
   'https://lt2srv.iar.kit.edu': 'KIT Lecture Translator',
   'https://lt2srv-backup.iar.kit.edu': 'Backup Server',
   'https://lt2srv-sscherrer.isl.iar.kit.edu':
-      'Developer Own (SScherer)',
+      'Developer Own (SScherrer)',
 };
 
 /// Label for a server, falling back to the raw URL for unknown hosts.
