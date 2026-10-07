@@ -24,6 +24,7 @@ import zipfile
 from urllib.parse import quote
 
 import requests
+import urllib
 import yt_dlp
 from flask import (
     Flask,
@@ -87,6 +88,20 @@ _USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
+
+def _curl_safe_url(url: str) -> str:
+    """Percent-encode a URL so curl can parse it.
+
+    Spaces, parentheses, and other characters that are legal in a
+    *filename* but not in a *URL* must be encoded before curl sees
+    them, or curl exits with code 3 and returns no status.
+    """
+    parts = urllib.parse.urlsplit(url)
+    path = urllib.parse.quote(parts.path, safe="/%")
+    query = urllib.parse.quote(parts.query, safe="=&%")
+    return urllib.parse.urlunsplit(
+        (parts.scheme, parts.netloc, path, query, parts.fragment)
+    )
 
 
 @app.after_request
@@ -1995,6 +2010,7 @@ def curl_download(url, output_path, token, *,
                        which KIT serves purely on the strength of the
                        base64 session id in the path.
     """
+    url = _curl_safe_url(url)
     try:
         auth_headers = []
         if not anonymous and not cookie_only:
@@ -2015,6 +2031,8 @@ def curl_download(url, output_path, token, *,
 
         cmd = [
             "curl", "-s", "-L", "--insecure",
+            "--connect-timeout", "30",
+            "--max-time", "3600",
             *auth_headers,
             *media_headers,
             "-H", "User-Agent: Mozilla/5.0 (compatible; LT-Uploader/1.0)",
@@ -2031,13 +2049,22 @@ def curl_download(url, output_path, token, *,
             url,
         ]
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=300, check=False
+            cmd, capture_output=True, text=True, timeout=3660, check=False
         )
         status_str = (result.stdout or "").strip()
         try:
             status = int(status_str)
         except ValueError:
             status = 0
+
+        if not status_str:
+            logging.warning(
+                "curl_download: curl produced no status for %s — "
+                "rc=%s stderr=%r",
+                url,
+                result.returncode,
+                (result.stderr or "")[:300],
+            )
 
         if (status == 200
                 and os.path.exists(output_path)
@@ -5251,14 +5278,21 @@ def _extract_simple_language_name(language):
 
     # 2. Strip the wrapper phrases
     clean = language
+    stripped = False
     for prefix in (
         "Translation (Language ",
         "Transcript (Original ASR - ",
         "Transcript (Structured - ",
         "Transcript (",
     ):
-        clean = clean.replace(prefix, "")
-    clean = clean.replace(")", "").strip()
+        if prefix in clean:
+            clean = clean.replace(prefix, "")
+            stripped = True
+
+    if stripped:
+        clean = clean.rstrip(")").strip()
+    else:
+        clean = clean.strip()
 
     # 3. A bare code, e.g. "de"
     if _LANG_CODE_RE.match(clean):
