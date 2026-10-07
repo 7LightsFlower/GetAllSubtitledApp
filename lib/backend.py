@@ -97,7 +97,7 @@ def _curl_safe_url(url: str) -> str:
     them, or curl exits with code 3 and returns no status.
     """
     parts = urllib.parse.urlsplit(url)
-    path = urllib.parse.quote(parts.path, safe="/%")
+    path = urllib.parse.quote(parts.path, safe="/%=")
     query = urllib.parse.quote(parts.query, safe="=&%")
     return urllib.parse.urlunsplit(
         (parts.scheme, parts.netloc, path, query, parts.fragment)
