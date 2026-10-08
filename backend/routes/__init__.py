@@ -1,8 +1,29 @@
 """Register all blueprints on the Flask app."""
 
-from . import auth, debug, exports, sessions, tts, upload, videos, youtube
+from . import (
+    auth,
+    debug,
+    exports,
+    sessions,
+    settings,
+    tts,
+    upload,
+    videos,
+    youtube,
+)
 
 
 def register_all(app):
-    for module in (auth, videos, sessions, exports, tts, youtube, upload, debug):
+    """Register all application blueprints on the Flask app."""
+    for module in (
+        auth,
+        videos,
+        sessions,
+        exports,
+        tts,
+        youtube,
+        upload,
+        settings,
+        debug,
+    ):
         app.register_blueprint(module.bp)

@@ -13,7 +13,7 @@ import logging
 import os
 import pickle
 
-from .config import STATE_FILE
+from .config import STATE_FILE, UPLOAD_FOLDER
 
 # ─── The mutable containers ────────────────────────────────────────────
 users: dict = {}
@@ -40,6 +40,7 @@ def _state_payload() -> dict:
 
 
 def save_state(force: bool = False) -> None:
+    """Persist the current mutable state to disk when it has changed."""
     try:
         payload = _state_payload()
         blob = pickle.dumps(payload)
@@ -56,6 +57,7 @@ def save_state(force: bool = False) -> None:
 
 
 def load_state() -> bool:
+    """Load persisted application state into the global mutable containers."""
     if not os.path.exists(STATE_FILE):
         logging.info("No state file found. Starting with default state.")
         return False
@@ -76,7 +78,6 @@ def load_state() -> bool:
 
         # Flag videos whose file is missing on disk (do not remove — that
         # is clean_missing_videos()'s job).
-        from .config import UPLOAD_FOLDER
         for video in videos:
             fn = video.get("file_name")
             if not fn:
@@ -87,7 +88,14 @@ def load_state() -> bool:
                 logging.warning("Video file missing: %s", path)
 
         return True
-    except (FileNotFoundError, OSError, pickle.PickleError, EOFError,
-            AttributeError, TypeError, ValueError) as e:
+    except (
+        FileNotFoundError,
+        OSError,
+        pickle.PickleError,
+        EOFError,
+        AttributeError,
+        TypeError,
+        ValueError,
+    ) as e:
         logging.error("Failed to load state: %s", e)
         return False

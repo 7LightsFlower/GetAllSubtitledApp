@@ -1,13 +1,13 @@
+"""Route for uploading videos via multipart form data or JSON and registering them."""
+
 import datetime
-import json
-import logging
 import os
 import uuid
 
 from flask import Blueprint, jsonify, request
 
 from ..config import UPLOAD_FOLDER, resolve_target_url
-from ..state import save_state, videos
+from ..state import videos
 from ..uploader import upload_and_register
 from ..utils import user_home_path, utc_now_iso
 from ..video import get_video_metadata
@@ -17,6 +17,7 @@ bp = Blueprint("upload", __name__)
 
 @bp.route("/upload", methods=["POST", "OPTIONS"])
 def upload_to_internal():
+    """Upload a video from multipart form data or a JSON request."""
     if request.method == "OPTIONS":
         return ("", 204)
 
@@ -27,8 +28,9 @@ def upload_to_internal():
         token = request.form.get("token", "").strip()
     else:
         data_in = request.get_json(silent=True) or {}
-        token = ((data_in.get("token") or "").strip()
-                 or request.headers.get("Authorization", "").replace("Bearer ", "").strip())
+        token = (data_in.get("token") or "").strip() or request.headers.get(
+            "Authorization", ""
+        ).replace("Bearer ", "").strip()
     if not token:
         return jsonify({"error": "Missing token"}), 400
 
@@ -44,8 +46,9 @@ def upload_to_internal():
         if not original_filename.lower().endswith(".mp4"):
             original_filename = f"{os.path.splitext(original_filename)[0]}.mp4"
 
-        existing = next((v for v in videos
-                         if v.get("file_name") == original_filename), None)
+        existing = next(
+            (v for v in videos if v.get("file_name") == original_filename), None
+        )
         local_filename = original_filename
         local_path = os.path.join(UPLOAD_FOLDER, local_filename)
 
@@ -66,13 +69,19 @@ def upload_to_internal():
             duration, fps, codec = get_video_metadata(local_path)
             video_key = str(uuid.uuid4())
             project = {
-                "key": video_key, "name": session_name,
-                "file_name": local_filename, "uploaded": utc_now_iso(),
-                "last_opened": None, "duration": duration, "fps": fps,
-                "codec": codec, "file_size": os.path.getsize(local_path),
+                "key": video_key,
+                "name": session_name,
+                "file_name": local_filename,
+                "uploaded": utc_now_iso(),
+                "last_opened": None,
+                "duration": duration,
+                "fps": fps,
+                "codec": codec,
+                "file_size": os.path.getsize(local_path),
                 "segment_count": 0,
                 "languages": request.form.getlist("language") or ["en"],
-                "thumbnail_url": None, "segmentation_done": False,
+                "thumbnail_url": None,
+                "segmentation_done": False,
                 "segmentation_progress": 0,
                 "source": request.form.get("source", "Desktop Upload"),
             }
@@ -105,9 +114,11 @@ def upload_to_internal():
         file_size = os.path.getsize(local_path)
         if file_size < 1000:
             return jsonify({"error": "File is too small to upload"}), 400
-        session_name = ((data_in.get("name") or "").strip()
-                        or project.get("name")
-                        or os.path.splitext(file_name)[0])
+        session_name = (
+            (data_in.get("name") or "").strip()
+            or project.get("name")
+            or os.path.splitext(file_name)[0]
+        )
 
         def as_list(v):
             if v is None:
@@ -149,21 +160,25 @@ def upload_to_internal():
         postprod = as_list(data_in.get("postproduction"))
         if postprod:
             form_data["postproduction"] = postprod
-        expected_mt = (data_in.get("mtLanguage")
-                       or data_in.get("mt_languages") or ["de"])
+        expected_mt = data_in.get("mtLanguage") or data_in.get("mt_languages") or ["de"]
         if isinstance(expected_mt, str):
             expected_mt = [expected_mt]
         target_url = resolve_target_url(
-            data_in.get("targetServer")
-            or request.headers.get("X-Target-Server"))
+            data_in.get("targetServer") or request.headers.get("X-Target-Server")
+        )
         clear_stale = True
 
     base_url = target_url.rsplit("/upload_lecture", 1)[0]
     body, status = upload_and_register(
-        local_path=local_path, file_size=file_size,
-        session_name=session_name, form_data=form_data, token=token,
-        target_url=target_url, base_url=base_url, video_key=video_key,
-        project=project, expected_mt=expected_mt,
+        local_path=local_path,
+        session_name=session_name,
+        form_data=form_data,
+        token=token,
+        target_url=target_url,
+        base_url=base_url,
+        video_key=video_key,
+        project=project,
+        expected_mt=expected_mt,
         clear_stale_session=clear_stale,
     )
     return jsonify(body), status

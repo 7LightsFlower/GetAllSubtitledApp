@@ -44,13 +44,14 @@ _KNOWN_SERVERS = {
 _SERVER_LABELS = {
     "https://lt2srv.iar.kit.edu": "KIT Lecture Translator",
     "https://lt2srv-backup.iar.kit.edu": "Backup Server",
-    "https://lt2srv-sscherrer.isl.iar.kit.edu": "Developer Own (SScherrer)",
+    "https://lt2srv-sscherrer.isl.iar.kit.edu": "Developer's Own (SScherrer)",
 }
 
 ALLOWED_TARGET_SERVERS = frozenset(_KNOWN_SERVERS)
 
 
 def is_allowed_server(url: str | None) -> bool:
+    """Return whether a URL is an allowed target server."""
     if not url:
         return False
     candidate = url.rstrip("/")
@@ -60,6 +61,7 @@ def is_allowed_server(url: str | None) -> bool:
 
 
 def resolve_target_url(requested: str | None) -> str:
+    """Resolve a requested server URL to its lecture upload endpoint."""
     if requested:
         candidate = requested.rstrip("/")
         if is_allowed_server(candidate):
@@ -69,6 +71,7 @@ def resolve_target_url(requested: str | None) -> str:
 
 
 def server_label(url: str) -> str:
+    """Return a display label for a configured target server."""
     return _SERVER_LABELS.get(url, url)
 
 
@@ -81,10 +84,12 @@ _KIT_SESSION_COOKIE = os.environ.get("KIT_SESSION_COOKIE", "").strip()
 
 
 def media_cookie(token: str) -> str:
+    """Return the configured KIT session cookie or the provided token."""
     return _KIT_SESSION_COOKIE or token
 
 
 def media_cookie_is_dex() -> bool:
+    """Return whether a configured KIT session cookie is available."""
     return bool(_KIT_SESSION_COOKIE)
 
 
@@ -133,6 +138,7 @@ PROGRESS_TTL = 3600
 JOB_TTL = 7200
 MAX_JOB_HISTORY_ENTRIES = 20
 
+
 # ─── Language names ────────────────────────────────────────────────────
 def _load_language_names() -> dict:
     try:
@@ -154,6 +160,7 @@ _LANG_CODE_RE = re.compile(r"^([a-z]{2})$", re.IGNORECASE)
 
 
 def full_language_name(code_or_name: str) -> str:
+    """Return the display name for a language code or configured name."""
     if not code_or_name:
         return code_or_name or ""
     key = code_or_name.strip().lower()

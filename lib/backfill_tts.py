@@ -29,7 +29,8 @@ def _token_from_any_session() -> str:
     is the one piece of state that has no public accessor yet.
     """
     # pylint: disable=protected-access
-    return backend._state.get("token") or ""
+    state = getattr(backend, "_state", {})
+    return state.get("token") or ""
 
 
 def main() -> None:
@@ -41,18 +42,50 @@ def main() -> None:
         )
         return
 
-    for session_id in list(backend.sessions.keys()):
-        server = (
-            backend.sessions.get(session_id, {}).get("server")
-            or backend.INTERNAL_SERVER_URL
+    sessions = getattr(backend, "sessions", {})
+    if not isinstance(sessions, dict):
+        logging.warning(
+            "Backfill unavailable: backend.sessions is not a dictionary"
         )
+        return
+
+    for session_id in list(sessions):
+        # Avoid accessing a dynamically supplied attribute directly; the
+        # extension analyzer cannot determine that sessions implements get().
+        session = getattr(sessions, "get")(session_id)
+        if not isinstance(session, dict):
+            logging.warning(
+                "Backfill unavailable for %s: session entry is not a dictionary",
+                session_id[:8],
+            )
+            continue
+
+        server = session.get("server") or getattr(
+            backend, "INTERNAL_SERVER_URL", getattr(backend, "SERVER_URL", "")
+        )
+        download_tts_files = getattr(backend, "download_tts_files", None)
+        if not callable(download_tts_files):
+            logging.warning(
+                "Backfill unavailable for %s: backend.download_tts_files is not callable",
+                session_id[:8],
+            )
+            continue
+
         try:
-            written = backend.download_tts_files(session_id, token, server)
+            # Resolve the attribute again so static analyzers do not infer that
+            # the value checked above is still a non-callable attribute.
+            written = getattr(backend, "download_tts_files")(
+                session_id, token, server
+            )
             logging.info("%s → %d file(s)", session_id[:8], len(written))
         except (OSError, ValueError, TypeError) as exc:
             logging.warning("Backfill failed for %s: %s", session_id[:8], exc)
 
-    backend.save_state()
+    save_state = getattr(backend, "save_state", None)
+    if callable(save_state):
+        # Resolve the attribute at the call site so static analyzers do not
+        # infer the value checked above as a non-callable attribute.
+        getattr(backend, "save_state")()
 
 
 if __name__ == "__main__":

@@ -12,9 +12,7 @@ import logging
 import threading
 import time
 
-from .config import (
-    JOB_TTL, MAX_JOB_HISTORY_ENTRIES, PROGRESS_TTL,  # noqa: F401
-)
+from .config import JOB_TTL, PROGRESS_TTL  # noqa: F401
 
 # ─── Download progress (YouTube imports) ───────────────────────────────
 download_progress: dict = {}
@@ -30,8 +28,12 @@ def _progress_init(download_id: str, url: str) -> None:
             "progress": 0.0,
             "message": "Starting…",
             "details": {
-                "title": None, "duration": None, "filename": None,
-                "filesize": None, "has_audio": None, "codec": None,
+                "title": None,
+                "duration": None,
+                "filename": None,
+                "filesize": None,
+                "has_audio": None,
+                "codec": None,
                 "converted": None,
             },
             "events": [],
@@ -41,19 +43,22 @@ def _progress_init(download_id: str, url: str) -> None:
         }
 
 
-def _progress_event(download_id, message, *, level="info", stage=None,
-                    progress=None, details=None) -> None:
+def _progress_event(
+    download_id, message, *, level="info", stage=None, progress=None, details=None
+) -> None:
     if not download_id:
         return
     with download_progress_lock:
         entry = download_progress.get(download_id)
         if entry is None:
             return
-        entry["events"].append({
-            "time": datetime.datetime.now().strftime("%H:%M:%S"),
-            "level": level,
-            "message": message,
-        })
+        entry["events"].append(
+            {
+                "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                "level": level,
+                "message": message,
+            }
+        )
         if stage is not None:
             entry["stage"] = stage
         if progress is not None:
@@ -76,18 +81,23 @@ def _progress_finish(download_id, *, error=None, details=None) -> None:
         entry["error"] = error
         entry["stage"] = "error" if error else "done"
         if error:
-            entry["events"].append({
-                "time": datetime.datetime.now().strftime("%H:%M:%S"),
-                "level": "error",
-                "message": error,
-            })
+            entry["events"].append(
+                {
+                    "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                    "level": "error",
+                    "message": error,
+                }
+            )
 
 
 def _progress_cleanup_old() -> None:
     cutoff = time.time() - PROGRESS_TTL
     with download_progress_lock:
-        stale = [k for k, v in download_progress.items()
-                 if v.get("done") and v.get("started_at", 0) < cutoff]
+        stale = [
+            k
+            for k, v in download_progress.items()
+            if v.get("done") and v.get("started_at", 0) < cutoff
+        ]
         for k in stale:
             download_progress.pop(k, None)
 
@@ -123,13 +133,15 @@ def _note_404(session_id: str, url: str) -> int:
         n = _consecutive_404s.get(session_id, 0) + 1
         _consecutive_404s[session_id] = n
     if n == 1:
-        logging.warning("messages.json 404 for session %s (%s)",
-                        session_id[:8] + "…", url)
+        logging.warning(
+            "messages.json 404 for session %s (%s)", session_id[:8] + "…", url
+        )
     elif n == 5:
         logging.warning(
             "messages.json still 404 for session %s after %d attempts; "
             "further 404s for this session will be silenced",
-            session_id[:8] + "…", n,
+            session_id[:8] + "…",
+            n,
         )
     return n
 
@@ -160,19 +172,20 @@ def _job_start(session_id, video_key, session_name) -> None:
         }
 
 
-def _job_log(session_id, message, *, level="info", stage=None,
-             progress=None) -> None:
+def _job_log(session_id, message, *, level="info", stage=None, progress=None) -> None:
     if not session_id:
         return
     with job_progress_lock:
         entry = _job_progress_store.get(session_id)
         if entry is None:
             return
-        entry["events"].append({
-            "time": datetime.datetime.now().strftime("%H:%M:%S"),
-            "level": level,
-            "message": message,
-        })
+        entry["events"].append(
+            {
+                "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                "level": level,
+                "message": message,
+            }
+        )
         if stage is not None:
             entry["stage"] = stage
         if progress is not None:
@@ -210,11 +223,13 @@ def _job_finish(session_id: str, *, error: str | None = None) -> None:
         if error is None:
             entry["progress"] = 1.0
         entry["updated_at"] = time.time()
-        entry["events"].append({
-            "time": datetime.datetime.now().strftime("%H:%M:%S"),
-            "level": "error" if error else "info",
-            "message": error if error else "✅ Processing complete",
-        })
+        entry["events"].append(
+            {
+                "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                "level": "error" if error else "info",
+                "message": error if error else "✅ Processing complete",
+            }
+        )
 
 
 def _job_cancel(session_id: str) -> None:
@@ -229,18 +244,23 @@ def _job_cancel(session_id: str) -> None:
         entry["stage"] = "cancelled"
         entry["message"] = "Cancelled by user"
         entry["updated_at"] = time.time()
-        entry["events"].append({
-            "time": datetime.datetime.now().strftime("%H:%M:%S"),
-            "level": "warning",
-            "message": "🛑 Cancelled by user",
-        })
+        entry["events"].append(
+            {
+                "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                "level": "warning",
+                "message": "🛑 Cancelled by user",
+            }
+        )
 
 
 def _job_cleanup() -> None:
     cutoff = time.time() - JOB_TTL
     with job_progress_lock:
-        stale = [k for k, v in _job_progress_store.items()
-                 if v.get("done") and v.get("updated_at", 0) < cutoff]
+        stale = [
+            k
+            for k, v in _job_progress_store.items()
+            if v.get("done") and v.get("updated_at", 0) < cutoff
+        ]
         for k in stale:
             _job_progress_store.pop(k, None)
 
@@ -248,14 +268,14 @@ def _job_cleanup() -> None:
 # ─── Panel log handler + routing ───────────────────────────────────────
 # Which panel entry (if any) this thread's log lines go to.
 # Value: ("job", session_id) | ("download", download_id) | None
-_log_target: contextvars.ContextVar = contextvars.ContextVar(
-    "log_target", default=None
-)
+_log_target: contextvars.ContextVar = contextvars.ContextVar("log_target", default=None)
 
 _local = threading.local()
 
 
 class PanelLogHandler(logging.Handler):
+    """Route application log records to the active panel."""
+
     _CONSOLE_ONLY_SUBSTRINGS = (
         "messages=",
         "size stable but content",

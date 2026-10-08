@@ -17,37 +17,69 @@ import uuid
 import requests
 
 from .config import (
-    USE_CHUNKED_UPLOAD, server_label,
+    USE_CHUNKED_UPLOAD,
+    server_label,
 )
 from .progress import (
-    _clear_cancel, _job_progress_store, _job_start, _request_cancel,
+    _clear_cancel,
+    _job_progress_store,
+    _job_start,
+    _request_cancel,
     job_progress_lock,
 )
 from .state import jobs, save_state, sessions
+from .session_worker import process_session_in_background
 from .utils import (
-    email_from_token, extract_session_id, log_token_email,
-    norm_session_name, sanitize_session_name_for_kit, session_dir,
-    short_sid, unique_local_name, user_home_path, utc_now_iso,
+    email_from_token,
+    extract_session_id,
+    log_token_email,
+    norm_session_name,
+    sanitize_session_name_for_kit,
+    session_dir,
+    unique_local_name,
+    user_home_path,
+    utc_now_iso,
 )
 from .video import prepare_upload_source_cached
 
 
-def post_multipart_with_retries(target_url, body_file, headers, cookies, *,
-                                total_size, max_attempts=3, base_delay=5.0):
+# The upload request needs the target and retry context in addition to the
+# multipart stream, so the keyword-only arguments are intentionally explicit.
+def post_multipart_with_retries(
+    target_url,
+    body_file,
+    headers,
+    cookies,
+    *,
+    total_size,
+    max_attempts=3,
+    base_delay=5.0,
+):  # pylint: disable=too-many-arguments
+    """Post a multipart body, following redirects and retrying connection failures."""
     last_exc = None
     for attempt in range(1, max_attempts + 1):
         try:
             body_file.seek(0)
+            logging.debug("internal_upload: posting %d bytes", total_size)
             resp = requests.post(
-                target_url, data=body_file, headers=headers, cookies=cookies,
-                timeout=(60, 3600), verify=False, allow_redirects=False,
+                target_url,
+                data=body_file,
+                headers=headers,
+                cookies=cookies,
+                timeout=(60, 3600),
+                verify=False,
+                allow_redirects=False,
             )
             if resp.status_code in (301, 302, 303, 307, 308):
                 location = resp.headers.get("Location", "")
                 if location:
                     resp = requests.get(
-                        location, cookies=cookies, verify=False,
-                        timeout=60, allow_redirects=True)
+                        location,
+                        cookies=cookies,
+                        verify=False,
+                        timeout=60,
+                        allow_redirects=True,
+                    )
             return resp
         except requests.exceptions.ConnectionError as e:
             last_exc = e
@@ -67,12 +99,15 @@ def _extract_session_id_via_archive(base_url, token, session_name):
             f"{base_url}/archive/{home_b64}",
             headers={"Authorization": f"Bearer {token}", "X-Forward-Auth": token},
             cookies={"_forward_auth": token},
-            verify=False, timeout=20, allow_redirects=True,
+            verify=False,
+            timeout=20,
+            allow_redirects=True,
         )
         if archive_resp.status_code != 200:
             return None
-        candidates = re.findall(r"/archivesession/([A-Za-z0-9_\-=]+)",
-                                archive_resp.text)
+        candidates = re.findall(
+            r"/archivesession/([A-Za-z0-9_\-=]+)", archive_resp.text
+        )
         wanted = norm_session_name(session_name)
         for cand in candidates:
             padded = cand + "=" * (-len(cand) % 4)
@@ -88,9 +123,19 @@ def _extract_session_id_via_archive(base_url, token, session_name):
     return None
 
 
-def upload_and_register(*, local_path, file_size, session_name, form_data,
-                        token, target_url, base_url, video_key, project,
-                        expected_mt, clear_stale_session=False):
+def upload_and_register(
+    *,
+    local_path,
+    session_name,
+    form_data,
+    token,
+    target_url,
+    base_url,
+    video_key,
+    project,
+    expected_mt,
+    clear_stale_session=False,
+):
     """Upload the prepared media and register the session. Returns (body, status)."""
     session_name = sanitize_session_name_for_kit(session_name)
     log_token_email(token, "internal_upload")
@@ -106,7 +151,8 @@ def upload_and_register(*, local_path, file_size, session_name, form_data,
 
     try:
         upload_source_path, upload_filename_used, gs_cleanup = (
-            prepare_upload_source_cached(local_path, video_key))
+            prepare_upload_source_cached(local_path, video_key)
+        )
 
         boundary = f"----WebKitFormBoundary{uuid.uuid4().hex[:16]}"
         content_type = f"multipart/form-data; boundary={boundary}"
@@ -162,15 +208,22 @@ def upload_and_register(*, local_path, file_size, session_name, form_data,
 
         with open(temp_multipart_path, "rb") as body_file:
             resp = post_multipart_with_retries(
-                target_url=target_url, body_file=body_file,
-                headers=headers, cookies=cookies, total_size=total_size)
+                target_url=target_url,
+                body_file=body_file,
+                headers=headers,
+                cookies=cookies,
+                total_size=total_size,
+            )
 
         if resp.status_code >= 400:
             return (
-                {"error": f"Internal server returned {resp.status_code}",
-                 "response": resp.text[:1000],
-                 "pipeline": pipeline_label, "pipeline_url": pipeline_url,
-                 "email": email_used},
+                {
+                    "error": f"Internal server returned {resp.status_code}",
+                    "response": resp.text[:1000],
+                    "pipeline": pipeline_label,
+                    "pipeline_url": pipeline_url,
+                    "email": email_used,
+                },
                 502,
             )
 
@@ -178,13 +231,18 @@ def upload_and_register(*, local_path, file_size, session_name, form_data,
         if not session_id:
             session_id = _extract_session_id_via_archive(base_url, token, session_name)
         if not session_id:
-            logging.error("internal_upload: KIT did not return a session id. "
-                          "Raw response: %s", resp.text[:3000])
+            logging.error(
+                "internal_upload: KIT did not return a session id. Raw response: %s",
+                resp.text[:3000],
+            )
             return (
-                {"error": "KIT accepted the upload but did not return a session id.",
-                 "status_code": resp.status_code,
-                 "pipeline": pipeline_label, "pipeline_url": pipeline_url,
-                 "email": email_used},
+                {
+                    "error": "KIT accepted the upload but did not return a session id.",
+                    "status_code": resp.status_code,
+                    "pipeline": pipeline_label,
+                    "pipeline_url": pipeline_url,
+                    "email": email_used,
+                },
                 502,
             )
 
@@ -235,15 +293,16 @@ def upload_and_register(*, local_path, file_size, session_name, form_data,
 
         # Cancel orphan workers for the same video.
         for other_sid, other_job in list(jobs.items()):
-            if (other_job.get("video_key") == video_key
-                    and other_job.get("status") == "processing"
-                    and other_sid != session_id):
+            if (
+                other_job.get("video_key") == video_key
+                and other_job.get("status") == "processing"
+                and other_sid != session_id
+            ):
                 _request_cancel(other_sid)
                 other_job["status"] = "cancelled"
                 with job_progress_lock:
                     _job_progress_store.pop(other_sid, None)
 
-        from .session_worker import process_session_in_background
         threading.Thread(
             target=process_session_in_background,
             args=(session_id, token, video_key, base_url, expected_mt),
@@ -256,35 +315,57 @@ def upload_and_register(*, local_path, file_size, session_name, form_data,
             if not isinstance(body, dict):
                 body = {}
         except json.JSONDecodeError:
-            body = {"status": "success",
-                    "message": "Upload successful!",
-                    "response": resp.text[:500]}
+            body = {
+                "status": "success",
+                "message": "Upload successful!",
+                "response": resp.text[:500],
+            }
 
-        body.update({
-            "success": True,
-            "session_id": session_id,
-            "video_key": video_key,
-            "session_url": f"{base_url}/archivesession/{session_id}",
-            "output_url": f"/session-output/{session_id}",
-            "download_url": f"/session-zip/{session_id}",
-            "pipeline_label": pipeline_label,
-            "pipeline_url": pipeline_url,
-            "email": email_used,
-        })
+        body.update(
+            {
+                "success": True,
+                "session_id": session_id,
+                "video_key": video_key,
+                "session_url": f"{base_url}/archivesession/{session_id}",
+                "output_url": f"/session-output/{session_id}",
+                "download_url": f"/session-zip/{session_id}",
+                "pipeline_label": pipeline_label,
+                "pipeline_url": pipeline_url,
+                "email": email_used,
+            }
+        )
         return body, resp.status_code
 
     except requests.exceptions.Timeout:
-        return ({"error": "Request timeout - file may be too large",
-                 "pipeline": pipeline_label, "pipeline_url": pipeline_url,
-                 "email": email_used}, 504)
+        return (
+            {
+                "error": "Request timeout - file may be too large",
+                "pipeline": pipeline_label,
+                "pipeline_url": pipeline_url,
+                "email": email_used,
+            },
+            504,
+        )
     except requests.exceptions.RequestException as e:
-        return ({"error": f"Request failed: {type(e).__name__}: {e}",
-                 "pipeline": pipeline_label, "pipeline_url": pipeline_url,
-                 "email": email_used}, 500)
+        return (
+            {
+                "error": f"Request failed: {type(e).__name__}: {e}",
+                "pipeline": pipeline_label,
+                "pipeline_url": pipeline_url,
+                "email": email_used,
+            },
+            500,
+        )
     except OSError as e:
-        return ({"error": f"Upload failed: {type(e).__name__}: {e}",
-                 "pipeline": pipeline_label, "pipeline_url": pipeline_url,
-                 "email": email_used}, 500)
+        return (
+            {
+                "error": f"Upload failed: {type(e).__name__}: {e}",
+                "pipeline": pipeline_label,
+                "pipeline_url": pipeline_url,
+                "email": email_used,
+            },
+            500,
+        )
     finally:
         if temp_multipart_path and os.path.exists(temp_multipart_path):
             try:

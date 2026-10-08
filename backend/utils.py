@@ -2,25 +2,26 @@
 
 from __future__ import annotations
 
-import base64
 import datetime
 import json
 import logging
 import os
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from flask import request
 
 from .config import (
-    INTERNAL_SERVER_URL, SESSION_FOLDER, UPLOAD_FOLDER, LANGUAGE_NAMES,
+    SESSION_FOLDER,
+    LANGUAGE_NAMES,
     _LANG_CODE_RE,
 )
-from .state import sessions
+from .state import _state, sessions
 
 
 # ─── Time helpers ──────────────────────────────────────────────────────
 def utc_now_iso() -> str:
+    """Return the current UTC time as an ISO-8601 string."""
     return (
         datetime.datetime.now(datetime.UTC)
         .isoformat(timespec="milliseconds")
@@ -29,6 +30,7 @@ def utc_now_iso() -> str:
 
 
 def file_mtime_iso(path: str) -> str:
+    """Return the file modification time as an ISO-8601 UTC string."""
     return (
         datetime.datetime.fromtimestamp(
             os.path.getmtime(path), tz=datetime.timezone.utc
@@ -49,14 +51,16 @@ def _public_base_url() -> str:
 
 
 def thumbnail_absolute_url(video: dict) -> str | None:
+    """Return an absolute URL for a local thumbnail, preserving other URLs."""
     thumb = video.get("thumbnail_url")
     if not thumb or not thumb.startswith("/thumbnails/"):
         return thumb
-    filename = thumb[len("/thumbnails/"):]
+    filename = thumb[len("/thumbnails/") :]
     return f"{_public_base_url()}/thumbnails/{quote(filename, safe='')}"
 
 
 def short_sid(session_id: str | None, keep: int = 8) -> str:
+    """Return a compact, user-friendly preview of a session identifier."""
     if not session_id:
         return "<none>"
     return session_id[:keep] + "…"
@@ -64,6 +68,7 @@ def short_sid(session_id: str | None, keep: int = 8) -> str:
 
 # ─── Token helpers ─────────────────────────────────────────────────────
 def email_from_token(token: str) -> str:
+    """Extract the email address from a token containing user metadata."""
     if not token:
         return ""
     parts = token.split("|")
@@ -75,19 +80,24 @@ def email_from_token(token: str) -> str:
 
 
 def log_token_email(token: str, where: str) -> None:
+    """Log the email encoded in a token, without exposing the token itself."""
     if not token:
         logging.info("%s: token is empty", where)
         return
     parts = token.split("|")
     if len(parts) >= 3:
-        logging.info("%s: token email = %r (token length %d)",
-                     where, parts[-1].strip(), len(token))
+        logging.info(
+            "%s: token email = %r (token length %d)",
+            where,
+            parts[-1].strip(),
+            len(token),
+        )
     else:
-        logging.info("%s: token has %d fields, cannot extract email",
-                     where, len(parts))
+        logging.info("%s: token has %d fields, cannot extract email", where, len(parts))
 
 
 def user_home_path(token: str) -> str:
+    """Return the home directory encoded in a token."""
     if not token:
         raise ValueError("Cannot derive the upload path: no token was supplied.")
     parts = token.split("|")
@@ -107,7 +117,6 @@ def user_home_path(token: str) -> str:
 
 def effective_token(session_id: str, fallback: str = "") -> str:
     """Return the token that owns this session."""
-    from .state import _state
     stored = (sessions.get(session_id) or {}).get("token")
     return stored or fallback or (_state.get("token") or "")
 
@@ -133,12 +142,11 @@ _SESSION_ID_PATTERNS = [
     re.compile(r'["\']session(?:_?id)?["\']\s*:\s*["\']([^"\']+)["\']'),
 ]
 
-_QS_PARAM_RE = re.compile(
-    r'[?&](?:session(?:_?id)?|id)=([^&"\'\s<>]+)', re.IGNORECASE
-)
+_QS_PARAM_RE = re.compile(r'[?&](?:session(?:_?id)?|id)=([^&"\'\s<>]+)', re.IGNORECASE)
 
 
 def session_id_from_any_url(url: str) -> str | None:
+    """Extract a session identifier from a URL."""
     if not url:
         return None
     for marker in ("/archivesession/", "/session/"):
@@ -151,6 +159,7 @@ def session_id_from_any_url(url: str) -> str | None:
 
 
 def extract_session_id(resp) -> str | None:
+    """Extract a session identifier from a response URL, payload, or body."""
     sid = session_id_from_any_url(resp.url or "")
     if sid:
         return sid
@@ -161,74 +170,82 @@ def extract_session_id(resp) -> str | None:
         payload = None
 
     def _from_dict(d: dict) -> str | None:
-        for key in ("session_id", "sessionId", "session", "id",
-                    "session_uuid", "sessionid", "session_name",
-                    "archive_session_id", "archiveSessionId"):
-            v = d.get(key)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
+        for key in (
+            "session_id",
+            "sessionId",
+            "session",
+            "id",
+            "session_uuid",
+            "sessionid",
+            "session_name",
+            "archive_session_id",
+            "archiveSessionId",
+        ):
+            value = d.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
         for key in ("session_url", "url", "link"):
-            v = d.get(key)
-            if isinstance(v, str):
-                found = session_id_from_any_url(v)
+            value = d.get(key)
+            if isinstance(value, str):
+                found = session_id_from_any_url(value)
                 if found:
                     return found
         return None
 
-    if isinstance(payload, dict):
-        sid = _from_dict(payload)
+    def _from_payload(value) -> str | None:
+        if not isinstance(value, dict):
+            return None
+        sid = _from_dict(value)
         if sid:
             return sid
-        nested = payload.get("data")
-        if isinstance(nested, dict):
-            sid = _from_dict(nested)
-            if sid:
-                return sid
+        nested = value.get("data")
+        return _from_dict(nested) if isinstance(nested, dict) else None
 
-    body = resp.text or ""
-    for pattern in _SESSION_ID_PATTERNS:
-        m = pattern.search(body)
-        if not m:
-            continue
-        candidate = m.group(1).strip()
-        resolved = session_id_from_any_url(candidate)
-        if resolved:
-            return resolved
-        if candidate and len(candidate) <= 200 and " " not in candidate:
-            return candidate
-
-    m = re.search(
-        r"<script[^>]*>\s*(?:var|const|let)\s+\w+\s*=\s*({[^<]+})", body
-    )
-    if m:
-        try:
-            blob = json.loads(m.group(1))
-            sid = _from_dict(blob)
-            if sid:
-                return sid
-            nested = blob.get("data") if isinstance(blob, dict) else None
-            if isinstance(nested, dict):
-                sid = _from_dict(nested)
-                if sid:
-                    return sid
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-    sid = session_id_from_any_url(body)
+    sid = _from_payload(payload)
     if sid:
         return sid
 
-    logging.warning(
-        "extract_session_id: no match. status=%s final_url=%s "
-        "content_type=%r body_len=%d",
-        resp.status_code, resp.url,
-        resp.headers.get("Content-Type", "<none>"), len(body),
-    )
-    return None
+    body = resp.text or ""
+    sid = session_id_from_any_url(body)
+    if not sid:
+        for pattern in _SESSION_ID_PATTERNS:
+            match = pattern.search(body)
+            if not match:
+                continue
+            candidate = match.group(1).strip()
+            sid = session_id_from_any_url(candidate)
+            if not sid and candidate and len(candidate) <= 200 and " " not in candidate:
+                sid = candidate
+            if sid:
+                break
+
+    if not sid:
+        match = re.search(
+            r"<script[^>]*>\s*(?:var|const|let)\s+\w+\s*=\s*({[^<]+})",
+            body,
+        )
+        if match:
+            try:
+                blob = json.loads(match.group(1))
+                sid = _from_payload(blob)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    if not sid:
+        logging.warning(
+            "extract_session_id: no match. status=%s final_url=%s "
+            "content_type=%r body_len=%d",
+            resp.status_code,
+            resp.url,
+            resp.headers.get("Content-Type", "<none>"),
+            len(body),
+        )
+    return sid
 
 
 # ─── On-disk path naming ───────────────────────────────────────────────
 def safe_local_name(name: str) -> str:
+    """Return a filesystem-safe name derived from the provided name."""
     if not name:
         return ""
     safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
@@ -239,9 +256,9 @@ def safe_local_name(name: str) -> str:
 
 
 def unique_local_name(name: str) -> str:
+    """Return a filesystem-safe name that does not collide with existing sessions."""
     base = safe_local_name(name) or "session"
-    taken = {s.get("local_name") for s in sessions.values()
-             if s.get("local_name")}
+    taken = {s.get("local_name") for s in sessions.values() if s.get("local_name")}
     if base not in taken:
         return base
     counter = 2
@@ -251,6 +268,7 @@ def unique_local_name(name: str) -> str:
 
 
 def session_dir(session_id: str) -> str:
+    """Return the directory for a session, using its local name when available."""
     sess = sessions.get(session_id) or {}
     local_name = sess.get("local_name")
     if local_name:
@@ -260,6 +278,7 @@ def session_dir(session_id: str) -> str:
 
 # ─── Lazy field initialisers ───────────────────────────────────────────
 def ensure_greenscreen_fields(project: dict) -> dict:
+    """Ensure a project has the default greenscreen fields when missing."""
     project.setdefault("greenscreen_file_name", None)
     project.setdefault("greenscreen_status", "pending")
     project.setdefault("greenscreen_progress", 0)
@@ -267,6 +286,7 @@ def ensure_greenscreen_fields(project: dict) -> dict:
 
 
 def ensure_source_field(project: dict) -> dict:
+    """Ensure a project has a source value when one is missing."""
     if not project.get("source"):
         fname = (project.get("file_name") or "").lower()
         if "youtube" in fname:
@@ -277,17 +297,20 @@ def ensure_source_field(project: dict) -> dict:
 
 
 def ensure_codec_field(project: dict) -> dict:
+    """Ensure a project has an empty codec value when one is missing."""
     project.setdefault("codec", "")
     return project
 
 
 def ensure_job_history(project: dict) -> dict:
+    """Ensure a project has an empty job history list."""
     project.setdefault("job_history", [])
     return project
 
 
 # ─── Language helpers ──────────────────────────────────────────────────
 def extract_simple_language_name(language: str) -> str:
+    """Extract a readable language name from a provider-specific label."""
     if not language:
         return "Unknown"
 
@@ -323,48 +346,73 @@ def extract_simple_language_name(language: str) -> str:
 
 
 _ISO2_TO_ISO3 = {
-    "en": "eng", "de": "deu", "fr": "fra", "es": "spa", "it": "ita",
-    "pt": "por", "nl": "nld", "ru": "rus", "ja": "jpn", "ko": "kor",
-    "zh": "zho", "ar": "ara", "hi": "hin", "pl": "pol", "tr": "tur",
-    "uk": "ukr", "vi": "vie", "th": "tha", "id": "ind", "ms": "msa",
+    "en": "eng",
+    "de": "deu",
+    "fr": "fra",
+    "es": "spa",
+    "it": "ita",
+    "pt": "por",
+    "nl": "nld",
+    "ru": "rus",
+    "ja": "jpn",
+    "ko": "kor",
+    "zh": "zho",
+    "ar": "ara",
+    "hi": "hin",
+    "pl": "pol",
+    "tr": "tur",
+    "uk": "ukr",
+    "vi": "vie",
+    "th": "tha",
+    "id": "ind",
+    "ms": "msa",
     "fa": "fas",
 }
 
 
 def get_language_code(language_name: str) -> str | None:
+    """Return the ISO language code represented by a language name or label."""
     if not language_name:
         return None
+
     name_to_code = {name.lower(): code for code, name in LANGUAGE_NAMES.items()}
     raw = language_name.strip()
-    if _LANG_CODE_RE.match(raw):
-        return raw.lower()
-    if raw.lower() in name_to_code:
-        return name_to_code[raw.lower()]
+    candidates = [raw]
+
     match = re.search(r"\(([^)]+)\)", raw)
     if match:
         candidate = match.group(1).strip()
         if candidate.lower().startswith("language "):
             candidate = candidate.split(" ", 1)[1].strip()
-        if _LANG_CODE_RE.match(candidate):
-            return candidate.lower()
-        if candidate.lower() in name_to_code:
-            return name_to_code[candidate.lower()]
+        candidates.append(candidate)
+
     code_match = re.search(r"[\s:\-_]([a-z]{2})\b", raw, re.IGNORECASE)
     if code_match:
-        return code_match.group(1).lower()
+        candidates.append(code_match.group(1).lower())
+
+    for candidate in candidates:
+        normalized = candidate.lower()
+        if _LANG_CODE_RE.match(candidate):
+            return normalized
+        if normalized in name_to_code:
+            return name_to_code[normalized]
+
     lower_raw = raw.lower()
     for name, code in name_to_code.items():
         if name in lower_raw:
             return code
+
     return None
 
 
 def get_language_code_iso3(language_name: str) -> str | None:
+    """Convert a language name to its ISO 3 language code."""
     iso2 = get_language_code(language_name)
     return _ISO2_TO_ISO3.get(iso2) if iso2 else None
 
 
 def safe_float(value, default: float = 0.0) -> float:
+    """Convert a value to float, returning the fallback for invalid input."""
     if value is None:
         return default
     if isinstance(value, (int, float)):
@@ -378,6 +426,7 @@ def safe_float(value, default: float = 0.0) -> float:
 
 
 def format_vtt_timestamp(seconds: float) -> str:
+    """Format a seconds value as a WebVTT timestamp."""
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
@@ -386,6 +435,7 @@ def format_vtt_timestamp(seconds: float) -> str:
 
 
 def is_meaningful_file(path: str) -> bool:
+    """Return whether a path points to a sufficiently large supported file."""
     name = os.path.basename(path).lower()
     try:
         size = os.path.getsize(path)
@@ -397,6 +447,7 @@ def is_meaningful_file(path: str) -> bool:
 
 
 def looks_like_wav(path: str) -> bool:
+    """Return whether a path points to a WAV file."""
     try:
         with open(path, "rb") as f:
             header = f.read(12)
@@ -406,31 +457,42 @@ def looks_like_wav(path: str) -> bool:
 
 
 def sanitize_session_name_for_kit(name: str) -> str:
+    """Normalize a session name for use in the kit."""
     if not name:
         return name
     for src, dst in {
-        "\u2022": "-", "\u2013": "-", "\u2014": "-",
-        "\u2018": "'", "\u2019": "'",
-        "\u201c": '"', "\u201d": '"', "\u00a0": " ",
+        "\u2022": "-",
+        "\u2013": "-", 
+        "\u2014": "-",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u00a0": " ",
     }.items():
         name = name.replace(src, dst)
     return re.sub(r"\s+", " ", name).strip()
 
 
 def norm_session_name(s: str) -> str:
+    """Normalize typographic characters and whitespace in a session name."""
     for src, dst in {
-        "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
-        "\u2013": "-", "\u2014": "-", "\u2022": "-", "\u00a0": " ",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2022": "-",
+        "\u00a0": " ",
     }.items():
         s = s.replace(src, dst)
     return re.sub(r"\s+", " ", s).strip()
 
 
 def curl_safe_url(url: str) -> str:
-    import urllib.parse
-    parts = urllib.parse.urlsplit(url)
-    path = urllib.parse.quote(parts.path, safe="/%=")
-    query = urllib.parse.quote(parts.query, safe="=&%")
-    return urllib.parse.urlunsplit(
-        (parts.scheme, parts.netloc, path, query, parts.fragment)
-    )
+    """Return a URL whose path and query are safe for curl."""
+    parts = urlsplit(url)
+    path = quote(parts.path, safe="/%=")
+    query = quote(parts.query, safe="=&%")
+    return urlunsplit((parts.scheme, parts.netloc, path, query, parts.fragment))

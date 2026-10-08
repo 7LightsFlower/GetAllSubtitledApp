@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import datetime
 import logging
 import os
 import shutil
-import sys
 
-from flask import Flask, g, jsonify, request
+from flask import Flask, g, request
 from flask_cors import CORS
 
 from . import config
@@ -16,23 +14,44 @@ from .logging_setup import install as install_panel_log_handler
 from .progress import _log_target
 from .routes import register_all
 from .state import (
-    _state, jobs, load_state, save_state, sessions, videos, users,
+    _state,
+    jobs,
+    load_state,
+    save_state,
+    sessions,
+    videos,
+    users,
 )
+from .utils import session_dir
+from .video import get_video_metadata
 
 # Session-scoped endpoints: bind the request's log records to this
 # session's JobProgressPanel entry.
 _SESSION_SCOPED_ENDPOINTS = {
-    "get_session_output", "session_refresh", "session_resync",
-    "job_progress", "session_transcript_save_vtt", "download_session_zip",
-    "session_messages_json", "session_tts", "extract_video_subtitles",
-    "update_video_subtitles", "session_languages", "session_transcript_json",
-    "session_file", "session_export", "session_export_txt",
-    "session_export_docx", "session_export_rtf",
-    "session_export_structured_json", "session_export_all_languages",
+    "get_session_output",
+    "session_refresh",
+    "session_resync",
+    "job_progress",
+    "session_transcript_save_vtt",
+    "download_session_zip",
+    "session_messages_json",
+    "session_tts",
+    "extract_video_subtitles",
+    "update_video_subtitles",
+    "session_languages",
+    "session_transcript_json",
+    "session_file",
+    "session_export",
+    "session_export_txt",
+    "session_export_docx",
+    "session_export_rtf",
+    "session_export_structured_json",
+    "session_export_all_languages",
 }
 
 
 def create_app() -> Flask:
+    """Create and configure the Flask application."""
     logging.basicConfig(level=logging.INFO)
     logging.getLogger("urllib3").setLevel(logging.INFO)
 
@@ -62,15 +81,23 @@ def create_app() -> Flask:
 def _register_before_after(app: Flask) -> None:
     @app.after_request
     def add_no_cache_for_api(response):
-        if request.path.startswith((
-            "/job_progress/", "/job-progress/",
-            "/session_output/", "/session-output/",
-            "/session_file/", "/session-file/",
-            "/session_languages/", "/session-languages/",
-            "/session_transcript_json/", "/session-transcript-json/",
-            "/session_tts/", "/session-tts/",
-            "/api/",
-        )):
+        if request.path.startswith(
+            (
+                "/job_progress/",
+                "/job-progress/",
+                "/session_output/",
+                "/session-output/",
+                "/session_file/",
+                "/session-file/",
+                "/session_languages/",
+                "/session-languages/",
+                "/session_transcript_json/",
+                "/session-transcript-json/",
+                "/session_tts/",
+                "/session-tts/",
+                "/api/",
+            )
+        ):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
@@ -114,14 +141,16 @@ def _register_before_after(app: Flask) -> None:
 
 # ─── startup ───────────────────────────────────────────────────────────
 def _seed_default_user() -> None:
-    users.setdefault("testuser@example.com",
-                     {"name": "Test User", "password": "YourSecurePassword123"})
+    users.setdefault(
+        "testuser@example.com",
+        {"name": "Test User", "password": "YourSecurePassword123"},
+    )
 
 
 def rebuild_videos_from_disk() -> None:
     """Add `videos` entries for MP4s on disk that aren't tracked yet."""
+    # pylint: disable=import-outside-toplevel
     from .utils import file_mtime_iso
-    from .video import get_video_metadata
 
     if not os.path.isdir(config.UPLOAD_FOLDER):
         return
@@ -148,26 +177,38 @@ def rebuild_videos_from_disk() -> None:
         stem = os.path.splitext(filename)[0]
         thumb_name = f"{stem}_thumb.jpg"
         thumb_path = os.path.join(config.UPLOAD_FOLDER, thumb_name)
-        thumbnail_url = (f"/thumbnails/{thumb_name}"
-                         if os.path.exists(thumb_path) else None)
+        thumbnail_url = (
+            f"/thumbnails/{thumb_name}" if os.path.exists(thumb_path) else None
+        )
 
         try:
             duration, fps, codec = get_video_metadata(file_path)
         except (OSError, ValueError, TypeError):
             duration, fps, codec = 0.0, 0.0, ""
 
-        source = "Imported (YouTube)" if "youtube" in filename.lower() \
-            else "Desktop Upload"
-        videos.append({
-            "key": __import__("uuid").uuid4().hex,
-            "name": stem, "file_name": filename, "uploaded": uploaded,
-            "last_opened": None, "duration": duration, "fps": fps,
-            "codec": codec, "file_size": size,
-            "segment_count": 0, "languages": ["en"],
-            "thumbnail_url": thumbnail_url,
-            "segmentation_done": False, "segmentation_progress": 0,
-            "_recovered": True, "source": source,
-        })
+        source = (
+            "Imported (YouTube)" if "youtube" in filename.lower() else "Desktop Upload"
+        )
+        videos.append(
+            {
+                "key": __import__("uuid").uuid4().hex,
+                "name": stem,
+                "file_name": filename,
+                "uploaded": uploaded,
+                "last_opened": None,
+                "duration": duration,
+                "fps": fps,
+                "codec": codec,
+                "file_size": size,
+                "segment_count": 0,
+                "languages": ["en"],
+                "thumbnail_url": thumbnail_url,
+                "segmentation_done": False,
+                "segmentation_progress": 0,
+                "_recovered": True,
+                "source": source,
+            }
+        )
         added += 1
     if added:
         save_state()
@@ -197,7 +238,7 @@ def _initialise_state_once() -> None:
 
 
 def _clean_missing_videos() -> None:
-    from .utils import session_dir as _sd  # not needed here; kept for parity
+
     if not videos:
         return
     valid = []
@@ -222,27 +263,33 @@ def _clean_missing_videos() -> None:
 
 def _cleanup_orphaned_data() -> None:
     valid_keys = {v.get("key") for v in videos if v.get("key")}
-    from .utils import session_dir as sd
-    for sid in [s for s, m in sessions.items()
-                if m.get("video_key") and m["video_key"] not in valid_keys]:
-        d = sd(sid)
+
+    for sid in [
+        s
+        for s, m in sessions.items()
+        if m.get("video_key") and m["video_key"] not in valid_keys
+    ]:
+        d = session_dir(sid)
         if os.path.exists(d):
             try:
                 shutil.rmtree(d)
             except OSError:
                 pass
         sessions.pop(sid, None)
-    for jid in [j for j, m in jobs.items()
-                if m.get("video_key") and m["video_key"] not in valid_keys]:
+    for jid in [
+        j
+        for j, m in jobs.items()
+        if m.get("video_key") and m["video_key"] not in valid_keys
+    ]:
         jobs.pop(jid, None)
     save_state()
 
 
 # ─── module-level app object (for gunicorn) ────────────────────────────
-app = create_app()
+application = create_app()
 
 
 if __name__ == "__main__":
     logging.info("Starting merged server on 0.0.0.0:5000")
     logging.info("State file: %s", config.STATE_FILE)
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    application.run(host="0.0.0.0", port=5000, debug=True)

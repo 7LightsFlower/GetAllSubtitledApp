@@ -11,12 +11,18 @@ from .config import INTERNAL_SERVER_URL, MIN_WAV_BYTES
 from .http import curl_download
 from .progress import _job_add_file, _job_log
 from .utils import (
-    extract_simple_language_name, looks_like_wav, session_dir, short_sid,
+    extract_simple_language_name,
+    looks_like_wav,
+    session_dir,
+    short_sid,
 )
 
 
-def download_tts_files(session_id, token, server_url=None, languages=None,
-                       *, retries=4, delay=20) -> list[str]:
+def download_tts_files(
+    session_id, _token, server_url=None, languages=None, *, retries=4, delay=20
+) -> list[str]:
+    """Download TTS WAV files for the requested languages."""
+    # pylint: disable=too-many-arguments,too-many-locals,too-many-branches,too-many-statements
     sdir = session_dir(session_id)
     server_url = (server_url or INTERNAL_SERVER_URL).rstrip("/")
 
@@ -60,9 +66,11 @@ def download_tts_files(session_id, token, server_url=None, languages=None,
             local_name = f"tts_{simple}.wav"
             local_path = os.path.join(sdir, local_name)
 
-            if (os.path.exists(local_path)
-                    and os.path.getsize(local_path) > MIN_WAV_BYTES
-                    and looks_like_wav(local_path)):
+            if (
+                os.path.exists(local_path)
+                and os.path.getsize(local_path) > MIN_WAV_BYTES
+                and looks_like_wav(local_path)
+            ):
                 if local_name not in downloaded:
                     downloaded.append(local_name)
                 continue
@@ -76,8 +84,12 @@ def download_tts_files(session_id, token, server_url=None, languages=None,
             kit_url = f"{server_url}/archivemediafile/{session_id}/{kit_name}"
 
             ok = curl_download(
-                kit_url, local_path, "",
-                anonymous=True, media=True, referer=referer,
+                kit_url,
+                local_path,
+                "",
+                anonymous=True,
+                media=True,
+                referer=referer,
             )
             if ok and looks_like_wav(local_path):
                 size = os.path.getsize(local_path)
@@ -99,6 +111,9 @@ def download_tts_files(session_id, token, server_url=None, languages=None,
             time.sleep(delay)
 
     if remaining:
-        logging.warning("download_tts_files: gave up on %s after %d attempt(s)",
-                        short_sid(session_id), retries)
+        logging.warning(
+            "download_tts_files: gave up on %s after %d attempt(s)",
+            short_sid(session_id),
+            retries,
+        )
     return downloaded

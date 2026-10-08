@@ -9,13 +9,14 @@ import os
 import re
 
 from docx import Document
-from docx.shared import Pt, RGBColor
+from docx.shared import RGBColor
 
-from .utils import extract_simple_language_name, safe_float
+from .utils import safe_float
 
 
 # ─── small helpers ─────────────────────────────────────────────────────
 def clean_html_tags(text: str) -> str:
+    """Remove HTML-like tags and normalize whitespace in text."""
     if not text:
         return ""
     clean = re.sub(r"<[^>]+>", " ", text)
@@ -24,6 +25,7 @@ def clean_html_tags(text: str) -> str:
 
 
 def escape_rtf(text: str) -> str:
+    """Escape text so it can be safely embedded in an RTF document."""
     if not text:
         return ""
     escaped = text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
@@ -35,6 +37,7 @@ def escape_rtf(text: str) -> str:
 
 
 def get_paragraph_number(sender: str) -> int:
+    """Return the one-based paragraph number encoded in a textstructurer sender."""
     if not sender or not sender.startswith("textstructurer:"):
         return 0
     if ":" in sender:
@@ -47,25 +50,48 @@ def get_paragraph_number(sender: str) -> int:
 
 
 def is_asr_or_mt(sender: str) -> bool:
+    """Return whether a sender represents ASR, machine translation, or translation."""
     if not sender:
         return False
     return sender.startswith(("asr:", "mt:", "translation:"))
 
 
 def is_textstructurer(sender: str) -> bool:
+    """Return whether a sender represents a text structurer."""
     return bool(sender) and sender.startswith("textstructurer:")
 
 
 def is_summarizer(sender: str) -> bool:
+    """Return whether a sender represents a summarizer."""
     return bool(sender) and sender.startswith("summarizer:")
 
 
 def extract_lang_code(language_name: str) -> str | None:
+    """Extract a supported language code from a language name."""
     if not language_name:
         return None
-    for code in ("en", "de", "fr", "es", "it", "pt", "nl", "ru", "ja",
-                 "ko", "zh", "ar", "hi", "pl", "tr", "uk", "vi", "th",
-                 "id", "ms"):
+    for code in (
+        "en",
+        "de",
+        "fr",
+        "es",
+        "it",
+        "pt",
+        "nl",
+        "ru",
+        "ja",
+        "ko",
+        "zh",
+        "ar",
+        "hi",
+        "pl",
+        "tr",
+        "uk",
+        "vi",
+        "th",
+        "id",
+        "ms",
+    ):
         if f"({code})" in language_name or f" - {code}" in language_name:
             return code
     return None
@@ -79,157 +105,221 @@ def _filter_summaries_by_language(summaries, lang_code):
 
 
 # ─── structured data extraction ────────────────────────────────────────
+def _load_structured_messages(messages_path):
+    """Load dictionary messages from a session messages file."""
+    try:
+        with open(messages_path, "r", encoding="utf-8") as file:
+            messages_data = json.load(file)
+    except (json.JSONDecodeError, OSError, TypeError):
+        return []
+
+    if not isinstance(messages_data, list):
+        return []
+
+    messages = []
+    for item in messages_data:
+        if not isinstance(item, list) or len(item) < 2:
+            continue
+        try:
+            message = json.loads(item[1]) if isinstance(item[1], str) else item[1]
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(message, dict):
+            messages.append(message)
+    return messages
+
+
+def _append_chapter_segments(structured, transcripts):
+    """Assign transcript segments to the chapter containing their start time."""
+    for transcript in transcripts:
+        for segment in transcript.get("segments", []):
+            segment_start = safe_float(segment.get("start", 0))
+            for chapter in structured["chapters"]:
+                chapter_start = safe_float(chapter.get("start", 0))
+                chapter_end = safe_float(chapter.get("end", 0))
+                if chapter_start <= segment_start < chapter_end or (
+                    chapter is structured["chapters"][-1]
+                    and segment_start >= chapter_start
+                ):
+                    chapter.setdefault("segments", []).append(segment)
+                    break
+
+
 def extract_structured_data_from_session(session_dir_path, language_filter=None):
+    """Extract structured transcript, chapter, and message data from a session."""
     json_path = os.path.join(session_dir_path, "transcripts.json")
     if not os.path.exists(json_path):
         return None
-    with open(json_path, "r", encoding="utf-8") as f:
-        all_transcripts = json.load(f)
+    with open(json_path, "r", encoding="utf-8") as file:
+        all_transcripts = json.load(file)
 
-    transcripts = ([t for t in all_transcripts
-                    if t.get("language") == language_filter]
-                   if language_filter else all_transcripts)
-
-    structured_messages: list = []
-    messages_path = os.path.join(session_dir_path, "messages.json")
-    if os.path.exists(messages_path):
-        try:
-            with open(messages_path, "r", encoding="utf-8") as f:
-                messages_data = json.load(f)
-            if isinstance(messages_data, list):
-                for item in messages_data:
-                    if isinstance(item, list) and len(item) >= 2:
-                        try:
-                            m = json.loads(item[1]) if isinstance(item[1], str) else item[1]
-                            if isinstance(m, dict):
-                                structured_messages.append(m)
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-        except (json.JSONDecodeError, TypeError, OSError):
-            pass
-
+    transcripts = (
+        [item for item in all_transcripts if item.get("language") == language_filter]
+        if language_filter
+        else all_transcripts
+    )
+    structured_messages = _load_structured_messages(
+        os.path.join(session_dir_path, "messages.json")
+    )
     structured = {
-        "transcripts": [], "chapters": [], "summaries": [],
-        "speakers": {}, "post_edited": [], "notes": [],
-        "global_summaries": [], "paragraph_breaks": [],
+        "transcripts": [],
+        "chapters": [],
+        "summaries": [],
+        "speakers": {},
+        "post_edited": [],
+        "notes": [],
+        "global_summaries": [],
+        "paragraph_breaks": [],
     }
-    for t in transcripts:
-        structured["transcripts"].append({
-            "language": t.get("language", "Unknown"),
-            "text": t.get("text", ""),
-            "segments": sorted(t.get("segments", []),
-                               key=lambda x: safe_float(x.get("start", 0))),
-            "sender": t.get("sender", ""),
-        })
+    for transcript in transcripts:
+        structured["transcripts"].append(
+            {
+                "language": transcript.get("language", "Unknown"),
+                "text": transcript.get("text", ""),
+                "segments": sorted(
+                    transcript.get("segments", []),
+                    key=lambda item: safe_float(item.get("start", 0)),
+                ),
+                "sender": transcript.get("sender", ""),
+            }
+        )
 
-    chapter_stack: list = []
-    for msg in sorted(structured_messages,
-                      key=lambda x: safe_float(x.get("start", 0))):
-        markup = msg.get("markup")
-        sender = msg.get("sender", "")
-        seq = msg.get("seq", "")
-        start = safe_float(msg.get("start", 0))
-        end = safe_float(msg.get("end", 0))
+    chapter_stack = []
+    for message in sorted(
+        structured_messages, key=lambda item: safe_float(item.get("start", 0))
+    ):
+        markup = message.get("markup")
+        sender = message.get("sender", "")
+        sequence = message.get("seq", "")
+        start = safe_float(message.get("start", 0))
+        end = safe_float(message.get("end", 0))
 
         if markup == "chapterBreak":
-            chapter = {"start": start, "end": end,
-                       "index": len(structured["chapters"]),
-                       "heading": "", "segments": []}
+            chapter = {
+                "start": start,
+                "end": end,
+                "index": len(structured["chapters"]),
+                "heading": "",
+                "segments": [],
+            }
             structured["chapters"].append(chapter)
             chapter_stack.append(chapter)
         elif markup == "heading" and chapter_stack:
-            chapter_stack[-1]["heading"] = seq
+            chapter_stack[-1]["heading"] = sequence
         elif markup == "paragraphBreak":
             structured["paragraph_breaks"].append({"start": start, "end": end})
         elif markup == "summary":
             structured["summaries"].append(
-                {"text": seq, "start": start, "end": end, "sender": sender})
+                {"text": sequence, "start": start, "end": end, "sender": sender}
+            )
         elif markup == "postedited":
             rate = "90"
-            if ":" in sender:
-                parts = sender.split(":")
-                if len(parts) > 1 and "_" in parts[1]:
-                    rate = parts[1].split("_")[0]
-            structured["post_edited"].append({
-                "text": seq, "start": start, "end": end,
-                "compression_rate": rate, "sender": sender,
-            })
-        elif markup == "notes":
-            structured["notes"].append({
-                "text": seq, "start": start, "end": end,
-                "nested_level": msg.get("nested_level", 0),
-                "chapter_index": msg.get("chapter_index", 0),
-            })
-        elif markup == "global_summary":
-            structured["global_summaries"].append({"text": seq, "sender": sender})
-
-        if "refined_sentence_cluster" in msg:
-            speaker = msg.get("refined_sentence_cluster")
-            if speaker:
-                if speaker.startswith("unk-"):
-                    speaker = f"Anonymous-{speaker.split('-')[1]}"
-                structured["speakers"][speaker] = {
-                    "name": speaker,
-                    "last_seen": datetime.datetime.now().isoformat(),
+            sender_parts = sender.split(":")
+            if len(sender_parts) > 1 and "_" in sender_parts[1]:
+                rate = sender_parts[1].split("_")[0]
+            structured["post_edited"].append(
+                {
+                    "text": sequence,
+                    "start": start,
+                    "end": end,
+                    "compression_rate": rate,
+                    "sender": sender,
                 }
+            )
+        elif markup == "notes":
+            structured["notes"].append(
+                {
+                    "text": sequence,
+                    "start": start,
+                    "end": end,
+                    "nested_level": message.get("nested_level", 0),
+                    "chapter_index": message.get("chapter_index", 0),
+                }
+            )
+        elif markup == "global_summary":
+            structured["global_summaries"].append({"text": sequence, "sender": sender})
 
-    for transcript in structured["transcripts"]:
-        for seg in transcript.get("segments", []):
-            seg_start = safe_float(seg.get("start", 0))
-            for ch in structured["chapters"]:
-                ch_start = safe_float(ch.get("start", 0))
-                ch_end = safe_float(ch.get("end", 0))
-                if ch_start <= seg_start < ch_end or (
-                    ch == structured["chapters"][-1] and seg_start >= ch_start
-                ):
-                    ch.setdefault("segments", []).append(seg)
-                    break
+        speaker = message.get("refined_sentence_cluster")
+        if speaker:
+            if speaker.startswith("unk-"):
+                speaker = f"Anonymous-{speaker.split('-')[1]}"
+            structured["speakers"][speaker] = {
+                "name": speaker,
+                "last_seen": datetime.datetime.now().isoformat(),
+            }
+
+    _append_chapter_segments(structured, structured["transcripts"])
     return structured
 
 
 # ─── plain-text formatter ──────────────────────────────────────────────
+def _select_transcript(structured_data, language_filter=None):
+    """Return the selected transcript and the corresponding language code."""
+    transcripts = structured_data.get("transcripts", [])
+    if not transcripts:
+        return None, None
+    if language_filter:
+        for transcript in transcripts:
+            if transcript.get("language") == language_filter:
+                return transcript, extract_lang_code(transcript.get("language", ""))
+        return transcripts[0], extract_lang_code(transcripts[0].get("language", ""))
+    return transcripts[0], extract_lang_code(transcripts[0].get("language", ""))
+
+
+def _append_table_of_contents(lines, chapters):
+    """Append a simple chapter table of contents."""
+    if not chapters or len(chapters) <= 1:
+        return
+    lines.append("TABLE OF CONTENTS")
+    lines.append("-" * 40)
+    for chapter in chapters:
+        idx = chapter.get("index", 0) + 1
+        heading = chapter.get("heading", "")
+        lines.append(f"  {idx}. {heading or f'Chapter {idx}'}")
+    lines.append("")
+
+
+def _append_entries(lines, heading, entries, prefix=""):
+    """Append a generic text section from entries."""
+    if not entries:
+        return
+    lines.append("=" * 60)
+    lines.append(heading)
+    lines.append("-" * 40)
+    for entry in entries:
+        text = clean_html_tags(entry.get("text", ""))
+        if prefix:
+            lines.append(f"  {prefix} {text}")
+        else:
+            lines.append(f"  {text}")
+    lines.append("")
+
+
 def format_structured_text(structured_data, language_filter=None) -> str:
+    """Format structured session data as plain text for export."""
     if not structured_data:
         return "No structured data available."
+
     lines: list[str] = []
-
-    transcripts_data = structured_data.get("transcripts", [])
-    selected = None
-    if language_filter:
-        for t in transcripts_data:
-            if t.get("language") == language_filter:
-                selected = t
-                break
-        if not selected and transcripts_data:
-            selected = transcripts_data[0]
-    elif transcripts_data:
-        selected = transcripts_data[0]
-
-    lang_code = extract_lang_code(selected.get("language", "")) if selected else None
+    selected, lang_code = _select_transcript(structured_data, language_filter)
     filtered_summaries = _filter_summaries_by_language(
-        structured_data.get("summaries", []), lang_code)
+        structured_data.get("summaries", []), lang_code
+    )
     filtered_global = _filter_summaries_by_language(
-        structured_data.get("global_summaries", []), lang_code)
+        structured_data.get("global_summaries", []), lang_code
+    )
     filtered_pe = _filter_summaries_by_language(
-        structured_data.get("post_edited", []), lang_code)
+        structured_data.get("post_edited", []), lang_code
+    )
 
-    if structured_data.get("chapters") and len(structured_data["chapters"]) > 1:
-        lines.append("TABLE OF CONTENTS")
-        lines.append("-" * 40)
-        for ch in structured_data["chapters"]:
-            idx = ch.get("index", 0) + 1
-            heading = ch.get("heading", "")
-            lines.append(f"  {idx}. {heading or f'Chapter {idx}'}")
-        lines.append("")
+    _append_table_of_contents(lines, structured_data.get("chapters", []))
 
     paragraph_counter = 0
-    has_chapters = bool(structured_data.get("chapters"))
 
     def emit_segment(seg):
         nonlocal paragraph_counter
-        text = seg.get("text", "")
         sender = seg.get("sender", "")
-        clean = clean_html_tags(text)
+        clean = clean_html_tags(seg.get("text", ""))
         if not clean:
             return
         if is_textstructurer(sender):
@@ -242,16 +332,20 @@ def format_structured_text(structured_data, language_filter=None) -> str:
         elif is_summarizer(sender):
             lines.append(f"Summary: {clean}")
         else:
-            lines.append(f"[{sender}]" if sender else "")
+            if sender:
+                lines.append(f"[{sender}]")
             lines.append(clean)
 
-    if has_chapters:
-        for ch in structured_data["chapters"]:
-            idx = ch.get("index", 0) + 1
-            heading = ch.get("heading", "")
-            lines.append(f"--- Chapter {idx}: {heading} ---" if heading
-                         else f"--- Chapter {idx} ---")
-            for seg in ch.get("segments", []):
+    if structured_data.get("chapters"):
+        for chapter in structured_data["chapters"]:
+            idx = chapter.get("index", 0) + 1
+            heading = chapter.get("heading", "")
+            lines.append(
+                f"--- Chapter {idx}: {heading} ---"
+                if heading
+                else f"--- Chapter {idx} ---"
+            )
+            for seg in chapter.get("segments", []):
                 emit_segment(seg)
             lines.append("")
     elif selected:
@@ -259,47 +353,123 @@ def format_structured_text(structured_data, language_filter=None) -> str:
         for seg in selected.get("segments", []):
             emit_segment(seg)
 
-    if filtered_summaries:
-        lines.append("=" * 60); lines.append("SUMMARIES"); lines.append("-" * 40)
-        for s in filtered_summaries:
-            lines.append(f"  📋 {clean_html_tags(s.get('text', ''))}")
-        lines.append("")
-    if filtered_global:
-        lines.append("=" * 60); lines.append("GLOBAL SUMMARIES"); lines.append("-" * 40)
-        for gs in filtered_global:
-            lines.append(f"  🌐 {clean_html_tags(gs.get('text', ''))}")
-        lines.append("")
+    _append_entries(lines, "SUMMARIES", filtered_summaries, "📋")
+    _append_entries(lines, "GLOBAL SUMMARIES", filtered_global, "🌐")
     if filtered_pe:
-        lines.append("=" * 60); lines.append("POST-EDITED CONTENT"); lines.append("-" * 40)
-        for pe in filtered_pe:
-            rate = pe.get("compression_rate", "N/A")
-            lines.append(f"  [Compression: {rate}%] {clean_html_tags(pe.get('text', ''))}")
-        lines.append("")
+        entries = []
+        for entry in filtered_pe:
+            rate = entry.get("compression_rate", "N/A")
+            text = clean_html_tags(entry.get("text", ""))
+            entries.append({"text": f"[Compression: {rate}%] {text}"})
+        _append_entries(lines, "POST-EDITED CONTENT", entries)
 
     return "\n".join(lines).strip()
 
 
 # ─── individual format writers ─────────────────────────────────────────
 def export_structured_txt(session_id, session_dir_path, language_filter=None):
+    """Export the session's structured data as a UTF-8 text file."""
     data = extract_structured_data_from_session(session_dir_path, language_filter)
     if not data:
         return io.BytesIO(b"No structured data available.")
     text = format_structured_text(data, language_filter)
-    header = ("=" * 80 + "\n"
-              f"SESSION: {session_id}\n"
-              + (f"FILTER: {language_filter}\n" if language_filter else "")
-              + f"Export Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-              + "=" * 80 + "\n\n")
+    header = (
+        "=" * 80 + "\n"
+        f"SESSION: {session_id}\n"
+        + (f"FILTER: {language_filter}\n" if language_filter else "")
+        + f"Export Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        + "=" * 80
+        + "\n\n"
+    )
     return io.BytesIO((header + text).encode("utf-8"))
 
 
+def _add_docx_transcript(doc, data, selected):
+    """Add transcript content and chapter headings to a document."""
+    chapters = data.get("chapters", [])
+    paragraph_counter = 0
+
+    def emit_docx(segment):
+        nonlocal paragraph_counter
+        clean = clean_html_tags(segment.get("text", ""))
+        sender = segment.get("sender", "")
+        if not clean:
+            return
+
+        if is_textstructurer(sender):
+            paragraph_counter += 1
+            paragraph = doc.add_paragraph()
+            run = paragraph.add_run(f"[{paragraph_counter}]")
+            run.bold = True
+            run.font.color.rgb = RGBColor(0, 102, 204)
+            doc.add_paragraph(clean)
+        elif is_asr_or_mt(sender):
+            doc.add_paragraph(clean)
+        elif is_summarizer(sender):
+            paragraph = doc.add_paragraph()
+            run = paragraph.add_run("Summary: ")
+            run.bold = True
+            run.font.color.rgb = RGBColor(255, 165, 0)
+            paragraph.add_run(clean)
+        else:
+            if sender:
+                paragraph = doc.add_paragraph()
+                run = paragraph.add_run(f"[{sender}]")
+                run.bold = True
+                run.font.color.rgb = RGBColor(0, 102, 204)
+            doc.add_paragraph(clean)
+
+    if chapters:
+        for chapter in chapters:
+            index = chapter.get("index", 0) + 1
+            heading = chapter.get("heading", "")
+            doc.add_heading(
+                f"Chapter {index}: {heading}" if heading else f"Chapter {index}",
+                level=2,
+            )
+            for segment in chapter.get("segments", []):
+                emit_docx(segment)
+            doc.add_paragraph("")
+    elif selected:
+        doc.add_heading(selected.get("language", "Unknown"), level=2)
+        for segment in selected.get("segments", []):
+            emit_docx(segment)
+
+
+def _add_docx_summaries(doc, summaries, heading):
+    """Add a section of summaries to a document."""
+    if not summaries:
+        return
+    doc.add_heading(heading, level=1)
+    for summary in summaries:
+        paragraph = doc.add_paragraph()
+        paragraph.add_run("📋 ").bold = True
+        paragraph.add_run(clean_html_tags(summary.get("text", "")))
+
+
+def _add_docx_post_edited(doc, entries):
+    """Add post-edited content to a document."""
+    if not entries:
+        return
+    doc.add_heading("Post-Edited Content", level=1)
+    for entry in entries:
+        paragraph = doc.add_paragraph()
+        paragraph.add_run(
+            f"[Compression: {entry.get('compression_rate', 'N/A')}%] "
+        ).bold = True
+        paragraph.add_run(clean_html_tags(entry.get("text", "")))
+
+
 def export_structured_docx(session_id, session_dir_path, language_filter=None):
+    """Export structured session data to a UTF-8 DOCX document."""
     data = extract_structured_data_from_session(session_dir_path, language_filter)
     if not data:
         doc = Document()
         doc.add_heading("No structured data available", 1)
-        buf = io.BytesIO(); doc.save(buf); buf.seek(0)
-        return buf
+        buffer = io.BytesIO()
+        doc.save(buffer)
+        buffer.seek(0)
+        return buffer
 
     doc = Document()
     title = f"Session: {session_id}"
@@ -308,104 +478,91 @@ def export_structured_docx(session_id, session_dir_path, language_filter=None):
     doc.add_heading(title, 0)
     doc.add_paragraph(f"Session ID: {session_id}")
     doc.add_paragraph(
-        f"Export Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        f"Export Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
     doc.add_paragraph("")
 
-    transcripts_data = data.get("transcripts", [])
+    transcripts = data.get("transcripts", [])
     selected = None
     if language_filter:
-        selected = next((t for t in transcripts_data
-                         if t.get("language") == language_filter), None)
-        if not selected and transcripts_data:
-            selected = transcripts_data[0]
-    elif transcripts_data:
-        selected = transcripts_data[0]
+        selected = next(
+            (
+                transcript
+                for transcript in transcripts
+                if transcript.get("language") == language_filter
+            ),
+            None,
+        )
+        if not selected and transcripts:
+            selected = transcripts[0]
+    elif transcripts:
+        selected = transcripts[0]
 
-    lang_code = extract_lang_code(selected.get("language", "")) if selected else None
-    filtered_summaries = _filter_summaries_by_language(data.get("summaries", []), lang_code)
-    filtered_global = _filter_summaries_by_language(data.get("global_summaries", []), lang_code)
-    filtered_pe = _filter_summaries_by_language(data.get("post_edited", []), lang_code)
+    language_code = (
+        extract_lang_code(selected.get("language", "")) if selected else None
+    )
+    summaries = _filter_summaries_by_language(data.get("summaries", []), language_code)
+    global_summaries = _filter_summaries_by_language(
+        data.get("global_summaries", []), language_code
+    )
+    post_edited = _filter_summaries_by_language(
+        data.get("post_edited", []), language_code
+    )
 
-    if data.get("chapters") and len(data["chapters"]) > 1:
+    chapters = data.get("chapters", [])
+    if len(chapters) > 1:
         doc.add_heading("Table of Contents", level=1)
-        for ch in data["chapters"]:
-            idx = ch.get("index", 0) + 1
-            p = doc.add_paragraph()
-            p.add_run(f"{idx}. ").bold = True
-            p.add_run(ch.get("heading") or f"Chapter {idx}")
+        for chapter in chapters:
+            index = chapter.get("index", 0) + 1
+            paragraph = doc.add_paragraph()
+            paragraph.add_run(f"{index}. ").bold = True
+            paragraph.add_run(chapter.get("heading") or f"Chapter {index}")
         doc.add_paragraph("")
 
     doc.add_heading("Transcript", level=1)
-    paragraph_counter = 0
+    _add_docx_transcript(doc, data, selected)
+    _add_docx_summaries(doc, summaries, "Summaries")
+    _add_docx_summaries(doc, global_summaries, "Global Summaries")
+    _add_docx_post_edited(doc, post_edited)
 
-    def emit_docx(seg):
-        nonlocal paragraph_counter
-        text = seg.get("text", "")
-        sender = seg.get("sender", "")
-        clean = clean_html_tags(text)
-        if not clean:
-            return
-        if is_textstructurer(sender):
-            paragraph_counter += 1
-            p = doc.add_paragraph()
-            run = p.add_run(f"[{paragraph_counter}]")
-            run.bold = True
-            run.font.color.rgb = RGBColor(0, 102, 204)
-            doc.add_paragraph(clean)
-        elif is_asr_or_mt(sender):
-            doc.add_paragraph(clean)
-        elif is_summarizer(sender):
-            p = doc.add_paragraph()
-            run = p.add_run("Summary: ")
-            run.bold = True
-            run.font.color.rgb = RGBColor(255, 165, 0)
-            p.add_run(clean)
-        else:
-            if sender:
-                p = doc.add_paragraph()
-                run = p.add_run(f"[{sender}]")
-                run.bold = True
-                run.font.color.rgb = RGBColor(0, 102, 204)
-            doc.add_paragraph(clean)
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
 
-    if data.get("chapters"):
-        for ch in data["chapters"]:
-            idx = ch.get("index", 0) + 1
-            heading = ch.get("heading", "")
-            doc.add_heading(f"Chapter {idx}: {heading}" if heading
-                            else f"Chapter {idx}", level=2)
-            for seg in ch.get("segments", []):
-                emit_docx(seg)
-            doc.add_paragraph("")
-    elif selected:
-        doc.add_heading(selected.get("language", "Unknown"), level=2)
-        for seg in selected.get("segments", []):
-            emit_docx(seg)
 
-    if filtered_summaries:
-        doc.add_heading("Summaries", level=1)
-        for s in filtered_summaries:
-            p = doc.add_paragraph()
-            p.add_run("📋 ").bold = True
-            p.add_run(clean_html_tags(s.get("text", "")))
-    if filtered_global:
-        doc.add_heading("Global Summaries", level=1)
-        for gs in filtered_global:
-            p = doc.add_paragraph()
-            p.add_run("🌐 ").bold = True
-            p.add_run(clean_html_tags(gs.get("text", "")))
-    if filtered_pe:
-        doc.add_heading("Post-Edited Content", level=1)
-        for pe in filtered_pe:
-            p = doc.add_paragraph()
-            p.add_run(f"[Compression: {pe.get('compression_rate', 'N/A')}%] ").bold = True
-            p.add_run(clean_html_tags(pe.get("text", "")))
+def _select_structured_transcript(data, language_filter=None):
+    """Return the requested transcript, preferring the first transcript as fallback."""
+    transcripts = data.get("transcripts", [])
+    if language_filter:
+        return next(
+            (item for item in transcripts if item.get("language") == language_filter),
+            transcripts[0] if transcripts else None,
+        )
+    return transcripts[0] if transcripts else None
 
-    buf = io.BytesIO(); doc.save(buf); buf.seek(0)
-    return buf
+
+def _append_rtf_segment(parts, segment, paragraph_counter):
+    """Append one segment to an RTF document and return its paragraph counter."""
+    clean = clean_html_tags(segment.get("text", ""))
+    if not clean:
+        return paragraph_counter
+
+    sender = segment.get("sender", "")
+    if is_textstructurer(sender):
+        paragraph_counter += 1
+        parts.append(r"\b " + escape_rtf(f"[{paragraph_counter}]") + r"\b0\par")
+    elif is_summarizer(sender):
+        parts.append(r"\b Summary: \b0 ")
+    elif sender:
+        parts.append(r"\b " + escape_rtf(f"[{sender}]") + r"\b0\par")
+
+    parts.append(escape_rtf(clean) + r"\par")
+    return paragraph_counter
 
 
 def export_structured_rtf(session_id, session_dir_path, language_filter=None):
+    """Export structured session data as an RTF document."""
     data = extract_structured_data_from_session(session_dir_path, language_filter)
     if not data:
         return io.BytesIO(b"{\\rtf1\\ansi No structured data available.}")
@@ -418,86 +575,70 @@ def export_structured_rtf(session_id, session_dir_path, language_filter=None):
     ]
     if language_filter:
         parts.append(r"\b\fs28 Filter: " + language_filter + r"\b0\par\par")
-    parts.append(r"\b\fs28 Export Date: "
-                 + datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                 + r"\b0\par\par")
+    parts.append(
+        r"\b\fs28 Export Date: "
+        + datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        + r"\b0\par\par"
+    )
 
-    transcripts_data = data.get("transcripts", [])
-    selected = None
-    if language_filter:
-        selected = next((t for t in transcripts_data
-                         if t.get("language") == language_filter), None)
-        if not selected and transcripts_data:
-            selected = transcripts_data[0]
-    elif transcripts_data:
-        selected = transcripts_data[0]
-
+    selected = _select_structured_transcript(data, language_filter)
     lang_code = extract_lang_code(selected.get("language", "")) if selected else None
-    fs = _filter_summaries_by_language(data.get("summaries", []), lang_code)
-    fg = _filter_summaries_by_language(data.get("global_summaries", []), lang_code)
-    fp = _filter_summaries_by_language(data.get("post_edited", []), lang_code)
+    filtered_summaries = _filter_summaries_by_language(
+        data.get("summaries", []), lang_code
+    )
+    filtered_global = _filter_summaries_by_language(
+        data.get("global_summaries", []), lang_code
+    )
+    filtered_post_edited = _filter_summaries_by_language(
+        data.get("post_edited", []), lang_code
+    )
 
     paragraph_counter = 0
-
-    def emit_rtf(seg):
-        nonlocal paragraph_counter
-        text = seg.get("text", "")
-        sender = seg.get("sender", "")
-        clean = clean_html_tags(text)
-        if not clean:
-            return
-        if is_textstructurer(sender):
-            paragraph_counter += 1
-            parts.append(r"\b " + escape_rtf(f"[{paragraph_counter}]") + r"\b0\par")
-            parts.append(escape_rtf(clean) + r"\par")
-        elif is_asr_or_mt(sender):
-            parts.append(escape_rtf(clean) + r"\par")
-        elif is_summarizer(sender):
-            parts.append(r"\b Summary: \b0 " + escape_rtf(clean) + r"\par")
-        else:
-            if sender:
-                parts.append(r"\b " + escape_rtf(f"[{sender}]") + r"\b0\par")
-            parts.append(escape_rtf(clean) + r"\par")
-
-    if data.get("chapters"):
-        for ch in data["chapters"]:
-            idx = ch.get("index", 0) + 1
-            heading = ch.get("heading", "")
-            parts.append(r"\b\fs24 Chapter " + str(idx)
-                         + (": " + escape_rtf(heading) if heading else "")
-                         + r"\b0\par")
-            for seg in ch.get("segments", []):
-                emit_rtf(seg)
+    chapters = data.get("chapters")
+    if chapters:
+        for chapter in chapters:
+            index = chapter.get("index", 0) + 1
+            heading = chapter.get("heading", "")
+            parts.append(
+                r"\b\fs24 Chapter "
+                + str(index)
+                + (": " + escape_rtf(heading) if heading else "")
+                + r"\b0\par"
+            )
+            for segment in chapter.get("segments", []):
+                paragraph_counter = _append_rtf_segment(
+                    parts, segment, paragraph_counter
+                )
             parts.append(r"\par")
     elif selected:
-        parts.append(r"\b\fs24 " + escape_rtf(selected.get("language", "Unknown"))
-                     + r"\b0\par")
-        for seg in selected.get("segments", []):
-            emit_rtf(seg)
+        parts.append(
+            r"\b\fs24 " + escape_rtf(selected.get("language", "Unknown")) + r"\b0\par"
+        )
+        for segment in selected.get("segments", []):
+            paragraph_counter = _append_rtf_segment(parts, segment, paragraph_counter)
 
-    if fs:
-        parts.append(r"\b\fs26 Summaries\b0\par")
-        for s in fs:
-            parts.append(r"\b 📋 \b0 " + escape_rtf(clean_html_tags(s.get("text", "")))
-                         + r"\par")
-    if fg:
-        parts.append(r"\b\fs26 Global Summaries\b0\par")
-        for gs in fg:
-            parts.append(r"\b 🌐 \b0 " + escape_rtf(clean_html_tags(gs.get("text", "")))
-                         + r"\par")
-    if fp:
-        parts.append(r"\b\fs26 Post-Edited Content\b0\par")
-        for pe in fp:
-            parts.append(
-                r"\b [Compression: " + str(pe.get("compression_rate", "N/A"))
-                + r"%]\b0 " + escape_rtf(clean_html_tags(pe.get("text", "")))
-                + r"\par")
+    for heading, summaries, icon in (
+        ("Summaries", filtered_summaries, "📋"),
+        ("Global Summaries", filtered_global, "🌐"),
+        ("Post-Edited Content", filtered_post_edited, ""),
+    ):
+        if not summaries:
+            continue
+        parts.append(r"\b\fs26 " + heading + r"\b0\par")
+        for summary in summaries:
+            text = escape_rtf(clean_html_tags(summary.get("text", "")))
+            prefix = r"\b " + icon + r" \b0 " if icon else r"\b "
+            if heading == "Post-Edited Content":
+                compression = summary.get("compression_rate", "N/A")
+                prefix += r"[Compression: " + str(compression) + r"%]\b0 "
+            parts.append(prefix + text + r"\par")
 
     parts.append("}")
     return io.BytesIO("".join(parts).encode("utf-8"))
 
 
 def get_available_languages(session_dir_path) -> list[str]:
+    """Return the unique languages available in a session's transcript file."""
     json_path = os.path.join(session_dir_path, "transcripts.json")
     if not os.path.exists(json_path):
         return []
@@ -507,6 +648,7 @@ def get_available_languages(session_dir_path) -> list[str]:
 
 
 def resolve_export_language_name(session_dir_path, language) -> str:
+    """Return the canonical language name for an export language."""
     json_path = os.path.join(session_dir_path, "transcripts.json")
     if not os.path.exists(json_path):
         return "transcript"
@@ -526,6 +668,7 @@ def resolve_export_language_name(session_dir_path, language) -> str:
 
 
 def clean_filename_from_language(name: str) -> str:
+    """Clean a language name into a safe, filename-friendly string."""
     clean = name.replace(" ", "_").replace("(", "").replace(")", "")
     clean = clean.replace("/", "_").replace("\\", "_").replace(":", "_")
     clean = re.sub(r"[^a-zA-Z0-9_-]", "", clean)

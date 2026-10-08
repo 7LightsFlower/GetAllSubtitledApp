@@ -162,7 +162,7 @@ _KNOWN_SERVERS = {
 _SERVER_LABELS = {
     "https://lt2srv.iar.kit.edu": "KIT Lecture Translator",
     "https://lt2srv-backup.iar.kit.edu": "Backup Server",
-    "https://lt2srv-sscherrer.isl.iar.kit.edu": "Developer Own (SScherrer)",
+    "https://lt2srv-sscherrer.isl.iar.kit.edu": "Developer\'s Own (SScherrer)",
 }
 
 ALLOWED_TARGET_SERVERS = frozenset(_KNOWN_SERVERS)
@@ -977,16 +977,18 @@ def _email_from_token(token: str) -> str:
             return email
     return ""
 
+# ─── Subfolder inside the user's KIT home where every session lives ────
+# Every session uploaded through this backend is placed under
+# /home/<email>/GetAllSubtitledApp/<session_name>. Set the env var to
+# "" to fall back to /home/<email> (the old behaviour).
+KIT_SUBFOLDER = os.environ.get("KIT_SUBFOLDER", "GetAllSubtitledApp").strip().strip("/")
 
 def _user_home_path(token: str) -> str:
     """Build the LTKIT upload path from the authenticated user.
 
-    KIT bearer tokens have the shape ``<opaque>|<expiry>|<email>``.
-    The email is the identity LT KIT uses to build the user's home
-    directory. We copy it **verbatim** — no domain normalisation, no
-    case-folding, no trimming beyond the outer whitespace. Whatever
-    the token says is what KIT is expecting, so whatever the token
-    says is what we must send.
+    Returns ``/home/<email>`` or ``/home/<email>/<KIT_SUBFOLDER>``.
+    The email is copied verbatim out of the bearer token — no domain
+    normalisation, no case-folding, no trimming beyond outer whitespace.
     """
     if not token:
         raise ValueError("Cannot derive the upload path: no token was supplied.")
@@ -999,17 +1001,17 @@ def _user_home_path(token: str) -> str:
             f"('<opaque>|<expiry>|<email>')."
         )
 
-    # Only the *outer* whitespace is stripped. Interior characters —
-    # dots, plus signs, the domain — are preserved exactly.
     email = parts[-1].strip()
-
     if "@" not in email:
         raise ValueError(
             f"Cannot derive the upload path: last token field "
             f"{email!r} does not contain '@'."
         )
 
-    return f"/home/{email}"
+    base = f"/home/{email}"
+    if KIT_SUBFOLDER:
+        return f"{base}/{KIT_SUBFOLDER}"
+    return base
 
 
 def _safe_local_name(name: str) -> str:
