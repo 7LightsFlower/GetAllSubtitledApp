@@ -7329,6 +7329,158 @@ def _build_greenscreen_for_project(video_key: str) -> bool:
                 os.remove(audio_path)
             except OSError:
                 pass
+# ─── JOB SETTINGS PERSISTENCE ──────────────────────────────────────────
+# Settings are stored as plain JSON files under <backend>/settings/ so
+# they survive a server restart and are visible to anyone who shells
+# into the container. Two kinds:
+#
+#   video_<key>.json        — auto-saved settings for one video
+#   _presets.json           — user-named presets, shared across videos
+#   _defaults.json          — global fallback when a video has no file
+_SETTINGS_DIR = os.path.join(os.path.dirname(__file__), "settings")
+os.makedirs(_SETTINGS_DIR, exist_ok=True)
+
+
+def _settings_path(kind: str, key: str = "") -> str:
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", key)[:80] or "default"
+    return os.path.join(_SETTINGS_DIR, f"{kind}_{safe}.json")
+
+
+def _read_settings_file(path: str) -> dict:
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError) as e:
+        logging.warning("settings: read failed for %s: %s", path, e)
+        return {}
+
+
+def _write_settings_file(path: str, data: dict) -> None:
+    """Atomic write: temp file + os.replace. Readers never see a
+    half-written file."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+@app.route(
+    "/video-job-settings/<video_key>",
+    methods=["GET", "PUT", "DELETE", "OPTIONS"],
+)
+def video_job_settings(video_key):
+    """Per-video saved job settings.
+
+    GET    → saved settings object (or {} when none)
+    PUT    → replace it with the posted JSON object
+    DELETE → remove the file (reset to whatever _defaults.json says)
+    """
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    path = _settings_path("video", video_key)
+
+    if request.method == "GET":
+        return jsonify(_read_settings_file(path)), 200
+
+    if request.method == "DELETE":
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+            return jsonify({"success": True}), 200
+        except OSError as e:
+            return jsonify({"error": str(e)}), 500
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Expected a JSON object"}), 400
+
+    try:
+        _write_settings_file(path, payload)
+        logging.info(
+            "video-job-settings: saved %d keys for %s",
+            len(payload),
+            video_key,
+        )
+        return jsonify({"success": True, "keys": len(payload)}), 200
+    except OSError as e:
+        return jsonify({"error": f"Could not save settings: {e}"}), 500
+
+
+@app.route("/job-settings-defaults", methods=["GET", "PUT", "OPTIONS"])
+def job_settings_defaults():
+    """Global default job settings, consulted when a video has none."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    path = _settings_path("defaults")
+
+    if request.method == "GET":
+        return jsonify(_read_settings_file(path)), 200
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Expected a JSON object"}), 400
+    try:
+        _write_settings_file(path, payload)
+        return jsonify({"success": True}), 200
+    except OSError as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route(
+    "/job-settings-presets",
+    methods=["GET", "POST", "DELETE", "OPTIONS"],
+)
+def job_settings_presets():
+    """Named settings presets, shared by every video.
+
+    GET                  → {"presets": {name: {...}, …}}
+    POST {name, settings}→ create or overwrite one preset
+    DELETE ?name=…        → delete one preset
+    """
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    path = _settings_path("presets")
+    store = _read_settings_file(path)
+    presets = store.get("presets")
+    if not isinstance(presets, dict):
+        presets = {}
+
+    if request.method == "GET":
+        return jsonify({"presets": presets}), 200
+
+    if request.method == "DELETE":
+        name = (request.args.get("name") or "").strip()
+        if not name:
+            return jsonify({"error": "name is required"}), 400
+        presets.pop(name, None)
+        try:
+            _write_settings_file(path, {"presets": presets})
+        except OSError as e:
+            return jsonify({"error": str(e)}), 500
+        return jsonify({"success": True, "count": len(presets)}), 200
+
+    payload = request.get_json(silent=True) or {}
+    name = str(payload.get("name") or "").strip()
+    settings = payload.get("settings")
+    if not name or not isinstance(settings, dict):
+        return jsonify({"error": "name and settings are required"}), 400
+    if len(name) > 100:
+        return jsonify({"error": "name is too long"}), 400
+    presets[name] = settings
+    try:
+        _write_settings_file(path, {"presets": presets})
+    except OSError as e:
+        return jsonify({"error": str(e)}), 500
+    logging.info(
+        "job-settings-presets: saved %r (%d keys)", name, len(settings)
+    )
+    return jsonify({"success": True, "name": name}), 200
 
 
 # ─── AUTH ENDPOINTS ─────────────────────────────────────────────────────
@@ -7656,12 +7808,55 @@ def update_job_remarks(video_key, session_id):
     if len(remarks) > 4096:
         return jsonify({"error": "remarks is too long (max 4096)"}), 400
 
-    entry = next(
-        (e for e in project["job_history"] if e.get("session_id") == session_id),
-        None,
-    )
+    # ── Locate the entry ────────────────────────────────────────────
+    # Three lookups, most specific first:
+    #   1. exact match on session_id
+    #   2. match after stripping whitespace on both sides (a proxy
+    #      can turn '+' into ' ' in a path segment)
+    #   3. match after comparing the URL-decoded forms
+    def _canon(s: str) -> str:
+        return urllib.parse.unquote(str(s or "")).strip()
+
+    want_exact = session_id
+    want_canon = _canon(session_id)
+
+    entry = None
+    for e in project["job_history"]:
+        if e.get("session_id") == want_exact:
+            entry = e
+            break
     if entry is None:
-        return jsonify({"error": "Job not found in history"}), 404
+        for e in project["job_history"]:
+            if _canon(e.get("session_id", "")) == want_canon:
+                entry = e
+                break
+
+    # ── Fall back: create the entry ─────────────────────────────────
+    # The client may be writing remarks on a job it knows about but
+    # the server doesn't have yet (first-ever remarks on a job whose
+    # PUT to /video-job-history raced with this call, or an older
+    # client that stores history locally). Rather than 404, seed a
+    # minimal entry so the note is not lost.
+    if entry is None:
+        logging.info(
+            "job-remarks: no existing entry for %s on %s — creating one",
+            _short_sid(session_id),
+            video_key,
+        )
+        entry = {
+            "session_id": session_id,
+            "session_url": "",
+            "session_name": session_id,
+            "timestamp": utc_now_iso(),
+            "date": datetime.datetime.now().strftime("%Y-%m-%d"),
+            "status": "Unknown",
+            "has_output": False,
+            "output_files": 0,
+            "pipeline": _SERVER_LABELS.get(INTERNAL_SERVER_URL, INTERNAL_SERVER_URL),
+            "pipeline_url": INTERNAL_SERVER_URL,
+            "email": "",
+        }
+        project["job_history"].insert(0, entry)
 
     entry["remarks"] = remarks
     save_state()

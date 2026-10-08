@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:asr_live_translator/screens/login_screen.dart';
 import 'package:asr_live_translator/screens/register_screen.dart';
 import 'package:asr_live_translator/screens/forgot_password_screen.dart';
+import 'package:asr_live_translator/screens/session_detail_screen.dart';
 import 'package:asr_live_translator/screens/working_screen.dart';
 import 'package:asr_live_translator/screens/splash_screen.dart';
 import 'package:asr_live_translator/constants.dart';
@@ -30,12 +31,62 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: appTitle,
       initialRoute: '/splash',
-      routes: {
-        '/splash': (context) => const SplashScreen(),
-        '/login': (context) => const LoginScreen(),
-        '/register': (context) => const RegisterScreen(),
-        '/forgot_password': (context) => const ForgotPasswordScreen(),
-        '/working': (context) => const WorkingScreen(),
+      // `onGenerateRoute` is used instead of `routes:` because the
+      // session-detail path carries a parameter (`:video_key`) that
+      // the static `routes:` map cannot express.
+      onGenerateRoute: (settings) {
+        final name = settings.name ?? '/';
+
+        // ── /session-detail/<video_key> ───────────────────────────
+        // Matches a single path segment (no `/`, no query). The
+        // video key is a UUID, but the regex is deliberately liberal
+        // so a future change to the key format does not break the
+        // route.
+        final sessionDetail =
+            RegExp(r'^/session-detail/([^/?#]+)').firstMatch(name);
+        if (sessionDetail != null) {
+          final videoKey =
+              Uri.decodeComponent(sessionDetail.group(1)!);
+          return MaterialPageRoute(
+            settings: settings,
+            builder: (_) => LiveTranscriptScreen(videoKey: videoKey),
+          );
+        }
+
+        // ── Static routes ─────────────────────────────────────────
+        switch (name) {
+          case '/splash':
+            return MaterialPageRoute(
+              settings: settings,
+              builder: (_) => const SplashScreen(),
+            );
+          case '/login':
+            return MaterialPageRoute(
+              settings: settings,
+              builder: (_) => const LoginScreen(),
+            );
+          case '/register':
+            return MaterialPageRoute(
+              settings: settings,
+              builder: (_) => const RegisterScreen(),
+            );
+          case '/forgot_password':
+            return MaterialPageRoute(
+              settings: settings,
+              builder: (_) => const ForgotPasswordScreen(),
+            );
+          case '/working':
+            return MaterialPageRoute(
+              settings: settings,
+              builder: (_) => const WorkingScreen(),
+            );
+        }
+
+        // Anything else: fall back to splash rather than crashing.
+        return MaterialPageRoute(
+          settings: settings,
+          builder: (_) => const SplashScreen(),
+        );
       },
     );
   }

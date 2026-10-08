@@ -12,6 +12,7 @@ import 'package:asr_live_translator/services/server_config_service.dart';
 import 'package:asr_live_translator/widgets/job_progress_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:flutter/services.dart'; // LogicalKeyboardKey
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
 import 'package:asr_live_translator/widgets/video_player_widget.dart';
@@ -327,6 +328,11 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
   Timer? _autoCheckTimer;
 
+  // Debounce for pushing the current Job Settings to the backend.
+  // Cancelled on dispose and re-armed on every field change, so a
+  // burst of typing produces a single PUT.
+  Timer? _settingsPushDebounce;
+
   // ─── Init ─────────────────────────────────────────────────────────
   @override
   void initState() {
@@ -340,6 +346,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     _checkConnection();
     _loadJobHistory().then((_) => _loadSavedSessionId());
     _fetchDetail();
+    _registerDeepLink();
 
     // Poll the job status every 30 s while any job is still "Processing".
     _autoCheckTimer = Timer.periodic(const Duration(seconds: 30), (_) {
@@ -389,84 +396,187 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     return '';
   }
 
-  // ═══════════════════════════════════════════════════════════════════
-  //  JOB SETTINGS PERSISTENCE
-  // ═══════════════════════════════════════════════════════════════════
-
-  Future<void> _loadJobSettings() async {
+  /// Reflect the current video on the URL bar, so the page can be
+  /// bookmarked or shared as a single clickable link.
+  ///
+  /// Route shape:  /session-detail/<video_key>
+  void _registerDeepLink() {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_kSettingsKey);
-      if (raw == null || raw.isEmpty) return;
-      final data = jsonDecode(raw) as Map<String, dynamic>;
-
-      if (!mounted) return;
-      setState(() {
-        _inputLanguages
-          ..clear()
-          ..addAll((data['input_languages'] as List?)?.cast<String>() ?? ['en']);
-        _outputLanguages
-          ..clear()
-          ..addAll((data['output_languages'] as List?)?.cast<String>() ?? ['de']);
-        _audioLanguages
-          ..clear()
-          ..addAll((data['audio_languages'] as List?)?.cast<String>() ?? const []);
-
-        _availability       = data['availability']       as String? ?? _availability;
-        _format             = data['format']             as String? ?? _format;
-        _smartChaptering    = data['smart_chaptering']   as String? ?? _smartChaptering;
-        _ttsQualityMode     = data['tts_quality_mode']   as String? ?? _ttsQualityMode;
-        _errorCorrection    = data['error_correction']   as String? ?? _errorCorrection;
-
-        _profanityFilter    = data['profanity_filter']   as bool? ?? _profanityFilter;
-        _filterMusic        = data['filter_music']       as bool? ?? _filterMusic;
-        _enableSummarization= data['summarization']      as bool? ?? _enableSummarization;
-        _enableLiveNotes    = data['live_notes']         as bool? ?? _enableLiveNotes;
-        _enableDiarization  = data['diarization']        as bool? ?? _enableDiarization;
-        _enableAIAssistant  = data['ai_assistant']       as bool? ?? _enableAIAssistant;
-        _saveSession        = data['save_session']       as bool? ?? _saveSession;
-        _distinguishUnknownSpeakers =
-            data['distinguish_unknown_speakers'] as bool? ?? _distinguishUnknownSpeakers;
-
-        _postproduction
-          ..clear()
-          ..addAll((data['postproduction'] as List?)?.cast<String>() ?? const []);
-
-        _muteController.text  = data['mute']  as String? ?? _muteController.text;
-        _pauseController.text = data['pause'] as String? ?? _pauseController.text;
-      });
+      final desiredPath = '/session-detail/${widget.videoKey}';
+      if (html.window.location.pathname != desiredPath) {
+        html.window.history.replaceState(
+          null,
+          'Session Detail',
+          desiredPath,
+        );
+      }
     } catch (e) {
-      debugPrint('Error loading job settings: $e');
+      debugPrint('deep-link update failed: $e');
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════════
+  //  JOB SETTINGS PERSISTENCE
+  // ═══════════════════════════════════════════════════════════════════
+  /// Everything the user can currently see in the Job Settings panel,
+  /// as a JSON-serialisable map. This is the object we persist.
+  Map<String, dynamic> _currentSettingsMap() {
+    return {
+      'input_languages': List<String>.from(_inputLanguages),
+      'output_languages': List<String>.from(_outputLanguages),
+      'audio_languages': List<String>.from(_audioLanguages),
+      'availability': _availability,
+      'format': _format,
+      'smart_chaptering': _smartChaptering,
+      'tts_quality_mode': _ttsQualityMode,
+      'error_correction': _errorCorrection,
+      'profanity_filter': _profanityFilter,
+      'filter_music': _filterMusic,
+      'summarization': _enableSummarization,
+      'live_notes': _enableLiveNotes,
+      'diarization': _enableDiarization,
+      'ai_assistant': _enableAIAssistant,
+      'save_session': _saveSession,
+      'distinguish_unknown_speakers': _distinguishUnknownSpeakers,
+      'postproduction': List<String>.from(_postproduction),
+      'mute': _muteController.text,
+      'pause': _pauseController.text,
+      'session_name': _sessionNameController.text,
+      'topic_name': _topicNameController.text,
+      'speaker_name': _speakerNameController.text,
+      'shorten': _shortenController.text,
+      'date': _date,
+      'saved_at': DateTime.now().toIso8601String(),
+    };
+  }
+
+  /// Apply a settings map to every field in the Job Settings panel.
+  /// Missing / null keys leave the current value untouched.
+  void _applySettingsMap(Map<String, dynamic> data) {
+    void loadList(List<String> target, dynamic raw, List<String> fallback) {
+      target.clear();
+      if (raw is List) {
+        target.addAll(raw.map((e) => e.toString()));
+      } else {
+        target.addAll(fallback);
+      }
+    }
+
+    _inputLanguages.clear();
+    _outputLanguages.clear();
+    _audioLanguages.clear();
+    _postproduction.clear();
+
+    loadList(_inputLanguages, data['input_languages'], ['en']);
+    loadList(_outputLanguages, data['output_languages'], ['de']);
+    loadList(_audioLanguages, data['audio_languages'], const []);
+    loadList(_postproduction, data['postproduction'], const []);
+
+    _availability    = data['availability']     as String? ?? _availability;
+    _format          = data['format']           as String? ?? _format;
+    _smartChaptering = data['smart_chaptering'] as String? ?? _smartChaptering;
+    _ttsQualityMode  = data['tts_quality_mode'] as String? ?? _ttsQualityMode;
+    _errorCorrection = data['error_correction'] as String? ?? _errorCorrection;
+
+    _profanityFilter     = data['profanity_filter'] as bool? ?? _profanityFilter;
+    _filterMusic         = data['filter_music']     as bool? ?? _filterMusic;
+    _enableSummarization = data['summarization']    as bool? ?? _enableSummarization;
+    _enableLiveNotes     = data['live_notes']       as bool? ?? _enableLiveNotes;
+    _enableDiarization   = data['diarization']      as bool? ?? _enableDiarization;
+    _enableAIAssistant   = data['ai_assistant']     as bool? ?? _enableAIAssistant;
+    _saveSession         = data['save_session']     as bool? ?? _saveSession;
+    _distinguishUnknownSpeakers =
+        data['distinguish_unknown_speakers'] as bool? ?? _distinguishUnknownSpeakers;
+
+    _muteController.text  = data['mute']  as String? ?? _muteController.text;
+    _pauseController.text = data['pause'] as String? ?? _pauseController.text;
+
+    final sn = data['session_name'];
+    if (sn is String && sn.isNotEmpty) _sessionNameController.text = sn;
+    final tn = data['topic_name'];
+    if (tn is String) _topicNameController.text = tn;
+    final spn = data['speaker_name'];
+    if (spn is String) _speakerNameController.text = spn;
+    final sh = data['shorten'];
+    if (sh is String) _shortenController.text = sh;
+    final dt = data['date'];
+    if (dt is String && dt.isNotEmpty) _date = dt;
+  }
+
+  Future<void> _loadJobSettings() async {
+    Map<String, dynamic>? data;
+
+    // 1. Server-side file (survives reloads, shared across browsers).
+    try {
+      final resp = await http
+          .get(Uri.parse(
+              '$flaskServerUrl/video-job-settings/${widget.videoKey}'))
+          .timeout(const Duration(seconds: 5));
+      if (resp.statusCode == 200) {
+        final parsed = jsonDecode(resp.body);
+        if (parsed is Map && parsed.isNotEmpty) {
+          data = parsed.cast<String, dynamic>();
+        }
+      }
+    } catch (e) {
+      debugPrint('server load settings failed: $e');
+    }
+
+    // 2. Local SharedPreferences (older installs, or server unreachable).
+    if (data == null) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final raw = prefs.getString(_kSettingsKey);
+        if (raw != null && raw.isNotEmpty) {
+          data = (jsonDecode(raw) as Map).cast<String, dynamic>();
+        }
+      } catch (e) {
+        debugPrint('local load settings failed: $e');
+      }
+    }
+
+    if (data == null || !mounted) return;
+    setState(() => _applySettingsMap(data!));
+  }
+
   Future<void> _saveJobSettings() async {
+    final data = _currentSettingsMap();
+
+    // Local copy — cheap, sync, works offline.
     try {
       final prefs = await SharedPreferences.getInstance();
-      final data = <String, dynamic>{
-        'input_languages':  _inputLanguages,
-        'output_languages': _outputLanguages,
-        'audio_languages':  _audioLanguages,
-        'availability':     _availability,
-        'format':           _format,
-        'smart_chaptering': _smartChaptering,
-        'tts_quality_mode': _ttsQualityMode,
-        'error_correction': _errorCorrection,
-        'profanity_filter': _profanityFilter,
-        'filter_music':     _filterMusic,
-        'summarization':    _enableSummarization,
-        'live_notes':       _enableLiveNotes,
-        'diarization':      _enableDiarization,
-        'ai_assistant':     _enableAIAssistant,
-        'save_session':     _saveSession,
-        'distinguish_unknown_speakers': _distinguishUnknownSpeakers,
-        'postproduction':   _postproduction,
-        'mute':             _muteController.text,
-        'pause':            _pauseController.text,
-      };
       await prefs.setString(_kSettingsKey, jsonEncode(data));
     } catch (e) {
-      debugPrint('Error saving job settings: $e');
+      debugPrint('local save settings failed: $e');
+    }
+
+    // Server copy — debounced so typing does not hammer the endpoint.
+    _scheduleSettingsPush();
+  }
+
+  void _scheduleSettingsPush() {
+    _settingsPushDebounce?.cancel();
+    _settingsPushDebounce = Timer(
+      const Duration(milliseconds: 800),
+      _pushSettingsToServer,
+    );
+  }
+
+  Future<void> _pushSettingsToServer() async {
+    try {
+      final resp = await http
+          .put(
+            Uri.parse(
+                '$flaskServerUrl/video-job-settings/${widget.videoKey}'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(_currentSettingsMap()),
+          )
+          .timeout(const Duration(seconds: 10));
+      if (resp.statusCode != 200) {
+        debugPrint('push settings: HTTP ${resp.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('push settings failed: $e');
     }
   }
 
@@ -480,6 +590,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   void dispose() {
     _autoCheckTimer?.cancel();
     _saveJobSettings();
+    _settingsPushDebounce?.cancel();
     _videoController?.removeListener(_onVideoProgress);
     _videoController?.dispose();
     _sessionNameController.dispose();
@@ -606,6 +717,34 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     if (c == null || !c.value.isInitialized) return;
     c.seekTo(Duration(milliseconds: (seconds * 1000).toInt()));
   }
+
+  /// Open the current video in a fullscreen dialog.
+  ///
+  /// The inline player is paused while the dialog is open — otherwise
+  /// two audio tracks play simultaneously and the user hears an echo.
+  /// Keyboard shortcuts inside the dialog:
+  ///   Esc            exit
+  ///   Space          play / pause
+  ///   ← / →          seek ±5 s
+  Future<void> _openFullscreenVideo() async {
+    final c = _videoController;
+    if (c == null || !c.value.isInitialized) return;
+
+    final wasPlaying = c.value.isPlaying;
+    if (wasPlaying) await c.pause();
+    if (!mounted) return;
+
+    await showDialog<void>(
+      context: context,
+      barrierColor: Colors.black,
+      useSafeArea: false,
+      builder: (_) => _FullscreenVideoDialog(controller: c),
+    );
+
+    if (mounted && wasPlaying) {
+      await c.play();
+    }
+  }  
 
   Future<void> _loadSavedSessionId() async {
     final stored = await InternalAuthService.getSessionId(widget.videoKey);
@@ -1620,6 +1759,286 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   }
 
   // ═══════════════════════════════════════════════════════════════════
+  //  SAVED SETTINGS DIALOGS
+  // ═══════════════════════════════════════════════════════════════════
+
+  /// Show the settings file that lives on the backend for this video,
+  /// plus buttons to reload it into the form or delete it.
+  Future<void> _showSavedSettingsDialog() async {
+    Map<String, dynamic>? remote;
+
+    try {
+      final resp = await http
+          .get(Uri.parse(
+              '$flaskServerUrl/video-job-settings/${widget.videoKey}'))
+          .timeout(const Duration(seconds: 5));
+      if (resp.statusCode == 200) {
+        final parsed = jsonDecode(resp.body);
+        if (parsed is Map) {
+          remote = parsed.cast<String, dynamic>();
+        }
+      }
+    } catch (e) {
+      debugPrint('view saved settings failed: $e');
+    }
+
+    if (!mounted) return;
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) {
+        final has = remote != null && remote.isNotEmpty;
+        return AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.save_outlined, color: Colors.blue),
+              SizedBox(width: 8),
+              Text('Saved settings'),
+            ],
+          ),
+          content: SizedBox(
+            width: 640,
+            height: 480,
+            child: has
+                ? Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.grey[50],
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: Colors.grey[300]!),
+                    ),
+                    child: SingleChildScrollView(
+                      child: SelectableText(
+                        const JsonEncoder.withIndent('  ').convert(remote),
+                        style: const TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 12,
+                          height: 1.4,
+                        ),
+                      ),
+                    ),
+                  )
+                : const Center(
+                    child: Text(
+                      'No settings have been saved for this video yet.\n'
+                      'Change something above and they will be persisted '
+                      'automatically.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.grey),
+                    ),
+                  ),
+          ),
+          actions: [
+            if (has)
+              TextButton.icon(
+                onPressed: () async {
+                  try {
+                    await http.delete(Uri.parse(
+                        '$flaskServerUrl/video-job-settings/${widget.videoKey}'));
+                  } catch (_) {}
+                  if (!mounted) return;
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Saved settings cleared')),
+                  );
+                },
+                icon: const Icon(Icons.delete_outline, size: 18),
+                label: const Text('Delete file'),
+                style: TextButton.styleFrom(foregroundColor: Colors.red),
+              ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Close'),
+            ),
+            if (has)
+              ElevatedButton.icon(
+                onPressed: () {
+                  setState(() => _applySettingsMap(remote!));
+                  Navigator.pop(ctx);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Settings reloaded')),
+                  );
+                },
+                icon: const Icon(Icons.download, size: 18),
+                label: const Text('Reload into form'),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Ask for a name and POST the current settings as a named preset.
+  Future<void> _saveCurrentAsPreset() async {
+    final controller = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.bookmark_add_outlined, color: Colors.blue),
+            SizedBox(width: 8),
+            Text('Save as preset'),
+          ],
+        ),
+        content: SizedBox(
+          width: 360,
+          child: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: 'Preset name',
+              hintText: 'e.g. "English lecture – default"',
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final v = controller.text.trim();
+              if (v.isEmpty) return;
+              Navigator.pop(ctx, v);
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || name.isEmpty) return;
+
+    try {
+      final resp = await http.post(
+        Uri.parse('$flaskServerUrl/job-settings-presets'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'name': name,
+          'settings': _currentSettingsMap(),
+        }),
+      );
+      if (!mounted) return;
+      if (resp.statusCode == 200) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Preset "$name" saved')),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed: HTTP ${resp.statusCode}')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e')),
+        );
+      }
+    }
+  }
+
+  /// List all presets on the server; tap one to load it into the form.
+  Future<void> _loadPresetDialog() async {
+    Map<String, dynamic> presets = {};
+
+    try {
+      final resp = await http
+          .get(Uri.parse('$flaskServerUrl/job-settings-presets'))
+          .timeout(const Duration(seconds: 5));
+      if (resp.statusCode == 200) {
+        final body = jsonDecode(resp.body) as Map<String, dynamic>;
+        final raw = body['presets'];
+        if (raw is Map) {
+          presets = raw.cast<String, dynamic>();
+        }
+      }
+    } catch (e) {
+      debugPrint('load presets failed: $e');
+    }
+
+    if (!mounted) return;
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.download_outlined, color: Colors.blue),
+            SizedBox(width: 8),
+            Text('Load preset'),
+          ],
+        ),
+        content: SizedBox(
+          width: 520,
+          height: 400,
+          child: presets.isEmpty
+              ? const Center(
+                  child: Text(
+                    'No presets saved yet.\nUse "Save as preset" first.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                )
+              : ListView.separated(
+                  itemCount: presets.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, i) {
+                    final name = presets.keys.elementAt(i);
+                    final settings = presets[name];
+                    final savedAt =
+                        (settings is Map ? settings['saved_at'] : null) ?? '';
+                    return ListTile(
+                      leading: const Icon(Icons.bookmark_outline),
+                      title: Text(name),
+                      subtitle: savedAt.toString().isEmpty
+                          ? null
+                          : Text(
+                              'saved $savedAt',
+                              style: const TextStyle(fontSize: 11),
+                            ),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.delete_outline,
+                            color: Colors.red),
+                        tooltip: 'Delete preset',
+                        onPressed: () async {
+                          try {
+                            await http.delete(Uri.parse(
+                              '$flaskServerUrl/job-settings-presets'
+                              '?name=${Uri.encodeComponent(name)}',
+                            ));
+                          } catch (_) {}
+                          if (ctx.mounted) Navigator.pop(ctx);
+                        },
+                      ),
+                      onTap: () {
+                        if (settings is Map) {
+                          setState(() => _applySettingsMap(
+                              settings.cast<String, dynamic>()));
+                          _saveJobSettings();
+                          Navigator.pop(ctx);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('Loaded preset "$name"')),
+                          );
+                        }
+                      },
+                    );
+                  },
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
   //  SUBMIT
   // ═══════════════════════════════════════════════════════════════════
 
@@ -2288,25 +2707,43 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                   Center(
                     child: ConstrainedBox(
                       constraints: BoxConstraints(
-                        maxWidth:
-                            MediaQuery.of(context).size.width * 0.9,
+                        maxWidth: MediaQuery.of(context).size.width * 0.9,
                         maxHeight: Responsive.of(context).videoHeight,
                       ),
-                      child: _isVideoReady
-                          ? VideoPlayerWidget(
-                              controller: _videoController,
-                              isReady: _isVideoReady,
-                              onPlayPause: _togglePlayPause,
-                              onSeek: _seekTo,
-                              height: Responsive.of(context).videoHeight,
-                            )
-                          : const Center(
-                              child: CircularProgressIndicator(
-                                  color: Colors.white),
+                      child: Stack(
+                        children: [
+                          Positioned.fill(
+                            child: _isVideoReady
+                                ? VideoPlayerWidget(
+                                    controller: _videoController,
+                                    isReady: _isVideoReady,
+                                    onPlayPause: _togglePlayPause,
+                                    onSeek: _seekTo,
+                                    height: Responsive.of(context).videoHeight,
+                                  )
+                                : const Center(
+                                    child: CircularProgressIndicator(color: Colors.white),
+                                  ),
+                          ),
+                          // ── Fullscreen toggle ─────────────────────────────────
+                          if (_isVideoReady)
+                            Positioned(
+                              top: 8,
+                              right: 8,
+                              child: Material(
+                                color: Colors.black54,
+                                shape: const CircleBorder(),
+                                child: IconButton(
+                                  tooltip: 'Fullscreen',
+                                  icon: const Icon(Icons.fullscreen, color: Colors.white),
+                                  onPressed: _openFullscreenVideo,
+                                ),
+                              ),
                             ),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
+                  ),                ],
               ),
             ),
           ),
@@ -4146,7 +4583,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   // ═══════════════════════════════════════════════════════════════════
   //  MAIN BUILD
   // ═══════════════════════════════════════════════════════════════════
-    @override
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
@@ -4154,6 +4591,18 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         backgroundColor: Colors.blue.shade700,
         foregroundColor: Colors.white,
         actions: [
+          IconButton(
+            icon: const Icon(Icons.link),
+            tooltip: 'Copy link',
+            onPressed: () {
+              final url = '${html.window.location.origin}'
+                  '/session-detail/${widget.videoKey}';
+              html.window.navigator.clipboard?.writeText(url);
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Link copied: $url')),
+              );
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _refresh,
@@ -4623,26 +5072,41 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                       ],
                     ),
                     initiallyExpanded: false,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: _buildSettingsPanel(),
-                      ),
-                      // ─── Collapse from the bottom ───────────────
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-                        child: Align(
-                          alignment: Alignment.centerRight,
-                          child: TextButton.icon(
-                            onPressed: () =>
-                                _jobSettingsTileController.collapse(),
-                            icon: const Icon(
-                                Icons.keyboard_arrow_up, size: 18),
-                            label: const Text('Collapse'),
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: _buildSettingsPanel(),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                          child: Wrap(
+                            alignment: WrapAlignment.end,
+                            spacing: 8,
+                            children: [
+                              OutlinedButton.icon(
+                                onPressed: _showSavedSettingsDialog,
+                                icon: const Icon(Icons.visibility_outlined, size: 18),
+                                label: const Text('View saved settings'),
+                              ),
+                              OutlinedButton.icon(
+                                onPressed: _saveCurrentAsPreset,
+                                icon: const Icon(Icons.bookmark_add_outlined, size: 18),
+                                label: const Text('Save as preset'),
+                              ),
+                              OutlinedButton.icon(
+                                onPressed: _loadPresetDialog,
+                                icon: const Icon(Icons.download_outlined, size: 18),
+                                label: const Text('Load preset'),
+                              ),
+                              TextButton.icon(
+                                onPressed: () => _jobSettingsTileController.collapse(),
+                                icon: const Icon(Icons.keyboard_arrow_up, size: 18),
+                                label: const Text('Collapse'),
+                              ),
+                            ],
                           ),
                         ),
-                      ),
-                    ],
+                      ],
                   ),
                 ),
               ),
@@ -4673,6 +5137,275 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
               SizedBox(height: _sectionGap(context)),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+// ═══════════════════════════════════════════════════════════════════
+//  FULLSCREEN VIDEO DIALOG
+// ═══════════════════════════════════════════════════════════════════
+
+class _FullscreenVideoDialog extends StatefulWidget {
+  final VideoPlayerController controller;
+  const _FullscreenVideoDialog({required this.controller});
+
+  @override
+  State<_FullscreenVideoDialog> createState() => _FullscreenVideoDialogState();
+}
+
+class _FullscreenVideoDialogState extends State<_FullscreenVideoDialog> {
+  bool _showControls = true;
+  Timer? _hideTimer;
+  final FocusNode _focus = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_tick);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _focus.requestFocus());
+    _scheduleHide();
+  }
+
+  @override
+  void dispose() {
+    _hideTimer?.cancel();
+    widget.controller.removeListener(_tick);
+    _focus.dispose();
+    super.dispose();
+  }
+
+  void _tick() {
+    if (mounted) setState(() {});
+  }
+
+  void _scheduleHide() {
+    _hideTimer?.cancel();
+    _hideTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted) setState(() => _showControls = false);
+    });
+  }
+
+  void _bumpControls() {
+    setState(() => _showControls = true);
+    _scheduleHide();
+  }
+
+  void _togglePlay() {
+    final c = widget.controller;
+    c.value.isPlaying ? c.pause() : c.play();
+    _bumpControls();
+  }
+
+  void _seekBy(Duration delta) {
+    final c = widget.controller;
+    final target = c.value.position + delta;
+    final clamped = target < Duration.zero
+        ? Duration.zero
+        : (target > c.value.duration ? c.value.duration : target);
+    c.seekTo(clamped);
+    _bumpControls();
+  }
+
+  String _fmt(Duration d) {
+    final h = d.inHours;
+    final m = d.inMinutes.remainder(60);
+    final s = d.inSeconds.remainder(60);
+    if (h > 0) {
+      return '$h:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+    }
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.controller;
+    final value = c.value;
+    final dur = value.duration;
+    final pos = value.position;
+    final progress = dur.inMilliseconds == 0
+        ? 0.0
+        : (pos.inMilliseconds / dur.inMilliseconds).clamp(0.0, 1.0);
+    final aspect = value.aspectRatio == 0 ? 16 / 9 : value.aspectRatio;
+
+    return Dialog.fullscreen(
+      backgroundColor: Colors.black,
+      child: KeyboardListener(
+        focusNode: _focus,
+        onKeyEvent: (event) {
+          if (event is! KeyDownEvent) return;
+          final key = event.logicalKey;
+          if (key == LogicalKeyboardKey.escape) {
+            Navigator.of(context).pop();
+          } else if (key == LogicalKeyboardKey.space) {
+            _togglePlay();
+          } else if (key == LogicalKeyboardKey.arrowRight) {
+            _seekBy(const Duration(seconds: 5));
+          } else if (key == LogicalKeyboardKey.arrowLeft) {
+            _seekBy(const Duration(seconds: -5));
+          } else if (key == LogicalKeyboardKey.keyF) {
+            Navigator.of(context).pop(); // toggle out of fullscreen
+          }
+        },
+        child: MouseRegion(
+          onHover: (_) => _bumpControls(),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {
+              if (_showControls) {
+                setState(() => _showControls = false);
+              } else {
+                _bumpControls();
+              }
+            },
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Center(
+                  child: AspectRatio(
+                    aspectRatio: aspect,
+                    child: VideoPlayer(c),
+                  ),
+                ),
+
+                // ── Top bar ────────────────────────────────────────
+                AnimatedOpacity(
+                  duration: const Duration(milliseconds: 150),
+                  opacity: _showControls ? 1 : 0,
+                  child: Align(
+                    alignment: Alignment.topCenter,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 12),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [
+                            Colors.black.withValues(alpha: 0.75),
+                            Colors.transparent,
+                          ],
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.movie, color: Colors.white),
+                          const SizedBox(width: 10),
+                          const Expanded(
+                            child: Text(
+                              'Fullscreen',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: 'Exit fullscreen (Esc)',
+                            icon: const Icon(Icons.fullscreen_exit,
+                                color: Colors.white, size: 28),
+                            onPressed: () => Navigator.of(context).pop(),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+
+                // ── Bottom bar ─────────────────────────────────────
+                AnimatedOpacity(
+                  duration: const Duration(milliseconds: 150),
+                  opacity: _showControls ? 1 : 0,
+                  child: Align(
+                    alignment: Alignment.bottomCenter,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 12),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [
+                            Colors.transparent,
+                            Colors.black.withValues(alpha: 0.75),
+                          ],
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                        ),
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Row(
+                            children: [
+                              Text(
+                                _fmt(pos),
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontFeatures: [
+                                      FontFeature.tabularFigures()
+                                    ]),
+                              ),
+                              Expanded(
+                                child: Slider(
+                                  value: progress,
+                                  onChanged: (v) {
+                                    c.seekTo(Duration(
+                                      milliseconds: (dur.inMilliseconds * v)
+                                          .toInt(),
+                                    ));
+                                    _bumpControls();
+                                  },
+                                ),
+                              ),
+                              Text(
+                                _fmt(dur),
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontFeatures: [
+                                      FontFeature.tabularFigures()
+                                    ]),
+                              ),
+                            ],
+                          ),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              IconButton(
+                                iconSize: 32,
+                                color: Colors.white,
+                                icon: const Icon(Icons.replay_10),
+                                onPressed: () =>
+                                    _seekBy(const Duration(seconds: -10)),
+                              ),
+                              const SizedBox(width: 12),
+                              IconButton(
+                                iconSize: 52,
+                                color: Colors.white,
+                                icon: Icon(
+                                  value.isPlaying
+                                      ? Icons.pause_circle_filled
+                                      : Icons.play_circle_filled,
+                                ),
+                                onPressed: _togglePlay,
+                              ),
+                              const SizedBox(width: 12),
+                              IconButton(
+                                iconSize: 32,
+                                color: Colors.white,
+                                icon: const Icon(Icons.forward_10),
+                                onPressed: () =>
+                                    _seekBy(const Duration(seconds: 10)),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
