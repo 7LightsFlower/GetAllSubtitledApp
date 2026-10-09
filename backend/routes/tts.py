@@ -94,12 +94,17 @@ def _local_tts_path(session_id: str, label: str) -> str | None:
 
 
 def _tts_upstream_response(session_id: str, label: str):
-    """Fetch a TTS file from the configured KIT archive server."""
+    """
+    Fetch a TTS file from the configured KIT LT archive server.
+    KIT requires the _forward_auth cookie. Authorization / X-Forward-Auth headers alone 
+    are ignored and return a 1316-byte HTML login page with status 200. 
+    Without the cookie, curl_download's HTML-body check rejects the response.
+    """
     server = (sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL).rstrip(
         "/"
     )
-    kit_url = f"{server}/archivemediafile/{session_id}/{label} Audio.wav"
-
+    simple = label[: -len(" Audio")] if label.endswith(" Audio") else label
+    kit_url = f"{server}/archivemediafile/{session_id}/{simple} Audio.wav"
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
         token = request.cookies.get("_forward_auth", "")

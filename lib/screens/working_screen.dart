@@ -1,6 +1,8 @@
 // working_screen.dart
 import 'dart:async';
 
+import 'package:web/web.dart' as web;
+
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:asr_live_translator/screens/session_detail_screen.dart';
@@ -150,6 +152,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
   @override
   void initState() {
     super.initState();
+    _updateWorkingScreenUrl();
     _fetchProjects();
   }
 
@@ -285,6 +288,47 @@ class _WorkingScreenState extends State<WorkingScreen> {
     // any project that still needs one. The server answers immediately
     // (202) and does the work in a background thread.
     _triggerGreenscreenForPendingProjects();
+  }
+
+  /// Reflect the fact that we are on the working screen in the browser
+  /// URL bar.
+  ///
+  /// Called on entry and every time the user pops back from a sub-screen
+  /// (session detail, enhancement, …). Keeps the URL meaningful when many
+  /// videos are listed here, instead of leaving the last-opened video's
+  /// key in the bar.
+  Future<void> _updateWorkingScreenUrl() async {
+    try {
+      final email = await _currentUserEmail();
+      final path = email.isNotEmpty
+          ? '/working/${Uri.encodeComponent(email)}'
+          : '/working';
+      if (web.window.location.pathname != path) {
+        web.window.history.replaceState(
+          null,
+          'Working Screen',
+          path,
+        );
+      }
+    } catch (e) {
+      debugPrint('working-screen url update failed: $e');
+    }
+  }
+
+  /// Email extracted from the KIT bearer token.
+  ///
+  /// KIT tokens have the shape `<opaque>|<expiry>|<email>`. Returns an
+  /// empty string when no token is stored or the token is malformed, so
+  /// the caller can fall back to a plain `/working` path.
+  Future<String> _currentUserEmail() async {
+    final token = await InternalAuthService.getToken();
+    if (token == null || token.isEmpty) return '';
+    final parts = token.split('|');
+    if (parts.length >= 3) {
+      final email = parts.last.trim();
+      if (email.contains('@')) return email;
+    }
+    return '';
   }
 
   Future<void> _triggerGreenscreenForPendingProjects() async {
@@ -711,17 +755,22 @@ class _WorkingScreenState extends State<WorkingScreen> {
   }
 
   // ─── Navigation and actions ───────────────────────────────────
-  void _openSessionDetail(String videoKey) {
+  Future<void> _openSessionDetail(String videoKey) async {
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => LiveTranscriptScreen(videoKey: videoKey),
       ),
     );
+    // The user pressed back (in-app or browser). Session detail was
+    // showing /session-detail/<video_key>; put the working-screen URL
+    // back so the bar doesn't keep a stale video key.
+    await _updateWorkingScreenUrl();
   }
 
-  void _openEnhancement(String videoKey) {
+  Future<void> _openEnhancement(String videoKey) async {
     Navigator.pushNamed(context, '/enhancement', arguments: videoKey);
+    await _updateWorkingScreenUrl();
   }
 
   void _showContextMenu(BuildContext context, VideoProject project) {

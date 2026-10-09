@@ -2724,7 +2724,7 @@ def _tts_urls_from_html(
 
 
 def download_tts_files(
-    session_id, _token, server_url=None, languages=None, *, retries=4, delay=20
+    session_id, token, server_url=None, languages=None, *, retries=4, delay=20
 ):
     """Download per-language TTS WAVs into the session folder.
 
@@ -2747,6 +2747,21 @@ def download_tts_files(
     """
     session_dir = _session_dir(session_id)
     server_url = (server_url or INTERNAL_SERVER_URL).rstrip("/")
+
+    # ── NEW: ask KIT's own archive page which URLs are real ─────
+    scraped = _tts_urls_from_html(session_id, session_dir, server_url)
+    if scraped:
+        logging.info(
+            "download_tts_files: index.html advertises %d TTS track(s): %s",
+            len(scraped),
+            sorted(scraped.keys()),
+        )
+    else:
+        logging.info(
+            "download_tts_files: index.html has no TTS <source> tags "
+            "for %s — will fall back to guessed URLs",
+            _short_sid(session_id),
+        )
 
     # ---- which languages do we want? -------------------------------
     if languages is None:
@@ -2817,13 +2832,27 @@ def download_tts_files(
                 except OSError:
                     pass
 
-            # ── THE FIX ───────────────────────────────────────────
-            # (a) literal space, not %20
-            # (b) no cookie, no header — anonymous=True
-            # Parentheses in a label like "Chinese (Traditional) Audio"
-            # are safe to leave raw too; curl handles them.
-            kit_name = f"{label}.wav"
-            kit_url = f"{server_url}/archivemediafile/{session_id}/{kit_name}"
+             # ── Prefer the URL KIT's own page uses ────────────────
+            kit_url = scraped.get(label)
+            if kit_url:
+                logging.info(
+                    "download_tts_files: using scraped URL for %r: %s",
+                    label,
+                    kit_url,
+                )
+            else:
+                # Fall back to the guessed shape.
+                kit_name = f"{label}.wav"
+                kit_url = (
+                    f"{server_url}/archivemediafile/{session_id}/{kit_name}"
+                )
+                if scraped:
+                    logging.warning(
+                        "download_tts_files: %r not advertised by index.html; "
+                        "falling back to guessed URL %s",
+                        label,
+                        kit_url,
+                    )
 
             logging.info(
                 "download_tts_files: GET %s (attempt %d/%d)",
@@ -2832,12 +2861,21 @@ def download_tts_files(
                 retries,
             )
 
+            if not token:
+                token = _effective_token(session_id, fallback="")
+            if not token:
+                logging.warning(
+                    "download_tts_files: no token for %s — skipping TTS",
+                    _short_sid(session_id),
+                )
+                return []
+
             ok = curl_download(
                 kit_url,
                 local_path,
-                "",  # no token
-                anonymous=True,  # no cookie, no header
-                media=True,  # browser-like Accept/Range
+                token,
+                cookie_only=True,   # _forward_auth cookie, no headers
+                media=True,
                 referer=referer,
             )
 
@@ -4722,7 +4760,8 @@ def session_tts(session_id, label):
     server = (sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL).rstrip(
         "/"
     )
-    kit_url = f"{server}/archivemediafile/{session_id}/{label} Audio.wav"
+    simple = label[: -len(" Audio")] if label.endswith(" Audio") else label
+    kit_url = f"{server}/archivemediafile/{session_id}/{simple} Audio.wav"
 
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
