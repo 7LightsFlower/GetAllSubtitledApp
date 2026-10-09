@@ -122,6 +122,9 @@ def add_no_cache_for_api(response):
             "/session-transcript-json/",
             "/session_tts/",
             "/session-tts/",
+            "/video-job-settings/",     
+            "/video-job-history/",       
+            "/job-settings-presets",
             "/api/",
         )
     ):
