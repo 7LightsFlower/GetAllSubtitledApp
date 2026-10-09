@@ -603,14 +603,14 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     super.dispose();
   }
 
+  /// Base session name for a project that has no saved settings yet.
+  ///
+  /// Returns just the video's display name — the timestamp is appended
+  /// at submit time by `_stampSessionNameForSubmit`, so the value the
+  /// user sees while editing stays stable and the value KIT receives
+  /// always carries the moment of submission.
   String _getDefaultSessionName() {
-    final now = DateTime.now();
-    final dateTimeStr = '${now.year}-${now.month.toString().padLeft(2, '0')}-'
-        '${now.day.toString().padLeft(2, '0')} '
-        '${now.hour.toString().padLeft(2, '0')}:'
-        '${now.minute.toString().padLeft(2, '0')}';
-    final videoName = _detail?.name ?? 'Video';
-    return '$videoName – $dateTimeStr';
+    return _detail?.name ?? 'Video';
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -639,7 +639,11 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           // Populate the session name controller once detail is available
           if (_sessionNameController.text.isEmpty) {
             _sessionNameController.text = _getDefaultSessionName();
-            _topicNameController.text = _sessionNameController.text;
+          }
+          // Topic always starts as the video key. Submit-time stamping keeps
+          // them consistent on subsequent runs.
+          if (_topicNameController.text.isEmpty) {
+            _topicNameController.text = widget.videoKey;
           }
         });
         // Start the video now that we know the detail object.
@@ -2045,6 +2049,12 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   Future<void> _submitJob() async {
     if (!_formKey.currentState!.validate()) return;
     _formKey.currentState!.save();
+      
+    // Stamp the current date/time into the session name and set the
+    // topic to the video key, before the form values are read below.
+    // A user-supplied name is preserved because the controllers are
+    // only overwritten here, at submit time — never on load.
+    _stampSessionNameForSubmit();
 
     if (_inputLanguages.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -2114,6 +2124,36 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     }
   }
 
+
+  /// Stamp the current date/time onto the session name and set the
+  /// topic to the video key, but only if the user has not overridden
+  /// the default.
+  ///
+  /// "Overridden" is detected by comparing the field to the current
+  /// default (`<video name>` with no timestamp) and to the previous
+  /// default (`<video name> – <timestamp>`). Anything else is treated
+  /// as user input and left alone.
+  void _stampSessionNameForSubmit() {
+    final current = _sessionNameController.text.trim();
+    final videoName = _detail?.name ?? 'Video';
+    final defaultPlain = videoName;
+    final looksLikePreviousStamp =
+        current == defaultPlain || current.startsWith('$videoName – ');
+
+    if (looksLikePreviousStamp) {
+      final now = DateTime.now();
+      final dateTimeStr =
+          '${now.year}-${now.month.toString().padLeft(2, '0')}-'
+          '${now.day.toString().padLeft(2, '0')} '
+          '${now.hour.toString().padLeft(2, '0')}:'
+          '${now.minute.toString().padLeft(2, '0')}';
+      _sessionNameController.text = '$videoName – $dateTimeStr';
+    }
+
+    // Topic always mirrors the key — it is a machine identifier, not
+    // free text, and the user has no reason to edit it.
+    _topicNameController.text = widget.videoKey;
+  }
 
   Future<void> _uploadToInternalServer({
     required String token,

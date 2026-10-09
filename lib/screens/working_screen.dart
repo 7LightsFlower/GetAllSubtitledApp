@@ -773,15 +773,13 @@ class _WorkingScreenState extends State<WorkingScreen> {
 
   // ─── Navigation and actions ───────────────────────────────────
   Future<void> _openSessionDetail(String videoKey) async {
-    Navigator.push(
+    await Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => LiveTranscriptScreen(videoKey: videoKey),
       ),
     );
-    // The user pressed back (in-app or browser). Session detail was
-    // showing /session-detail/<video_key>; put the working-screen URL
-    // back so the bar doesn't keep a stale video key.
+    if (!mounted) return;
     await _updateWorkingScreenUrl();
   }
 
