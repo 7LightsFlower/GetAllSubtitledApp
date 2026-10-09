@@ -210,7 +210,13 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   bool _isVideoReady = false;
 
   // ─── Persistence keys for Job Settings ──────────────────────────
-  static const _kSettingsKey = 'job_settings_defaults_v1';
+
+  // Per-video SharedPreferences key. Was a single global key
+  // ('job_settings_defaults_v1'), which meant the last-saved block for
+  // *any* video was used as the fallback for every video that had no
+  // server-side settings file yet. That's why a freshly imported video
+  // showed the previous video's session name and languages.
+  String get _settingsKey => 'job_settings_${widget.videoKey}';
 
   // ─── Job configuration state ─────────────────────────────────────
   final _formKey = GlobalKey<FormState>();
@@ -341,6 +347,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     final now = DateTime.now();
     _date =
         '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+    _purgeLegacySettingsKey(); 
     _initServerConfig(); 
     _loadJobSettings();   
     _checkConnection();
@@ -360,6 +367,21 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         _checkOutput();
       }
     });
+  }
+
+  /// One-time cleanup of the key used by the pre-per-video settings
+  /// implementation. Runs once per screen mount; a no-op after the
+  /// first run.
+  Future<void> _purgeLegacySettingsKey() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.containsKey('job_settings_defaults_v1')) {
+        await prefs.remove('job_settings_defaults_v1');
+        debugPrint('Removed legacy global settings key');
+      }
+    } catch (e) {
+      debugPrint('legacy settings cleanup failed: $e');
+    }
   }
 
   Future<void> _initServerConfig() async {
@@ -506,7 +528,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   Future<void> _loadJobSettings() async {
     Map<String, dynamic>? data;
 
-    // 1. Server-side file (survives reloads, shared across browsers).
+    // 1. Server-side file (per video).
     try {
       final resp = await http
           .get(Uri.parse(
@@ -522,11 +544,11 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       debugPrint('server load settings failed: $e');
     }
 
-    // 2. Local SharedPreferences (older installs, or server unreachable).
+    // 2. Local fallback — now per video.
     if (data == null) {
       try {
         final prefs = await SharedPreferences.getInstance();
-        final raw = prefs.getString(_kSettingsKey);
+        final raw = prefs.getString(_settingsKey);
         if (raw != null && raw.isNotEmpty) {
           data = (jsonDecode(raw) as Map).cast<String, dynamic>();
         }
@@ -542,15 +564,21 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   Future<void> _saveJobSettings() async {
     final data = _currentSettingsMap();
 
-    // Local copy — cheap, sync, works offline.
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_kSettingsKey, jsonEncode(data));
+      await prefs.setString(_settingsKey, jsonEncode(data));
+
+      // One-time cleanup of the legacy global key from the
+      // pre-per-video implementation. Reads as a no-op after the
+      // first save; harmless to run on every save.
+      if (prefs.containsKey('job_settings_defaults_v1')) {
+        await prefs.remove('job_settings_defaults_v1');
+        debugPrint('Removed legacy global settings key');
+      }
     } catch (e) {
       debugPrint('local save settings failed: $e');
     }
 
-    // Server copy — debounced so typing does not hammer the endpoint.
     _scheduleSettingsPush();
   }
 

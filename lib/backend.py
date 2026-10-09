@@ -7425,7 +7425,15 @@ def video_job_settings(video_key):
     path = _settings_path("video", video_key)
 
     if request.method == "GET":
-        return jsonify(_read_settings_file(path)), 200
+        saved = _read_settings_file(path)
+        if saved:
+            return jsonify(saved), 200
+        # No per-video file yet. Fall back to the global defaults
+        # file if one exists, so a fresh video starts from a known
+        # baseline instead of whatever the client happens to have
+        # in SharedPreferences.
+        defaults = _read_settings_file(_settings_path("defaults"))
+        return jsonify(defaults), 200
 
     if request.method == "DELETE":
         try:
