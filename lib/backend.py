@@ -7560,6 +7560,38 @@ def login():
     return jsonify({"token": str(uuid.uuid4()), "message": "Login successful"}), 200
 
 
+@app.route("/whoami", methods=["GET", "OPTIONS"])
+def whoami():
+    """Return the login identity the current request is carrying.
+
+    Accepts the token as a bearer header or as the `_forward_auth`
+    cookie, same as every other endpoint. Reads the email verbatim out
+    of `<opaque>|<expiry>|<email>` — no normalisation, because the
+    client uses this value only to build a URL, and the same spelling
+    appears in the URL that the user pastes back into a browser.
+
+    Anonymous (no token) is not an error: return `{"email": ""}` so
+    the client can fall back to a generic path without special-casing
+    a 401.
+    """
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    token = ""
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[7:].strip()
+    if not token:
+        token = request.cookies.get("_forward_auth", "")
+    if not token:
+        token = (request.args.get("token") or "").strip()
+
+    email = _email_from_token(token) if token else ""
+    return jsonify({
+        "email": email,
+        "authenticated": bool(token),
+    }), 200
+
 # ─── VIDEO ENDPOINTS ────────────────────────────────────────────────────
 
 

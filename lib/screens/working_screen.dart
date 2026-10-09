@@ -154,6 +154,11 @@ class _WorkingScreenState extends State<WorkingScreen> {
     super.initState();
     _updateWorkingScreenUrl();
     _fetchProjects();
+    // Re-run once the token is known, in case the first call raced
+    // ahead of _checkConnection().
+    Future.delayed(const Duration(seconds: 1), () {
+      if (mounted) _updateWorkingScreenUrl();
+    });
   }
 
   Future<void> _fetchProjects() async {
@@ -315,20 +320,32 @@ class _WorkingScreenState extends State<WorkingScreen> {
     }
   }
 
-  /// Email extracted from the KIT bearer token.
+  /// Email the backend reports for the current request.
   ///
-  /// KIT tokens have the shape `<opaque>|<expiry>|<email>`. Returns an
-  /// empty string when no token is stored or the token is malformed, so
-  /// the caller can fall back to a plain `/working` path.
+  /// Asks `/whoami` rather than parsing the token locally, so a change
+  /// in the KIT token format doesn't silently produce a wrong URL.
+  /// Returns an empty string on any failure; callers fall back to a
+  /// generic `/working` path.
   Future<String> _currentUserEmail() async {
-    final token = await InternalAuthService.getToken();
-    if (token == null || token.isEmpty) return '';
-    final parts = token.split('|');
-    if (parts.length >= 3) {
-      final email = parts.last.trim();
-      if (email.contains('@')) return email;
+    try {
+      final token = await InternalAuthService.getToken();
+      final resp = await http
+          .get(
+            Uri.parse('$flaskServerUrl/whoami'),
+            headers: {
+              if (token != null && token.isNotEmpty)
+                'Authorization': 'Bearer $token',
+            },
+          )
+          .timeout(const Duration(seconds: 5));
+      if (resp.statusCode != 200) return '';
+      final body = jsonDecode(resp.body) as Map<String, dynamic>;
+      final email = (body['email'] ?? '').toString().trim();
+      return email;
+    } catch (e) {
+      debugPrint('whoami failed: $e');
+      return '';
     }
-    return '';
   }
 
   Future<void> _triggerGreenscreenForPendingProjects() async {
@@ -1257,7 +1274,28 @@ class _WorkingScreenState extends State<WorkingScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text(appTitle),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(appTitle),
+            FutureBuilder<String>(
+              future: _currentUserEmail(),
+              builder: (_, snap) {
+                final email = snap.data ?? '';
+                if (email.isEmpty) return const SizedBox.shrink();
+                return Text(
+                  email,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.normal,
+                    color: Colors.white70,
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
         actions: [
           IconButton(
             icon: const Icon(Icons.play_circle_outline),
@@ -1598,7 +1636,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
       ),
     );
   }
-  
+
   Widget _buildCard(VideoProject project) {
     final r = Responsive.of(context);
 

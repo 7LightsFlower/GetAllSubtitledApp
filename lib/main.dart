@@ -53,6 +53,46 @@ class MyApp extends StatelessWidget {
           );
         }
 
+        // ── /working  and  /working/<email> ───────────────────────
+        // `/working` alone is the anonymous fallback; the email
+        // segment is informational, so both build the same screen.
+        // Listing this before the static switch is what lets a
+        // refresh on `/working/testuser%40example.com` land back
+        // on the working screen instead of falling through.
+        if (name == '/working' || name.startsWith('/working/')) {
+          return MaterialPageRoute(
+            settings: settings,
+            builder: (_) => const WorkingScreen(),
+          );
+        }
+
+        // ── Static routes ─────────────────────────────────────────
+        switch (name) {
+          case '/splash':
+            return MaterialPageRoute(
+              settings: settings,
+              builder: (_) => const SplashScreen(),
+            );
+          case '/login':
+            return MaterialPageRoute(
+              settings: settings,
+              builder: (_) => const LoginScreen(),
+            );
+          case '/register':
+            return MaterialPageRoute(
+              settings: settings,
+              builder: (_) => const RegisterScreen(),
+            );
+          case '/forgot_password':
+            return MaterialPageRoute(
+              settings: settings,
+              builder: (_) => const ForgotPasswordScreen(),
+            );
+          // NOTE: the `/working` case that used to live in this switch is
+          // gone — it is now handled above, where it can also accept the
+          // optional `/<email>` suffix.
+        }
+
         // ── Static routes ─────────────────────────────────────────
         switch (name) {
           case '/splash':

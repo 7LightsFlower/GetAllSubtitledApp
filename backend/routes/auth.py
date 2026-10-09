@@ -1,12 +1,15 @@
-"""Authentication routes for user registration, login, session checks, and Dex proxying."""
+"""Authentication routes: user register/login, session checks, Dex proxying."""
+
+from __future__ import annotations
 
 import uuid
-import requests
 
+import requests
 from flask import Blueprint, jsonify, request
 
 from ..config import INTERNAL_SERVER_URL, is_allowed_server
-from ..state import users, save_state
+from ..state import save_state, users
+from ..utils import email_from_token
 
 bp = Blueprint("auth", __name__)
 
@@ -25,7 +28,10 @@ def register():
     save_state()
     return (
         jsonify(
-            {"token": str(uuid.uuid4()), "message": "User registered successfully"}
+            {
+                "token": str(uuid.uuid4()),
+                "message": "User registered successfully",
+            }
         ),
         201,
     )
@@ -41,7 +47,43 @@ def login():
     user = users.get(email)
     if not user or user["password"] != password:
         return jsonify({"message": "Invalid credentials"}), 401
-    return jsonify({"token": str(uuid.uuid4()), "message": "Login successful"}), 200
+    return jsonify(
+        {"token": str(uuid.uuid4()), "message": "Login successful"}
+    ), 200
+
+
+@bp.route("/whoami", methods=["GET", "OPTIONS"])
+def whoami():
+    """Return the login identity the current request is carrying.
+
+    Accepts the token as a bearer header, as the `_forward_auth`
+    cookie, or as a `?token=` query parameter. Reads the email
+    verbatim out of `<opaque>|<expiry>|<email>` — no normalisation,
+    because the client uses this value only to build a URL, and the
+    same spelling appears in the URL that the user pastes back into
+    a browser.
+
+    Anonymous (no token) is not an error: return `{"email": ""}` so
+    the client can fall back to a generic path without special-casing
+    a 401.
+    """
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    token = ""
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[7:].strip()
+    if not token:
+        token = request.cookies.get("_forward_auth", "")
+    if not token:
+        token = (request.args.get("token") or "").strip()
+
+    email = email_from_token(token) if token else ""
+    return jsonify({
+        "email": email,
+        "authenticated": bool(token),
+    }), 200
 
 
 @bp.route("/check-session", methods=["GET"])
@@ -66,7 +108,9 @@ def check_session():
         is_login = resp.status_code == 200 and (
             "Log in to dex" in resp.text or "dex-container" in resp.text
         )
-        authenticated = not ("dex" in final_url or resp.status_code == 302 or is_login)
+        authenticated = not (
+            "dex" in final_url or resp.status_code == 302 or is_login
+        )
         return jsonify({"authenticated": authenticated}), 200
     except requests.exceptions.RequestException:
         return jsonify({"authenticated": False, "error": "Request failed"}), 200
@@ -77,7 +121,9 @@ def dex_token():
     """Proxy a token request to the selected Dex server."""
     requested = request.headers.get("X-Target-Server")
     server = (
-        requested.rstrip("/") if is_allowed_server(requested) else INTERNAL_SERVER_URL
+        requested.rstrip("/")
+        if is_allowed_server(requested)
+        else INTERNAL_SERVER_URL
     )
     resp = requests.post(
         f"{server}/dex/token",
@@ -95,7 +141,9 @@ def dex_userinfo():
     """Proxy a user info request to the selected Dex server."""
     requested = request.headers.get("X-Target-Server")
     server = (
-        requested.rstrip("/") if is_allowed_server(requested) else INTERNAL_SERVER_URL
+        requested.rstrip("/")
+        if is_allowed_server(requested)
+        else INTERNAL_SERVER_URL
     )
     try:
         headers = {k: v for k, v in request.headers if k.lower() != "host"}
@@ -109,3 +157,4 @@ def dex_userinfo():
         return (resp.content, resp.status_code, resp.headers.items())
     except requests.exceptions.RequestException as e:
         return jsonify({"error": f"Proxy error: {e}"}), 500
+    
