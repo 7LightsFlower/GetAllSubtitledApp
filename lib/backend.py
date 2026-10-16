@@ -4,6 +4,7 @@
 import base64
 import contextvars
 import datetime
+import glob
 import importlib
 import hashlib
 import html as _html_mod
@@ -7288,6 +7289,25 @@ def prepare_upload_source_cached(
     # No cached file — fall back to the existing on-the-fly path.
     return prepare_upload_source(original_video_path)
 
+def _greenscreen_filename(original_name: str) -> str:
+    """Build a deterministic, collision-resistant green-screen filename.
+
+    The old scheme was ``<ascii_stem>__greenscreen.mp4`` where every
+    non-ASCII character was flattened to ``_``. Two Cyrillic lectures
+    with the same ASCII skeleton (e.g. both ending in ``(15.10.2026)``)
+    collapsed to the same file and shared a green-screen. The hash of
+    the *original* name — not the ASCII-folded one — makes each source
+    produce a distinct file, while keeping the human-readable stem for
+    anyone browsing the uploads/ folder.
+
+    Stem is truncated to 50 chars so the full name stays well inside
+    PATH_MAX on Windows even with a long UPLOAD_FOLDER prefix.
+    """
+    base = os.path.splitext(original_name)[0]
+    stem = re.sub(r"[^A-Za-z0-9_.-]", "_", base)[:50].strip("_") or "video"
+    digest = hashlib.sha1(original_name.encode("utf-8")).hexdigest()[:10]
+    return f"{stem}__{digest}__greenscreen.mp4"
+
 
 def _build_greenscreen_for_project(video_key: str) -> bool:
     """Build the audio+green-screen stand-in for one project.
@@ -7331,10 +7351,22 @@ def _build_greenscreen_for_project(video_key: str) -> bool:
     # Two steps: extract audio → mux into a small green-screen mp4.
     # Both intermediate and final files live in UPLOAD_FOLDER so they
     # survive a restart; the temp audio is deleted afterwards.
-    base = os.path.splitext(original_name)[0]
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", base)[:60] or "video"
-    gs_name = f"{safe}__greenscreen.mp4"
+    gs_name = _greenscreen_filename(original_name)
     gs_path = os.path.join(UPLOAD_FOLDER, gs_name)
+
+    # If a green-screen from the *old* naming scheme exists for this
+    # project, and the project dict still points at it, migrate the
+    # record rather than orphaning the file. Only the field changes;
+    # the on-disk file keeps its old name so nothing needs moving.
+    legacy_gs = project.get("greenscreen_file_name") or ""
+    if legacy_gs and legacy_gs != gs_name:
+        legacy_path = os.path.join(UPLOAD_FOLDER, legacy_gs)
+        if os.path.exists(legacy_path) and os.path.getsize(legacy_path) > 1000:
+            logging.info(
+                "greenscreen: keeping legacy file %s for %s",
+                legacy_gs, video_key,
+            )
+            return True
 
     audio_path = None
     try:
@@ -8127,13 +8159,18 @@ def delete_video(video_key):
     if gs_name:
         _safe_unlink(os.path.join(UPLOAD_FOLDER, gs_name), "green-screen")
 
-    # Belt-and-braces: also try the deterministic green-screen name in
-    # case the field was never populated (e.g. an interrupted build).
-    if file_name and not gs_name:
+    # Belt-and-braces: sweep up any green-screen this project might
+    # have left behind, whether it was named under the old scheme
+    # (<stem>__greenscreen.mp4) or the new one (<stem>__<hash>__greenscreen.mp4).
+    # Triggered when greenscreen_file_name was never populated, e.g.
+    # because the build was interrupted. The stem prefix is the same
+    # in both schemes for the first 50 chars, so one glob covers both.
+    if file_name:
         base = os.path.splitext(file_name)[0]
-        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", base)[:60] or "video"
-        orphan_gs = os.path.join(UPLOAD_FOLDER, f"{safe}__greenscreen.mp4")
-        _safe_unlink(orphan_gs, "orphaned green-screen")
+        stem_prefix = re.sub(r"[^A-Za-z0-9_.-]", "_", base)[:50].strip("_") or "video"
+        pattern = os.path.join(UPLOAD_FOLDER, f"{stem_prefix}*__greenscreen.mp4")
+        for orphan_gs in glob.glob(pattern):
+            _safe_unlink(orphan_gs, "orphaned green-screen")
 
     # ── 2. Sessions on disk ───────────────────────────────────────
     # A project can have any number of sessions (re-uploads of the
@@ -9646,29 +9683,47 @@ def _sanitize_session_name_for_kit(name: str) -> str:
     return re.sub(r"\s+", " ", name).strip()
 
 
+import unicodedata  # add to the imports block at the top of the file
+
 def _norm_session_name(s: str) -> str:
-    """Fold the punctuation KIT normalises in *session names*.
+    """Fold punctuation AND Unicode canonical form.
 
-    Deliberately does NOT touch the email or the domain. The caller
-    only ever passes the name segment, but keeping the function
-    narrow prevents a future edit from reaching into the path.
-
-    Do not add a ``@googlemail.com`` / ``@gmail.com`` fold here.
-    That fold would make a session on one domain match a name
-    from the other, and the scrape would return the wrong id.
+    NFC is the load-bearing change: it makes composed vs decomposed
+    Cyrillic (e.g. 'й' = U+0439 vs 'и' + U+0306) compare equal, which
+    is what lets Cyrillic session names match against the tail KIT
+    stores in its base64 ids.
     """
     for src, dst in {
-        "\u2018": "'",
-        "\u2019": "'",
-        "\u201c": '"',
-        "\u201d": '"',
-        "\u2013": "-",
-        "\u2014": "-",
-        "\u2022": "-",
-        "\u00a0": " ",
+        "\u2018": "'", "\u2019": "'",
+        "\u201c": '"', "\u201d": '"',
+        "\u2013": "-", "\u2014": "-",
+        "\u2022": "-", "\u00a0": " ",
     }.items():
         s = s.replace(src, dst)
-    return re.sub(r"\s+", " ", s).strip()
+    s = unicodedata.normalize("NFC", s)
+    return re.sub(r"\s+", " ", s).strip().casefold()
+
+
+def _names_match(a: str, b: str, min_prefix: int = 15) -> bool:
+    """Compare two session names, allowing either to be a prefix of the other.
+
+    Guards against two ways the id we decode can differ from the name
+    we sent:
+
+      * the archive page truncated the id (rare, but possible on very
+        long names), leaving us with a prefix of the real tail;
+      * KIT normalised something we did not anticipate, so our name
+        happens to be a prefix of theirs.
+
+    The floor of `min_prefix` characters stops `Tibbiyotda` from
+    matching `Tibbiyotda 2` — a real false positive that would
+    otherwise let the scrape claim the wrong session.
+    """
+    na, nb = _norm_session_name(a), _norm_session_name(b)
+    if na == nb:
+        return True
+    short, long_ = (na, nb) if len(na) <= len(nb) else (nb, na)
+    return len(short) >= min_prefix and long_.startswith(short)
 
 
 # ─── UPLOAD ENDPOINT ────────────────────────────────────────────────────
@@ -9888,53 +9943,80 @@ def _upload_to_internal_server_and_register(
             # first entry; we have to decode each candidate id and
             # match its last path segment against the session name
             # we sent to KIT.
-            try:
-                home_path = _user_home_path(token)
-                home_b64 = base64.b64encode(home_path.encode("utf-8")).decode("ascii")
+            home_path = _user_home_path(token)
+            home_b64 = base64.b64encode(home_path.encode("utf-8")).decode("ascii")
+            wanted = _norm_session_name(session_name)
 
-                archive_resp = requests.get(
-                    f"{base_url}/archive/{home_b64}",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "X-Forward-Auth": token,
-                    },
-                    cookies={"_forward_auth": token},
-                    verify=False,
-                    timeout=20,
-                    allow_redirects=True,
-                )
-                if archive_resp.status_code == 200:
-                    candidates = re.findall(
-                        r"/archivesession/([A-Za-z0-9_\-=]+)",
-                        archive_resp.text,
+            for attempt in range(1, 4):
+                try:
+                    archive_resp = requests.get(
+                        f"{base_url}/archive/{home_b64}",
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "X-Forward-Auth": token,
+                        },
+                        cookies={"_forward_auth": token},
+                        verify=False,
+                        timeout=20,
+                        allow_redirects=True,
                     )
+                    if archive_resp.status_code == 200:
+                        # Base64 uses `+` and `/` for indices 62 and 63. KIT emits
+                        # standard base64, not the URL-safe variant, so both characters
+                        # appear in Cyrillic ids. Including `%` guards against a
+                        # percent-encoded id if the archive page ever sends one.
+                        candidates = re.findall(
+                            r"/archivesession/([A-Za-z0-9_\-+/=%]+)",
+                            archive_resp.text,
+                        )
 
-                    wanted = _norm_session_name(session_name)
-                    for cand in candidates:
-                        # base64 decode with padding repair
-                        padded = cand + "=" * (-len(cand) % 4)
-                        try:
-                            decoded = base64.b64decode(padded).decode(
-                                "utf-8", errors="ignore"
-                            )
-                        except (ValueError, UnicodeDecodeError):
-                            continue
-                        tail = decoded.rsplit("/", 1)[-1]
-                        if _norm_session_name(tail) == wanted:
-                            session_id = cand
-                            logging.info(
-                                "internal_upload: session id matched "
-                                "by name: %s (email segment preserved "
-                                "verbatim from KIT)",
-                                session_id,
-                            )
-                            break
-            except requests.exceptions.RequestException as e:
-                logging.warning(
-                    "internal_upload: could not scrape archive "
-                    "listing for session id: %s",
-                    e,
-                )
+                        # If the page percent-encoded the id, decode it back to the raw
+                        # base64 before comparing. `unquote` is a no-op when there is
+                        # nothing to decode, so this is safe either way.
+                        candidates = [urllib.parse.unquote(c) for c in candidates]
+                        logging.info(
+                            "archive scrape attempt %d: %d candidate(s), wanted=%r",
+                            attempt, len(candidates), wanted,
+                        )
+                        for cand in candidates:
+                            padded = cand + "=" * (-len(cand) % 4)
+                            try:
+                                decoded = base64.b64decode(padded).decode(
+                                    "utf-8", errors="ignore"
+                                )
+                            except (ValueError, UnicodeDecodeError):
+                                continue
+                            tail_raw = decoded.rsplit("/", 1)[-1]
+                            if _names_match(tail_raw, session_name):
+                                session_id = cand
+                                logging.info(
+                                    "archive scrape: matched on attempt %d", attempt
+                                )
+                                break
+
+                        # Dump the tails so the next failure is debuggable
+                        if not session_id:
+                            for cand in candidates[:8]:
+                                try:
+                                    dec = base64.b64decode(
+                                        cand + "=" * (-len(cand) % 4)
+                                    ).decode("utf-8", errors="ignore")
+                                except (ValueError, UnicodeDecodeError):
+                                    continue
+                                logging.info(
+                                    "  candidate id=%r (len=%d) tail=%r",
+                                    cand[:60] + ("…" if len(cand) > 60 else ""),
+                                    len(cand),
+                                    dec.rsplit("/", 1)[-1],
+                                )
+
+                except requests.exceptions.RequestException as e:
+                    logging.warning("archive scrape attempt %d failed: %s", attempt, e)
+
+                if session_id:
+                    break
+                if attempt < 3:
+                    time.sleep(10)
 
             # Fallback: only used if the scrape above did not find an
             # id. Reconstructs it from the /home/<user>/<name> path —
