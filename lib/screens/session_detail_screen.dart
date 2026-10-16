@@ -221,7 +221,9 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   // ─── Job configuration state ─────────────────────────────────────
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _sessionNameController;
-  final TextEditingController _topicNameController = TextEditingController();
+  final TextEditingController _topicNameController = TextEditingController(
+    text: publicServerUrl,
+  );  
   final TextEditingController _speakerNameController = TextEditingController();
   final TextEditingController _shortenController = TextEditingController();
   final TextEditingController _muteController =
@@ -343,7 +345,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   @override
   void initState() {
     super.initState();
-    _sessionNameController = TextEditingController();
+    _sessionNameController = TextEditingController(text: widget.videoKey);
     final now = DateTime.now();
     _date =
         '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
@@ -463,8 +465,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       'postproduction': List<String>.from(_postproduction),
       'mute': _muteController.text,
       'pause': _pauseController.text,
-      'session_name': _sessionNameController.text,
-      'topic_name': _topicNameController.text,
       'speaker_name': _speakerNameController.text,
       'shorten': _shortenController.text,
       'date': _date,
@@ -513,10 +513,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     _muteController.text  = data['mute']  as String? ?? _muteController.text;
     _pauseController.text = data['pause'] as String? ?? _pauseController.text;
 
-    final sn = data['session_name'];
-    if (sn is String && sn.isNotEmpty) _sessionNameController.text = sn;
-    final tn = data['topic_name'];
-    if (tn is String) _topicNameController.text = tn;
     final spn = data['speaker_name'];
     if (spn is String) _speakerNameController.text = spn;
     final sh = data['shorten'];
@@ -631,16 +627,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     super.dispose();
   }
 
-  /// Base session name for a project that has no saved settings yet.
-  ///
-  /// Returns just the video's display name — the timestamp is appended
-  /// at submit time by `_stampSessionNameForSubmit`, so the value the
-  /// user sees while editing stays stable and the value KIT receives
-  /// always carries the moment of submission.
-  String _getDefaultSessionName() {
-    return _detail?.name ?? 'Video';
-  }
-
   // ═══════════════════════════════════════════════════════════════════
   //  SESSION DETAIL LOADING
   // ═══════════════════════════════════════════════════════════════════
@@ -664,15 +650,8 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         setState(() {
           _detail = detail;
           _isLoadingDetail = false;
-          // Populate the session name controller once detail is available
-          if (_sessionNameController.text.isEmpty) {
-            _sessionNameController.text = _getDefaultSessionName();
-          }
-          // Topic always starts as the video key. Submit-time stamping keeps
-          // them consistent on subsequent runs.
-          if (_topicNameController.text.isEmpty) {
-            _topicNameController.text = widget.videoKey;
-          }
+          // Session Name and Topic Name are locked to fixed values set
+          // in initState / controller defaults. Nothing to populate here.
         });
         // Start the video now that we know the detail object.
         _initializeVideoPlayer(detail);
@@ -2153,34 +2132,24 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   }
 
 
-  /// Stamp the current date/time onto the session name and set the
-  /// topic to the video key, but only if the user has not overridden
-  /// the default.
+  /// Session Name is the video key with the current timestamp
+  /// appended. Topic Name is the fixed application URL.
   ///
-  /// "Overridden" is detected by comparing the field to the current
-  /// default (`<video name>` with no timestamp) and to the previous
-  /// default (`<video name> – <timestamp>`). Anything else is treated
-  /// as user input and left alone.
+  /// The video key alone would collide on re-upload: KIT would
+  /// create a second session under a suffixed path, and the archive
+  /// scrape could match the older one. Appending `YYYY-MM-DD HH:MM:SS`
+  /// makes each submission a distinct, trivially-matchable ASCII name.
   void _stampSessionNameForSubmit() {
-    final current = _sessionNameController.text.trim();
-    final videoName = _detail?.name ?? 'Video';
-    final defaultPlain = videoName;
-    final looksLikePreviousStamp =
-        current == defaultPlain || current.startsWith('$videoName – ');
-
-    if (looksLikePreviousStamp) {
-      final now = DateTime.now();
-      final dateTimeStr =
-          '${now.year}-${now.month.toString().padLeft(2, '0')}-'
-          '${now.day.toString().padLeft(2, '0')} '
-          '${now.hour.toString().padLeft(2, '0')}:'
-          '${now.minute.toString().padLeft(2, '0')}';
-      _sessionNameController.text = '$videoName – $dateTimeStr';
-    }
-
-    // Topic always mirrors the key — it is a machine identifier, not
-    // free text, and the user has no reason to edit it.
-    _topicNameController.text = widget.videoKey;
+    final now = DateTime.now();
+    final ts =
+        '${now.year}'
+        '${now.month.toString().padLeft(2, '0')}'
+        '${now.day.toString().padLeft(2, '0')}-'
+        '${now.hour.toString().padLeft(2, '0')}'
+        '${now.minute.toString().padLeft(2, '0')}'
+        '${now.second.toString().padLeft(2, '0')}';
+    _sessionNameController.text = '${widget.videoKey}_$ts';
+    _topicNameController.text = publicServerUrl;
   }
 
   Future<void> _uploadToInternalServer({
@@ -2251,6 +2220,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       'save_profile': '1',
     };
 
+    debugPrint('📤 [UPLOAD] session_name = ${body['name']}');
     final encoded = jsonEncode(body);
     debugPrint(
       '📤 [UPLOAD] POST $uploadUrl  '
@@ -3062,30 +3032,32 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Session Name
+        // Session Name — locked to the video key
         TextFormField(
           controller: _sessionNameController,
+          readOnly: true,
+          enabled: false,
           decoration: const InputDecoration(
             labelText: 'Session Name',
+            helperText: 'Locked to the video key — nothing to edit.',
+            helperStyle: TextStyle(fontSize: 11),
             border: OutlineInputBorder(),
+            suffixIcon: Icon(Icons.lock_outline, size: 18),
           ),
-          validator: (val) => val == null || val.trim().isEmpty
-              ? 'Please enter a name'
-              : null,
-          onChanged: (_) {
-            if (_topicNameController.text == _sessionNameController.text) {
-              _topicNameController.text = _sessionNameController.text;
-            }
-          },
         ),
         const SizedBox(height: 16),
 
-        // Topic, Date, Speaker
+        // Topic Name — locked
         TextFormField(
           controller: _topicNameController,
+          readOnly: true,
+          enabled: false,
           decoration: const InputDecoration(
             labelText: 'Topic Name',
+            helperText: 'Locked — fixed application identifier.',
+            helperStyle: TextStyle(fontSize: 11),
             border: OutlineInputBorder(),
+            suffixIcon: Icon(Icons.lock_outline, size: 18),
           ),
         ),
         const SizedBox(height: 16),

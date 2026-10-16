@@ -134,6 +134,23 @@ def add_no_cache_for_api(response):
         response.headers["Expires"] = "0"
     return response
 
+_orig_subprocess_run = subprocess.run
+
+
+def _utf8_run(*args, **kwargs):
+    """subprocess.run wrapper: UTF-8 text mode everywhere.
+
+    On Windows, text=True defaults to cp1252, which crashes on
+    Cyrillic filenames echoed by ffmpeg. Force UTF-8 with byte
+    replacement so it never raises.
+    """
+    if kwargs.get("text") or kwargs.get("universal_newlines"):
+        kwargs.setdefault("encoding", "utf-8")
+        kwargs.setdefault("errors", "replace")
+    return _orig_subprocess_run(*args, **kwargs)
+
+
+subprocess.run = _utf8_run
 
 # ─── DEFAULT INTERNAL SERVER ──────────────────────────────
 INTERNAL_SERVER_URL = "https://lt2srv.iar.kit.edu"
@@ -9943,11 +9960,30 @@ def _upload_to_internal_server_and_register(
             # first entry; we have to decode each candidate id and
             # match its last path segment against the session name
             # we sent to KIT.
+            #
+            # Matching is two-pass: exact-string first, prefix
+            # fallback second. A plain-key candidate like
+            # `122f9e34-…` is a strict prefix of a timestamped name
+            # like `122f9e34-…_20261016-…`, so without the two-pass
+            # rule a re-upload would always bind to the older
+            # session. The exact match wins unconditionally; the
+            # prefix match is used only if no exact match is found,
+            # and only if the candidate is not already in the
+            # project's job history.
             home_path = _user_home_path(token)
             home_b64 = base64.b64encode(home_path.encode("utf-8")).decode("ascii")
-            wanted = _norm_session_name(session_name)
+            wanted_norm = _norm_session_name(session_name)
 
-            for attempt in range(1, 4):
+            _ensure_job_history(project)
+            already_known = {
+                (e.get("session_id") or "").strip()
+                for e in project.get("job_history", [])
+                if isinstance(e, dict)
+            }
+
+            last_name_match = None
+
+            for attempt in range(1, 7):
                 try:
                     archive_resp = requests.get(
                         f"{base_url}/archive/{home_b64}",
@@ -9961,23 +9997,33 @@ def _upload_to_internal_server_and_register(
                         allow_redirects=True,
                     )
                     if archive_resp.status_code == 200:
-                        # Base64 uses `+` and `/` for indices 62 and 63. KIT emits
-                        # standard base64, not the URL-safe variant, so both characters
-                        # appear in Cyrillic ids. Including `%` guards against a
-                        # percent-encoded id if the archive page ever sends one.
+                        # Base64 uses `+` and `/` for indices 62 and 63.
+                        # KIT emits standard base64, not the URL-safe
+                        # variant, so both characters appear in
+                        # Cyrillic ids. Including `%` guards against
+                        # a percent-encoded id if the archive page
+                        # ever sends one.
                         candidates = re.findall(
                             r"/archivesession/([A-Za-z0-9_\-+/=%]+)",
                             archive_resp.text,
                         )
 
-                        # If the page percent-encoded the id, decode it back to the raw
-                        # base64 before comparing. `unquote` is a no-op when there is
-                        # nothing to decode, so this is safe either way.
+                        # If the page percent-encoded the id, decode it
+                        # back to the raw base64 before comparing.
+                        # `unquote` is a no-op when there is nothing
+                        # to decode, so this is safe either way.
                         candidates = [urllib.parse.unquote(c) for c in candidates]
+
                         logging.info(
                             "archive scrape attempt %d: %d candidate(s), wanted=%r",
-                            attempt, len(candidates), wanted,
+                            attempt,
+                            len(candidates),
+                            wanted_norm,
                         )
+
+                        exact_match = None
+                        prefix_match = None
+
                         for cand in candidates:
                             padded = cand + "=" * (-len(cand) % 4)
                             try:
@@ -9987,14 +10033,78 @@ def _upload_to_internal_server_and_register(
                             except (ValueError, UnicodeDecodeError):
                                 continue
                             tail_raw = decoded.rsplit("/", 1)[-1]
-                            if _names_match(tail_raw, session_name):
-                                session_id = cand
-                                logging.info(
-                                    "archive scrape: matched on attempt %d", attempt
-                                )
+                            tail_norm = _norm_session_name(tail_raw)
+
+                            if tail_norm == wanted_norm:
+                                exact_match = cand
                                 break
 
-                        # Dump the tails so the next failure is debuggable
+                            if prefix_match is None and _names_match(
+                                tail_raw, session_name
+                            ):
+                                if cand in already_known:
+                                    logging.info(
+                                        "archive scrape: skipping %s "
+                                        "(already in job history)",
+                                        cand[:40] + "…",
+                                    )
+                                    continue
+                                prefix_match = cand
+
+                        candidate = exact_match or prefix_match
+                        if candidate:
+                            # Name matched — verify KIT actually
+                            # serves this id before trusting it. A
+                            # one-byte ranged GET turns a silently-
+                            # dead sid into a loud skip.
+                            probe_url = f"{base_url}/archivesession/{candidate}"
+                            try:
+                                probe = requests.get(
+                                    probe_url,
+                                    headers={
+                                        "Authorization": f"Bearer {token}",
+                                        "X-Forward-Auth": token,
+                                    },
+                                    cookies={"_forward_auth": token},
+                                    verify=False,
+                                    timeout=15,
+                                    allow_redirects=True,
+                                )
+                            except requests.exceptions.RequestException as e:
+                                logging.warning(
+                                    "archive scrape: probe for %s failed: %s",
+                                    candidate[:40] + "…",
+                                    e,
+                                )
+                                probe = None
+
+                            if probe is not None and probe.status_code == 200:
+                                session_id = candidate
+                                logging.info(
+                                    "archive scrape: %s match and verified "
+                                    "on attempt %d",
+                                    "exact" if exact_match else "prefix",
+                                    attempt,
+                                )
+                                break
+                            elif probe is not None:
+                                logging.warning(
+                                    "archive scrape: name matched but KIT "
+                                    "returned %s for id=%s… — skipping",
+                                    probe.status_code,
+                                    candidate[:40],
+                                )
+
+                        # Remember the most recent name-matched
+                        # candidate so a slow publish can still be
+                        # handed to the background worker below.
+                        if prefix_match and not exact_match:
+                            last_name_match = prefix_match
+                        elif exact_match:
+                            last_name_match = exact_match
+
+                        # Dump the tails so the next failure is
+                        # debuggable.
                         if not session_id:
                             for cand in candidates[:8]:
                                 try:
@@ -10011,17 +10121,34 @@ def _upload_to_internal_server_and_register(
                                 )
 
                 except requests.exceptions.RequestException as e:
-                    logging.warning("archive scrape attempt %d failed: %s", attempt, e)
+                    logging.warning(
+                        "archive scrape attempt %d failed: %s", attempt, e
+                    )
 
                 if session_id:
                     break
-                if attempt < 3:
-                    time.sleep(10)
+                if attempt < 6:
+                    time.sleep(30)
 
-            # Fallback: only used if the scrape above did not find an
-            # id. Reconstructs it from the /home/<user>/<name> path —
-            # kept as a last resort because it is sensitive to how KIT
-            # normalises punctuation.
+            # ── Fallback: register the most recent name-match even if
+            #    no candidate returned 200 ───────────────────────────
+            # Freshly-uploaded sessions often take 1–3 minutes to
+            # become reachable on KIT. Rather than 502 the upload we
+            # hand the most recent name-match to the background
+            # worker. Its own 404 counter will abandon a truly dead
+            # id after 30 consecutive failures.
+            if not session_id and last_name_match:
+                session_id = last_name_match
+                logging.warning(
+                    "internal_upload: no candidate verified 200 after "
+                    "%d attempt(s); registering last name-match %s "
+                    "(len=%d) for the background worker to resolve",
+                    attempt,
+                    last_name_match[:40] + "…",
+                    len(last_name_match),
+                )
+
+            # If the scrape produced nothing at all, we are done.
             if not session_id:
                 logging.error(
                     "internal_upload: KIT did not return a session id. "
@@ -10032,8 +10159,9 @@ def _upload_to_internal_server_and_register(
                 return (
                     {
                         "error": (
-                            "KIT accepted the upload but did not return a session id. "
-                            "See the backend log for the raw response body."
+                            "KIT accepted the upload but did not return a "
+                            "session id. See the backend log for the raw "
+                            "response body."
                         ),
                         "status_code": resp.status_code,
                         "pipeline": pipeline_label,
@@ -10067,8 +10195,8 @@ def _upload_to_internal_server_and_register(
         sessions[session_id] = {
             "id": session_id,
             "name": session_name,
-            # Human-readable folder name under sessions/ — this is what
-            # the user sees on disk instead of the encoded id.
+            # Human-readable folder name under sessions/ — this is
+            # what the user sees on disk instead of the encoded id.
             "local_name": _unique_local_name(session_name),
             "video_key": video_key,
             "created_at": utc_now_iso(),
@@ -10076,7 +10204,7 @@ def _upload_to_internal_server_and_register(
             "server": base_url,
             "expected_mt": expected_mt,
             "token": token,  # the token that created this session
-            # ── NEW: pipeline + identity, for display and audit ──
+            # ── pipeline + identity, for display and audit ──
             "pipeline_label": pipeline_label,
             "pipeline_url": pipeline_url,
             "email_used": email_used,
@@ -10091,7 +10219,7 @@ def _upload_to_internal_server_and_register(
             "created_at": utc_now_iso(),
             "config": {"source": "internal_upload"},
             "expected_mt": expected_mt,
-            # ── NEW: pipeline + identity, plus a scratch notes field ──
+            # ── pipeline + identity, plus a scratch notes field ──
             "pipeline_label": pipeline_label,
             "pipeline_url": pipeline_url,
             "email_used": email_used,
@@ -10153,7 +10281,7 @@ def _upload_to_internal_server_and_register(
                 "session_url": f"{base_url}/archivesession/{session_id}",
                 "output_url": f"/session-output/{session_id}",
                 "download_url": f"/session-zip/{session_id}",
-                # ── NEW: echo the pipeline + identity back to the client ──
+                # ── echo the pipeline + identity back to the client ──
                 "pipeline_label": pipeline_label,
                 "pipeline_url": pipeline_url,
                 "email": email_used,
@@ -10217,7 +10345,7 @@ def _upload_to_internal_server_and_register(
                     logging.info("🧹 Cleaned up temp file: %s", p)
             except OSError:
                 pass
-
+            
 
 @app.route("/upload", methods=["POST", "OPTIONS"])
 def upload_to_internal():
