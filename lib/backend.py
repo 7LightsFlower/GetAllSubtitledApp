@@ -215,6 +215,33 @@ def _resolve_target_url(requested: str | None) -> str:
     return f"{INTERNAL_SERVER_URL}/upload_lecture"
 
 
+# ─── Live microphone ASR relay (/api/live/...) ───────────────────
+# Imported both ways so it works under gunicorn (`lib.backend:app`)
+# and when backend.py is run directly as a script.
+try:
+    from .live_relay import create_live_blueprint
+except ImportError:
+    from live_relay import create_live_blueprint
+
+
+def _resolve_live_server(requested: str | None) -> str:
+    """Allow-listed KIT base URL for a live session (no trailing slash)."""
+    if requested and _is_allowed_server(requested):
+        return requested.rstrip("/")
+    if requested:
+        logging.warning("Rejected unknown live target server: %r", requested)
+    return INTERNAL_SERVER_URL.rstrip("/")
+
+
+# Finished live sessions are kept on the persistent `state` volume —
+# NOT under SESSION_FOLDER, which /clear-videos wipes wholesale.
+LIVE_SESSIONS_DIR = os.path.join(os.path.dirname(__file__), "state", "live_sessions")
+
+app.register_blueprint(
+    create_live_blueprint(_resolve_live_server, LIVE_SESSIONS_DIR)
+)
+
+
 # ─── UPLOAD MODES ─────────────────────────────────────────
 # When True, upload a tiny solid-colour video that carries the audio
 # instead of the full video. The KIT server only processes the audio

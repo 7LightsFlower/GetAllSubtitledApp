@@ -6,6 +6,7 @@ import 'package:web/web.dart' as web;
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:asr_live_translator/screens/session_detail_screen.dart';
+import 'package:asr_live_translator/screens/live_sessions_screen.dart';
 import 'package:asr_live_translator/theme/responsive.dart';
 import 'package:asr_live_translator/widgets/job_progress_panel.dart';
 import 'package:flutter/foundation.dart';
@@ -1254,6 +1255,19 @@ class _WorkingScreenState extends State<WorkingScreen> {
     );
   }
 
+  // ─── Live ASR (microphone) ────────────────────────────────────
+  /// Opens the Live Sessions list (finished live sessions + "New live
+  /// session", which uses the browser microphone).
+  Future<void> _startLiveAsr() async {
+    if (!mounted) return;
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const LiveSessionsScreen()),
+    );
+    if (!mounted) return;
+    await _updateWorkingScreenUrl();
+  }
+
   // ─── Logout ───────────────────────────────────────────────────
   Future<void> _logoutPublic() async {
     if (!mounted) return;
@@ -1295,16 +1309,6 @@ class _WorkingScreenState extends State<WorkingScreen> {
           ],
         ),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.play_circle_outline),
-            onPressed: () => _showYouTubeImportDialog(),
-            tooltip: 'Download YouTube Video',
-          ),
-          IconButton(
-            icon: const Icon(Icons.text_snippet),
-            onPressed: _importVideosFromText,
-            tooltip: 'Import from text links',
-          ),
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _fetchProjects,
@@ -1430,17 +1434,70 @@ class _WorkingScreenState extends State<WorkingScreen> {
       },
     );
 
-    final uploadButton = ElevatedButton.icon(
-      onPressed: _uploadVideo,
-      icon: const Icon(Icons.upload),
-      label: const Text('Upload'),
-      style: ElevatedButton.styleFrom(
-        padding: EdgeInsets.symmetric(
-          horizontal: r.spaceM,
-          vertical: r.spaceM,
-        ),
-        textStyle: TextStyle(fontSize: r.fontBody),
+    final buttonStyle = ElevatedButton.styleFrom(
+      padding: EdgeInsets.symmetric(
+        horizontal: r.spaceM,
+        vertical: r.spaceM,
       ),
+      textStyle: TextStyle(fontSize: r.fontBody),
+    );
+
+    // One "Video Upload" button; every import path is a sub-option.
+    final uploadButton = MenuAnchor(
+      alignmentOffset: const Offset(0, 4),
+      menuChildren: [
+        MenuItemButton(
+          leadingIcon: const Icon(Icons.upload_file),
+          onPressed: _uploadVideo,
+          child: const Text('From this device'),
+        ),
+        MenuItemButton(
+          leadingIcon: const Icon(Icons.play_circle_outline),
+          onPressed: _showYouTubeImportDialog,
+          child: const Text('From YouTube URL'),
+        ),
+        MenuItemButton(
+          leadingIcon: const Icon(Icons.text_snippet),
+          onPressed: _importVideosFromText,
+          child: const Text('From text links'),
+        ),
+      ],
+      builder: (context, controller, _) => ElevatedButton.icon(
+        onPressed: () =>
+            controller.isOpen ? controller.close() : controller.open(),
+        icon: const Icon(Icons.upload),
+        label: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Video Upload'),
+            Icon(
+              controller.isOpen ? Icons.arrow_drop_up : Icons.arrow_drop_down,
+              size: 20,
+            ),
+          ],
+        ),
+        style: buttonStyle,
+      ),
+    );
+
+    // Entry point for live microphone ASR + translation.
+    final liveButton = Tooltip(
+      message: 'Live ASR & translation (microphone)',
+      child: ElevatedButton.icon(
+        onPressed: _startLiveAsr,
+        icon: const Icon(Icons.mic),
+        label: const Text('Live'),
+        style: buttonStyle,
+      ),
+    );
+
+    final actionButtons = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        uploadButton,
+        SizedBox(width: r.spaceS),
+        liveButton,
+      ],
     );
 
     // Compact: search on its own line, sort+upload on a second line.
@@ -1453,7 +1510,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
             children: [
               Expanded(child: sortDropdown),
               SizedBox(width: r.spaceS),
-              uploadButton,
+              actionButtons,
             ],
           ),
         ],
@@ -1467,7 +1524,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
         SizedBox(width: r.spaceS),
         sortDropdown,
         SizedBox(width: r.spaceS),
-        uploadButton,
+        actionButtons,
       ],
     );
   }

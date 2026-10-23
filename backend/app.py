@@ -95,6 +95,9 @@ def _register_before_after(app: Flask) -> None:
                 "/session-transcript-json/",
                 "/session_tts/",
                 "/session-tts/",
+                "/video-job-settings/",     
+                "/video-job-history/",       
+                "/job-settings-presets",
                 "/api/",
             )
         ):
