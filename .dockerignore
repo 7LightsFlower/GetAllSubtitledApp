@@ -13,6 +13,8 @@ build/
 # Runtime data (created by the server; mounted as a volume in compose)
 lib/uploads/
 lib/sessions/
+# Server state incl. ltapi_credentials.json (secrets) — never bake into the image
+lib/state/
 
 # JS deps for the firebase functions (not needed by the app)
 node_modules/
