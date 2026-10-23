@@ -1,0 +1,36 @@
+{
+  "input_languages": [
+    "uz",
+    "tr",
+    "ru"
+  ],
+  "output_languages": [
+    "en",
+    "de",
+    "ru",
+    "tr"
+  ],
+  "audio_languages": [],
+  "availability": "private",
+  "format": "mixed",
+  "smart_chaptering": "online_dynamic",
+  "tts_quality_mode": "low_latency",
+  "error_correction": "None",
+  "profanity_filter": true,
+  "filter_music": false,
+  "summarization": true,
+  "live_notes": false,
+  "diarization": false,
+  "ai_assistant": false,
+  "save_session": true,
+  "distinguish_unknown_speakers": false,
+  "postproduction": [],
+  "mute": "120",
+  "pause": "2",
+  "session_name": "Tibbiyotda Germaniya bilan hamkorlik Axborot 24 (06.10.2026) – 2026-10-16 12:44",
+  "topic_name": "40297178-a971-439f-b68b-c2190b0fd3ae",
+  "speaker_name": "",
+  "shorten": "",
+  "date": "2026-10-16",
+  "saved_at": "2026-10-16T12:56:45.134"
+}

@@ -1,0 +1,34 @@
+{
+  "input_languages": [
+    "en",
+    "de",
+    "ru"
+  ],
+  "output_languages": [
+    "en",
+    "de"
+  ],
+  "audio_languages": [],
+  "availability": "private",
+  "format": "mixed",
+  "smart_chaptering": "online_dynamic",
+  "tts_quality_mode": "low_latency",
+  "error_correction": "None",
+  "profanity_filter": true,
+  "filter_music": false,
+  "summarization": true,
+  "live_notes": false,
+  "diarization": false,
+  "ai_assistant": false,
+  "save_session": true,
+  "distinguish_unknown_speakers": false,
+  "postproduction": [],
+  "mute": "120",
+  "pause": "2",
+  "session_name": "Развитие современной фармацевтики Ахборот 24 (15.10.2026) – 2026-10-16 13:10",
+  "topic_name": "984b2747-4e1b-4440-9977-d1edc6e27b59",
+  "speaker_name": "",
+  "shorten": "",
+  "date": "2026-10-16",
+  "saved_at": "2026-10-16T13:13:58.438"
+}

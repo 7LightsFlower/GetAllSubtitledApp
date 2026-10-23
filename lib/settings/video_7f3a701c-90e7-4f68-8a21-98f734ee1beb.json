@@ -1,0 +1,33 @@
+{
+  "input_languages": [
+    "en",
+    "de"
+  ],
+  "output_languages": [
+    "en",
+    "de"
+  ],
+  "audio_languages": [],
+  "availability": "private",
+  "format": "mixed",
+  "smart_chaptering": "online_dynamic",
+  "tts_quality_mode": "low_latency",
+  "error_correction": "None",
+  "profanity_filter": true,
+  "filter_music": true,
+  "summarization": true,
+  "live_notes": false,
+  "diarization": false,
+  "ai_assistant": false,
+  "save_session": true,
+  "distinguish_unknown_speakers": false,
+  "postproduction": [],
+  "mute": "120",
+  "pause": "2",
+  "session_name": "Wie geht's, Michael Patrick Kelly - Folge 36",
+  "topic_name": "7f3a701c-90e7-4f68-8a21-98f734ee1beb",
+  "speaker_name": "",
+  "shorten": "",
+  "date": "2026-10-16",
+  "saved_at": "2026-10-16T12:28:50.911"
+}

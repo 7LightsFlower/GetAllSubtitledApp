@@ -64,28 +64,156 @@ MAX_CHUNK_BYTES = SAMPLE_RATE * BYTES_PER_SAMPLE * 5  # 5 s per POST is plenty
 
 log = logging.getLogger("live_relay")
 
+# KIT's reverse proxy (Traefik) guards /ltapi/ with HTTP Basic auth —
+# a separate login from the user's KIT token, which only satisfies the
+# Dex/forward-auth check on the web routes (/upload_lecture, …).
+#
+# Credentials are looked up per server, first match wins:
+#   1. lib/state/ltapi_credentials.json (or $KIT_LTAPI_CREDENTIALS_FILE):
+#        {
+#          "https://lt2srv.iar.kit.edu":        {"user": "…", "password": "…"},
+#          "https://lt2srv-backup.iar.kit.edu": {"user": "…", "password": "…"},
+#          "*":                                 {"user": "…", "password": "…"}
+#        }
+#      Keys may be full URLs or bare host names; "*" is the default.
+#      The file is re-read on every session start, so edits apply
+#      without a restart. lib/state/ is git-ignored and a Docker volume.
+#   2. Environment (applies to every server):
+#        KIT_LTAPI_USER=…  KIT_LTAPI_PASSWORD=…   or  KIT_LTAPI_BASIC_AUTH=user:pass
+CREDENTIALS_FILE = os.environ.get(
+    "KIT_LTAPI_CREDENTIALS_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "state",
+                 "ltapi_credentials.json"),
+)
+
+
+def _host_key(url: str) -> str:
+    u = url.strip().rstrip("/").lower()
+    return u.split("://", 1)[-1]
+
+
+def _credentials_from_file(
+    server_url: str,
+) -> tuple[Optional[tuple[str, str]], str]:
+    """(credentials or None, human-readable note on where they came from)."""
+    try:
+        # utf-8-sig: Windows editors often prepend a BOM, which plain
+        # utf-8 json.load rejects.
+        with open(CREDENTIALS_FILE, "r", encoding="utf-8-sig") as f:
+            table = json.load(f)
+    except FileNotFoundError:
+        return None, f"file not found: {CREDENTIALS_FILE}"
+    except (OSError, ValueError) as e:
+        log.warning("live: cannot read %s: %s", CREDENTIALS_FILE, e)
+        return None, f"file unreadable ({e}): {CREDENTIALS_FILE}"
+    if not isinstance(table, dict):
+        return None, f"file is not a JSON object: {CREDENTIALS_FILE}"
+
+    wanted = _host_key(server_url)
+    entry, matched = None, None
+    for key, value in table.items():
+        if key != "*" and _host_key(key) == wanted:
+            entry, matched = value, key
+            break
+    if entry is None and "*" in table:
+        entry, matched = table["*"], "*"
+    if entry is None:
+        return None, (
+            f"no entry for {wanted} (keys: {', '.join(table) or '-'}) "
+            f"in {CREDENTIALS_FILE}"
+        )
+    if not isinstance(entry, dict):
+        return None, f"entry {matched!r} is not an object in {CREDENTIALS_FILE}"
+    user = str(entry.get("user") or entry.get("username") or "").strip()
+    pw = str(entry.get("password") or "")
+    if not user:
+        return None, f"entry {matched!r} has no \"user\" in {CREDENTIALS_FILE}"
+    note = f"user {user!r} from entry {matched!r} in {CREDENTIALS_FILE}"
+    if pw != pw.strip():
+        note += " (WARNING: password has leading/trailing spaces)"
+    if not pw:
+        note += " (WARNING: empty password)"
+    return (user, pw), note
+
+
+def _ltapi_credentials(
+    server_url: str = "",
+) -> tuple[Optional[tuple[str, str]], str]:
+    """Basic credentials for /ltapi/ on this server, plus where they came from."""
+    found, note = (
+        _credentials_from_file(server_url) if server_url else (None, "no server")
+    )
+    if found:
+        return found, note
+    user = os.environ.get("KIT_LTAPI_USER", "").strip()
+    pw = os.environ.get("KIT_LTAPI_PASSWORD", "")
+    if not user:
+        combined = os.environ.get("KIT_LTAPI_BASIC_AUTH", "")
+        if ":" in combined:
+            user, pw = combined.split(":", 1)
+            user = user.strip()
+    if user:
+        return (user, pw), f"user {user!r} from environment ({note})"
+    return None, f"none configured — {note}"
+
+
+def _ltapi_basic_auth(server_url: str = "") -> Optional[tuple[str, str]]:
+    return _ltapi_credentials(server_url)[0]
+
 
 # ═════════════════════════════════════════════════════════════════════
 #  KIT adapter — the only place that knows KIT's live protocol
 # ═════════════════════════════════════════════════════════════════════
 class KitLiveAdapter:
-    """HTTP calls to the KIT mediator for one live session.
+    """HTTP calls to the KIT server for one live session.
 
-    ⚠️  VERIFY against your mediator. Adjust the four *_PATH constants
-    and the payloads in start()/append_audio()/end() if your server
-    differs; nothing else in the app needs to change.
+    Mirrors what KIT's own live page (/index/live/ → /present/<id>) does
+    in the browser, captured from DevTools on lt2srv-backup:
+
+      start   POST /create                      form-urlencoded, same fields
+                                                as the live settings form;
+                                                answers with /present/<id>
+      audio   POST /webapi/<id>/0/append        JSON body that is itself a
+                                                JSON-encoded *string*:
+                                                "{\"b64_enc_…\":…,\"start\":<unix s>,\"seq\":n}"
+      log     POST /webapi/<id>/addstreamlog    no body (only when logging=1)
+
+    Everything goes through the normal web login (the `_forward_auth`
+    cookie), so no extra /ltapi/ credentials are needed.
+
+    ⚠️ Still UNVERIFIED — adjust here if KIT disagrees:
+      * EVENTS_PATH (results stream) was not in the capture yet.
+      * The browser sends Opus (`b64_enc_opus`); we send raw PCM under
+        AUDIO_KEY. If KIT returns no text, the mediator needs Opus.
+      * How the browser signals "end of audio" was not in the capture;
+        we send the mediator's {"controll": "END"} through /append.
     """
 
-    START_PATH = "/ltapi/get_default_asr"
-    APPEND_PATH = "/ltapi/{session}/{stream}/append"
-    EVENTS_PATH = "/ltapi/stream"
-    # END is sent through APPEND_PATH as a control message.
+    CREATE_PATH = "/create"
+    APPEND_PATH = "/webapi/{session}/{stream}/append"
+    STREAMLOG_PATH = "/webapi/{session}/addstreamlog"
+    EVENTS_PATH = "/webapi/stream"  # ⚠️ guess — query: ?channel=<session>
+    STREAM_ID = "0"
+    AUDIO_KEY = "b64_enc_pcm_s16le"
+
+    # Kept for error messages / the CLI check; /webapi needs none.
+    START_PATH = CREATE_PATH
+
+    # HTML checkboxes are only submitted when ticked, so a "0" must be
+    # left out rather than sent (the server may test for presence).
+    _CHECKBOX_FIELDS = {
+        "profanity", "filter_music", "summarization", "notes", "saasr",
+        "aiassistant", "logging", "distinguish_unknown_speakers",
+        "legals", "save_profile",
+    }
 
     def __init__(self, server_url: str, token: str):
         self.server = server_url.rstrip("/")
         self.token = token
         self.session_id: Optional[str] = None
         self.stream_id: Optional[str] = None
+        self.t0 = 0.0  # unix time of the first audio sample
+        self.seq = 0
         self._http = requests.Session()
         self._http.headers.update(
             {
@@ -96,34 +224,64 @@ class KitLiveAdapter:
         )
         self._http.cookies.set("_forward_auth", token)
         self._http.verify = False  # same as the rest of backend.py
+        self.basic_auth = None
+        self.auth_source = "not needed (/create and /webapi use the login cookie)"
 
     # ── lifecycle ────────────────────────────────────────────────────
     def start(self, payload: dict) -> None:
-        """Open a live session and remember (session_id, stream_id).
-
-        `payload` uses the same field names as the offline upload form
-        (`language`, `mtLanguage`, `audioLanguage`, `availability`,
-        `format`, `logging`, …), so KIT sees the same settings either way.
-        """
+        """Create the live session exactly like KIT's live form does."""
         r = self._http.post(
-            self.server + self.START_PATH, json=payload, timeout=(10, 30)
+            self.server + self.CREATE_PATH,
+            data=self._form(payload),
+            headers={
+                "Accept": "text/html,application/xhtml+xml",
+                "Referer": self.server + "/index/live/",
+            },
+            allow_redirects=False,
+            timeout=(10, 60),
         )
-        r.raise_for_status()
-        self.session_id, self.stream_id = self._parse_ids(r)
-        if not self.session_id or not self.stream_id:
-            raise RuntimeError(
-                f"KIT did not return session/stream ids: {r.text[:300]}"
+        location = r.headers.get("Location", "")
+        if r.status_code in (301, 302, 303, 307, 308) and "/present/" not in location:
+            # Bounced to the login page: the cookie was not accepted.
+            raise requests.HTTPError(
+                f"KIT redirected /create to {location or 'login'}", response=r
             )
-        self._control("START")
+        if r.status_code >= 400:
+            r.raise_for_status()
+
+        m = re.search(r"/present/(\d+)", location) or re.search(
+            r"/present/(\d+)", r.text or ""
+        )
+        if not m:
+            raise RuntimeError(
+                "KIT did not return a /present/<id> link after /create "
+                f"(HTTP {r.status_code}): {' '.join((r.text or '')[:300].split())}"
+            )
+        self.session_id = m.group(1)
+        self.stream_id = self.STREAM_ID
+        self.t0 = time.time()
+        self.seq = 0
+
+        if str(payload.get("logging", "0")) == "1":
+            try:
+                self._http.post(
+                    self.server
+                    + self.STREAMLOG_PATH.format(session=self.session_id),
+                    timeout=(10, 30),
+                ).raise_for_status()
+            except requests.RequestException as e:
+                log.info("live: addstreamlog failed (ignored): %s", e)
 
     def append_audio(self, pcm: bytes, start_s: float, end_s: float) -> None:
         self._post_append(
             {
-                "b64_enc_pcm_s16le": base64.b64encode(pcm).decode("ascii"),
-                "start": round(start_s, 3),
-                "end": round(end_s, 3),
+                self.AUDIO_KEY: base64.b64encode(pcm).decode("ascii"),
+                "start": round(self.t0 + start_s, 3),
+                "end": round(self.t0 + end_s, 3),
+                "seq": self.seq,
             }
         )
+        self.seq += 1
 
     def end(self) -> None:
         """Tell KIT the audio is over. The event stream stays open."""
@@ -166,6 +324,22 @@ class KitLiveAdapter:
                         yield msg
 
     # ── helpers ──────────────────────────────────────────────────────
+    def _form(self, payload: dict) -> list[tuple[str, str]]:
+        """Payload dict → form fields, lists as repeated keys like the
+        browser sends (language=en&language=de…)."""
+        fields: list[tuple[str, str]] = [("path", ""), ("profile_names", "")]
+        for key, value in payload.items():
+            if value is None or key == "token":
+                continue
+            if isinstance(value, (list, tuple)):
+                fields.extend((key, str(v)) for v in value)
+            elif key in self._CHECKBOX_FIELDS:
+                if str(value) not in ("0", "", "false", "False"):
+                    fields.append((key, "1"))
+            else:
+                fields.append((key, str(value)))
+        return fields
+
     def _control(self, what: str) -> None:
         self._post_append({"controll": what})  # sic — KIT's spelling
 
@@ -173,24 +347,15 @@ class KitLiveAdapter:
         url = self.server + self.APPEND_PATH.format(
             session=self.session_id, stream=self.stream_id
         )
-        r = self._http.post(url, json=body, timeout=(10, 30))
+        # KIT's page sends JSON.stringify(JSON.stringify(obj)): the body
+        # is a JSON string whose content is the JSON object.
+        r = self._http.post(
+            url,
+            json=json.dumps(body, separators=(",", ":")),
+            headers={"Accept": "application/json"},
+            timeout=(10, 30),
+        )
         r.raise_for_status()
-
-    @staticmethod
-    def _parse_ids(r: requests.Response) -> tuple[Optional[str], Optional[str]]:
-        try:
-            d = r.json()
-        except ValueError:
-            # Plain "sessionID streamID" or "sessionID/streamID" text.
-            parts = r.text.replace("/", " ").split()
-            return (parts[0], parts[1]) if len(parts) >= 2 else (None, None)
-        if isinstance(d, list) and len(d) >= 2:
-            return str(d[0]), str(d[1])
-        if isinstance(d, dict):
-            sid = d.get("sessionID") or d.get("session_id") or d.get("session")
-            stid = d.get("streamID") or d.get("stream_id") or d.get("stream")
-            return (str(sid) if sid else None, str(stid) if stid else None)
-        return None, None
 
     @staticmethod
     def _decode(text: str) -> Optional[dict]:
@@ -501,11 +666,89 @@ def create_live_blueprint(
         try:
             adapter.start(payload)
         except requests.HTTPError as e:
-            code = e.response.status_code if e.response is not None else 502
-            log.warning("live: KIT refused start (%s): %s", code, e)
-            if code in (401, 403):
-                return jsonify({"error": "KIT rejected the token"}), 401
-            return jsonify({"error": f"KIT error {code}"}), 502
+            resp = e.response
+            code = resp.status_code if resp is not None else 502
+            # Log what KIT actually answered — the status alone can't tell
+            # "wrong token" from "this path isn't the live API".
+            detail = ""
+            if resp is not None:
+                hdrs = {
+                    k: v
+                    for k, v in resp.headers.items()
+                    if k.lower()
+                    in ("www-authenticate", "location", "content-type", "server")
+                }
+                body_snip = " ".join((resp.text or "")[:300].split())
+                detail = f"headers={hdrs} body={body_snip!r}"
+            log.warning(
+                "live: KIT refused start (%s) at %s as %s — basic auth: %s — %s",
+                code,
+                adapter.server + adapter.START_PATH,
+                _email_from_token(token) or "<no email in token>",
+                adapter.auth_source,
+                detail,
+            )
+            challenge = (
+                (resp.headers.get("WWW-Authenticate") or "")
+                if resp is not None
+                else ""
+            )
+            if code == 401 and challenge.lower().startswith("basic"):
+                # Proxy-level Basic auth: the user's token is not the issue.
+                msg = (
+                    f"The live API on {server} (/ltapi/) is protected by a "
+                    "separate HTTP Basic login at KIT's proxy. Your KIT token "
+                    "is fine but cannot open it. "
+                    + (
+                        f"The credentials configured for this server (user "
+                        f"'{adapter.basic_auth[0]}') were rejected."
+                        if adapter.basic_auth
+                        else "No credentials found for this server ("
+                        + adapter.auth_source
+                        + ")."
+                    )
+                )
+                return (
+                    jsonify(
+                        {
+                            "error": msg,
+                            "kit_status": code,
+                            "reason": "ltapi_basic_auth",
+                        }
+                    ),
+                    502,
+                )
+            if code in (401, 403) or 300 <= code < 400:
+                return (
+                    jsonify(
+                        {
+                            "error": (
+                                f"{server} rejected the login (HTTP {code}"
+                                + (", redirected to its login page"
+                                   if 300 <= code < 400 else "")
+                                + "). "
+                                "Make sure the token was taken from this "
+                                "server's /gettoken page."
+                            ),
+                            "kit_status": code,
+                        }
+                    ),
+                    401,
+                )
+            if code == 404:
+                return (
+                    jsonify(
+                        {
+                            "error": (
+                                f"{server} has no live API at "
+                                f"{adapter.START_PATH} (HTTP 404)."
+                            ),
+                            "kit_status": code,
+                        }
+                    ),
+                    502,
+                )
+            return jsonify({"error": f"KIT error {code}", "kit_status": code}), 502
         except Exception as e:
             log.warning("live: start failed: %s", e)
             return jsonify({"error": str(e)}), 502
@@ -597,3 +840,54 @@ def create_live_blueprint(
         return ("", 204)
 
     return bp
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  Command-line check:  python lib/live_relay.py [server-url ...]
+# ═════════════════════════════════════════════════════════════════════
+def _check_cli(servers: list[str]) -> None:
+    """Show which /ltapi/ credentials each server gets and whether the
+    proxy accepts them. Sends one GET to <server>/ltapi/ — no session is
+    created and no passwords are printed."""
+    import urllib3
+
+    urllib3.disable_warnings()
+    print(f"credentials file: {CREDENTIALS_FILE}")
+    print(f"  exists: {os.path.exists(CREDENTIALS_FILE)}")
+    if not servers:
+        try:
+            with open(CREDENTIALS_FILE, "r", encoding="utf-8-sig") as f:
+                servers = [k for k in json.load(f) if k != "*"]
+        except Exception as e:
+            print(f"  cannot read it: {e}")
+    for server in servers:
+        server = server.rstrip("/")
+        if "://" not in server:
+            server = "https://" + server
+        creds, note = _ltapi_credentials(server)
+        print(f"\n{server}")
+        print(f"  basic auth: {note}")
+        for label, auth in (("without credentials", None), ("with credentials", creds)):
+            if label == "with credentials" and not creds:
+                continue
+            try:
+                r = requests.get(
+                    server + "/ltapi/", auth=auth, verify=False, timeout=15,
+                    allow_redirects=False,
+                )
+                chal = r.headers.get("WWW-Authenticate", "")
+                verdict = (
+                    "REJECTED by proxy (Basic auth)"
+                    if r.status_code == 401 and chal.lower().startswith("basic")
+                    else "passed the proxy"
+                )
+                print(f"  {label:20}: HTTP {r.status_code} -> {verdict}"
+                      + (f"  [{chal}]" if chal else ""))
+            except requests.RequestException as e:
+                print(f"  {label:20}: request failed: {e}")
+
+
+if __name__ == "__main__":
+    import sys
+
+    _check_cli(sys.argv[1:])

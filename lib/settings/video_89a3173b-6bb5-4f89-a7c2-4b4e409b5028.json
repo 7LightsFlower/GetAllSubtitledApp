@@ -1,0 +1,35 @@
+{
+  "input_languages": [
+    "en",
+    "de",
+    "ru"
+  ],
+  "output_languages": [
+    "en",
+    "de",
+    "ru"
+  ],
+  "audio_languages": [],
+  "availability": "private",
+  "format": "mixed",
+  "smart_chaptering": "online_dynamic",
+  "tts_quality_mode": "low_latency",
+  "error_correction": "None",
+  "profanity_filter": true,
+  "filter_music": true,
+  "summarization": true,
+  "live_notes": false,
+  "diarization": true,
+  "ai_assistant": false,
+  "save_session": true,
+  "distinguish_unknown_speakers": false,
+  "postproduction": [],
+  "mute": "120",
+  "pause": "2",
+  "session_name": "Что ждет Россию после Путина и почему Трамп так давит на Зеленского - мнение Михаила Ходорковского – 2026-10-16 13:18",
+  "topic_name": "89a3173b-6bb5-4f89-a7c2-4b4e409b5028",
+  "speaker_name": "",
+  "shorten": "",
+  "date": "2026-10-16",
+  "saved_at": "2026-10-16T13:32:44.029"
+}

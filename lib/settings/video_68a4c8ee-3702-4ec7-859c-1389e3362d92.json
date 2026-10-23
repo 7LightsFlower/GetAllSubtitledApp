@@ -1,0 +1,37 @@
+{
+  "input_languages": [
+    "uz",
+    "ru",
+    "tr"
+  ],
+  "output_languages": [
+    "id",
+    "tr",
+    "ru",
+    "en",
+    "de"
+  ],
+  "audio_languages": [],
+  "availability": "private",
+  "format": "mixed",
+  "smart_chaptering": "online_dynamic",
+  "tts_quality_mode": "low_latency",
+  "error_correction": "None",
+  "profanity_filter": true,
+  "filter_music": false,
+  "summarization": true,
+  "live_notes": false,
+  "diarization": false,
+  "ai_assistant": false,
+  "save_session": true,
+  "distinguish_unknown_speakers": false,
+  "postproduction": [],
+  "mute": "120",
+  "pause": "2",
+  "session_name": "Shavkat Mirziyoyev amaliy tashrif bilan Ozarbayjonda Axborot 24 (15.10.2026) – 2026-10-16 12:11",
+  "topic_name": "68a4c8ee-3702-4ec7-859c-1389e3362d92",
+  "speaker_name": "",
+  "shorten": "",
+  "date": "2026-10-16",
+  "saved_at": "2026-10-16T12:27:14.008"
+}
