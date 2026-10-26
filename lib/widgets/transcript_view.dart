@@ -98,7 +98,8 @@ class _TranscriptViewState extends State<TranscriptView> {
                 
                 return Container(
                   key: isHighlighted ? _highlightKey : null,
-                  child: _buildSegmentItem(segment, isHighlighted, index),
+                  child: _buildSegmentItem(segment, isHighlighted, index,
+                      previousSpeaker: _previousSpeaker(index)),
                 );
               },
             ),
@@ -108,14 +109,28 @@ class _TranscriptViewState extends State<TranscriptView> {
     );
   }
 
-  Widget _buildSegmentItem(SegmentData segment, bool isHighlighted, int index) {
+  /// Speaker of the nearest earlier segment that is actually shown.
+  String _previousSpeaker(int index) {
+    final segs = widget.transcript.segments;
+    for (var i = index - 1; i >= 0; i--) {
+      final s = segs[i];
+      if (s.text.isEmpty || s.text.contains('<br')) continue;
+      final name = displaySpeakerName(s.speakerName);
+      if (name.isNotEmpty) return name;
+    }
+    return '';
+  }
+
+  Widget _buildSegmentItem(SegmentData segment, bool isHighlighted, int index,
+      {String previousSpeaker = ''}) {
     // Skip empty segments
     if (segment.text.isEmpty || segment.text.contains('<br')) {
       return const SizedBox.shrink();
     }
 
-    // Check if this is a speaker change
-    final isSpeakerChange = segment.speakerName != null && segment.speakerName!.isNotEmpty;
+    // Speaker chip only when the speaker actually changes.
+    final speaker = displaySpeakerName(segment.speakerName);
+    final isSpeakerChange = speaker.isNotEmpty && speaker != previousSpeaker;
 
     // Check if this is a markup element
     final isSpecialMarkup = segment.markup != null && 
@@ -154,7 +169,7 @@ class _TranscriptViewState extends State<TranscriptView> {
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: Text(
-                      segment.speakerName!.replaceAll('Anonymous-', 'Unknown'),
+                      speaker,
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.bold,

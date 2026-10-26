@@ -46,6 +46,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 import uuid
@@ -305,6 +306,7 @@ class KitLiveAdapter:
         ) as r:
             r.raise_for_status()
             data_lines: list[str] = []
+            event_name = ""
             for raw in r.iter_lines(decode_unicode=True):
                 if raw is None:
                     continue
@@ -313,11 +315,19 @@ class KitLiveAdapter:
                         msg = self._decode("\n".join(data_lines))
                         data_lines = []
                         if msg is not None:
+                            # The SSE event name is how KIT tags a message
+                            # with its language/stream (the archive keeps
+                            # it as the first element of each pair).
+                            if event_name and event_name != "message":
+                                msg.setdefault("_channel", event_name)
                             yield msg
+                    event_name = ""
                     continue
                 if raw.startswith("data:"):
                     data_lines.append(raw[5:].lstrip())
-                elif not raw.startswith((":", "event:", "id:", "retry:")):
+                elif raw.startswith("event:"):
+                    event_name = raw[6:].strip()
+                elif not raw.startswith((":", "id:", "retry:")):
                     # Some mediators emit bare JSON lines, not SSE.
                     msg = self._decode(raw)
                     if msg is not None:
@@ -375,16 +385,174 @@ class KitLiveAdapter:
 # ═════════════════════════════════════════════════════════════════════
 #  In-memory session registry (no persistence, by design)
 # ═════════════════════════════════════════════════════════════════════
+_LANG_FIELDS = (
+    "language", "lang", "tgt_lang", "target_language", "target_lang",
+    "mt_language", "language_code", "target",
+)
+_CODE_RE = re.compile(r"^[a-z]{2,3}(?:[-_][a-z]{2,4})?$", re.I)
+
+
 class _LiveSession:
-    def __init__(self, adapter: KitLiveAdapter, token: str):
+    def __init__(
+        self,
+        adapter: KitLiveAdapter,
+        token: str,
+        input_langs: list[str],
+        mt_langs: list[str],
+        settings: dict,
+    ):
         self.id = uuid.uuid4().hex
         self.adapter = adapter
         self.token = token
+        self.input_langs = [l.lower() for l in input_langs]
+        self.mt_langs = [l.lower() for l in mt_langs]
+        audio = settings.get("audioLanguage") or []
+        self.audio_langs = [
+            str(l).lower() for l in (audio if isinstance(audio, list) else [audio]) if l
+        ]
+        self.settings = settings
         self.samples_sent = 0
         self.last_seen = time.monotonic()
         self.lock = threading.Lock()  # keeps audio chunks in order
         self.closed = False
         self.closed_at = 0.0
+        self.started_at = time.time()
+        # Recording for the full output (Session Output screen).
+        self.recorded: list[dict] = []
+        # Spoken translation (TTS) chunks: lane, start, end, bytes, hint.
+        self.tts_chunks: list[dict] = []
+        self._seen_senders: set[str] = set()
+        fd, self.pcm_path = tempfile.mkstemp(prefix="live_", suffix=".pcm")
+        os.close(fd)
+        self.finalized = False
+        self.final_lock = threading.Lock()
+
+    # ── language of a message ────────────────────────────────────────
+    def lane_for(self, msg: dict) -> Optional[str]:
+        """'asr', a target language code, or 'mt:<sender>' when KIT gives
+        no usable language. None for senders that carry no text."""
+        sender = str(msg.get("sender") or "")
+        lane = self._resolve_lane(sender, msg)
+        if sender and sender not in self._seen_senders:
+            self._seen_senders.add(sender)
+            shape = {
+                k: (f"<str {len(v)} chars>" if isinstance(v, str) and len(v) > 80
+                    else type(v).__name__)
+                for k, v in msg.items()
+            }
+            log.info(
+                "live: %s first message from sender %r: channel=%r lane=%r fields=%s",
+                self.id[:8], sender, msg.get("_channel"), lane, shape,
+            )
+        return lane
+
+    def tts_lane_for(self, msg: dict) -> Optional[str]:
+        """Language of a spoken-translation (TTS) message."""
+        sender = str(msg.get("sender") or "")
+        langs = self.audio_langs or self.mt_langs
+        candidates = [msg.get("_channel")] + [msg.get(k) for k in _LANG_FIELDS]
+        for c in candidates:
+            if isinstance(c, str) and _CODE_RE.match(c.strip()):
+                return c.strip().lower().split("_")[0].split("-")[0]
+        for code in langs:
+            if re.search(rf"[:_\-]{re.escape(code)}(?![a-z])", sender, re.I):
+                return code
+        if len(langs) == 1:
+            return langs[0]
+        return None
+
+    def record_tts(self, msg: dict) -> bool:
+        """Keep the audio of a TTS message. True if audio was found."""
+        lane = self.tts_lane_for(msg)
+        best_key, best = None, None
+        for k, v in msg.items():
+            if not isinstance(v, str) or len(v) < 200 or k.startswith("_"):
+                continue
+            lk = k.lower()
+            if any(t in lk for t in ("b64", "audio", "wav", "pcm", "opus",
+                                     "ogg", "mp3", "speech", "data")):
+                if best is None or len(v) > len(best):
+                    best_key, best = k, v
+        if best is None:
+            return False
+        try:
+            raw = base64.b64decode(best.split(",", 1)[-1], validate=False)
+        except (ValueError, TypeError):
+            return False
+        if not raw:
+            return False
+        rate = None
+        for k in ("sample_rate", "sampleRate", "sr", "rate"):
+            try:
+                rate = int(msg.get(k)) if msg.get(k) else rate
+            except (TypeError, ValueError):
+                pass
+        self.tts_chunks.append(
+            {
+                "lane": lane or str(msg.get("sender") or "tts"),
+                "start": self._rebase(msg.get("start")) if "start" in msg else None,
+                "end": self._rebase(msg.get("end")) if "end" in msg else None,
+                "audio": raw,
+                "key": best_key,
+                "rate": rate,
+            }
+        )
+        return True
+
+    def _resolve_lane(self, sender: str, msg: dict) -> Optional[str]:
+        if not sender or sender.startswith(
+            ("tts", "lip", "textstructurer", "saasr", "summar", "notes")
+        ):
+            return None
+        if sender.startswith("asr"):
+            return "asr"
+        if not sender.startswith("mt"):
+            return None
+
+        candidates = [msg.get("_channel")] + [msg.get(k) for k in _LANG_FIELDS]
+        for c in candidates:
+            if isinstance(c, str) and c.strip():
+                code = c.strip().lower()
+                if code in self.mt_langs or _CODE_RE.match(code):
+                    return code.split("_")[0].split("-")[0]
+        for code in self.mt_langs:
+            if re.search(rf"[:_\-]{re.escape(code)}(?![a-z])", sender, re.I):
+                return code
+        if len(self.mt_langs) == 1:
+            return self.mt_langs[0]
+        return sender  # unknown language: still shown, under its sender
+
+    # ── recording ────────────────────────────────────────────────────
+    def _rebase(self, v):
+        """KIT echoes our unix-time timestamps; store them relative to
+        the session start like archived sessions."""
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return v
+        if f > 1e8 and self.adapter.t0:
+            f -= self.adapter.t0
+        return round(max(0.0, f), 3)
+
+    def record(self, msg: dict, lane: Optional[str]) -> None:
+        if lane is None or msg.get("unstable"):
+            return
+        text = msg.get("seq") or msg.get("text") or msg.get("translation")
+        if not isinstance(text, str) or not text.strip():
+            return
+        m = dict(msg)
+        for k in ("start", "end"):
+            if k in m:
+                m[k] = self._rebase(m[k])
+        m["_lane"] = lane
+        self.recorded.append(m)
+
+    def write_pcm(self, pcm: bytes) -> None:
+        try:
+            with open(self.pcm_path, "ab") as f:
+                f.write(pcm)
+        except OSError as e:
+            log.info("live: could not keep audio for %s: %s", self.id[:8], e)
 
 
 _sessions: dict[str, _LiveSession] = {}
@@ -396,6 +564,49 @@ def _get(live_id: str) -> Optional[_LiveSession]:
         return _sessions.get(live_id)
 
 
+# Set by create_live_blueprint: builds the Session Output files.
+_on_finished: Optional[Callable[[dict], Optional[str]]] = None
+
+
+def _finalize(sess: _LiveSession) -> None:
+    """Hand the recording to the backend once (output files + session)."""
+    with sess.final_lock:
+        if sess.finalized:
+            return
+        sess.finalized = True
+    info = {
+        "session_id": sess.adapter.session_id,
+        "server": sess.adapter.server,
+        "token": sess.token,
+        "name": str(sess.settings.get("name") or ""),
+        "input_languages": sess.input_langs,
+        "output_languages": sess.mt_langs,
+        "settings": sess.settings,
+        "started_at": sess.started_at,
+        "duration_s": sess.samples_sent / SAMPLE_RATE,
+        "messages": sess.recorded,
+        "tts_chunks": sess.tts_chunks,
+        "audio_languages": sess.audio_langs,
+        "pcm_path": sess.pcm_path,
+        "sample_rate": SAMPLE_RATE,
+    }
+    try:
+        if _on_finished and sess.adapter.session_id:
+            _on_finished(info)
+            log.info(
+                "live: %s output built (%d messages)",
+                sess.id[:8], len(sess.recorded),
+            )
+    except Exception as e:  # never break the relay over the output step
+        log.warning("live: building output for %s failed: %s", sess.id[:8], e)
+    finally:
+        # The callback copies/converts the audio; the temp file goes.
+        try:
+            os.remove(sess.pcm_path)
+        except OSError:
+            pass
+
+
 def _close(sess: _LiveSession) -> None:
     with _registry_lock:
         _sessions.pop(sess.id, None)
@@ -403,8 +614,12 @@ def _close(sess: _LiveSession) -> None:
         sess.closed = True
         sess.closed_at = time.monotonic()
         sess.adapter.end()
-        # Hard stop for the event stream if KIT never ends it.
-        threading.Timer(END_GRACE_S, sess.adapter.close).start()
+        # Hard stop for the event stream if KIT never ends it, and make
+        # sure the output gets built even if no browser is listening.
+        def _hard_stop():
+            sess.adapter.close()
+            _finalize(sess)
+        threading.Timer(END_GRACE_S + 2, _hard_stop).start()
         log.info(
             "live: closed %s after %.1f s of audio",
             sess.id[:8],
@@ -513,6 +728,7 @@ def _summary(rec: dict) -> dict:
         "lanes": [l.get("key") for l in lanes],
         "word_count": len(text.split()),
         "preview": text[:PREVIEW_CHARS],
+        "output_session_id": rec.get("output_session_id") or "",
     }
 
 
@@ -537,6 +753,7 @@ def _clean_lanes(raw) -> list[dict]:
 def create_live_blueprint(
     resolve_server: Callable[[Optional[str]], str],
     storage_dir: str,
+    on_finished: Optional[Callable[[dict], Optional[str]]] = None,
 ) -> Blueprint:
     """Build the blueprint.
 
@@ -545,6 +762,8 @@ def create_live_blueprint(
     `storage_dir` is where finished sessions are saved (created on demand;
     put it on a persistent volume).
     """
+    global _on_finished
+    _on_finished = on_finished
     bp = Blueprint("live_relay", __name__, url_prefix="/api/live")
     store = _SavedStore(storage_dir)
 
@@ -602,6 +821,10 @@ def create_live_blueprint(
             "output_languages": str_list(body.get("output_languages")),
             "settings": settings if isinstance(settings, dict) else {},
             "lanes": lanes,
+            # KIT session id under which Session Output has the files.
+            "output_session_id": re.sub(
+                r"[^0-9A-Za-z_\-]", "", str(body.get("output_session_id") or "")
+            )[:200],
         }
         try:
             store.save(email, record)
@@ -753,7 +976,7 @@ def create_live_blueprint(
             log.warning("live: start failed: %s", e)
             return jsonify({"error": str(e)}), 502
 
-        sess = _LiveSession(adapter, token)
+        sess = _LiveSession(adapter, token, language, mt, payload)
         with _registry_lock:
             _sessions[sess.id] = sess
         log.info(
@@ -763,7 +986,17 @@ def create_live_blueprint(
             ",".join(language),
             ",".join(mt) or "-",
         )
-        return jsonify({"live_id": sess.id, "sample_rate": SAMPLE_RATE}), 200
+        return (
+            jsonify(
+                {
+                    "live_id": sess.id,
+                    "sample_rate": SAMPLE_RATE,
+                    # Id the finished session gets in Session Output.
+                    "session_id": adapter.session_id,
+                }
+            ),
+            200,
+        )
 
     @bp.route("/<live_id>/audio", methods=["POST"])
     def live_audio(live_id):
@@ -792,6 +1025,7 @@ def create_live_blueprint(
                 return jsonify({"error": "Forwarding audio to KIT failed"}), 502
             sess.samples_sent += n
             sess.last_seen = time.monotonic()
+            sess.write_pcm(pcm)
         return ("", 204)
 
     @bp.route("/<live_id>/events", methods=["GET"])
@@ -806,6 +1040,15 @@ def create_live_blueprint(
             yield "retry: 3000\n\n"
             try:
                 for msg in sess.adapter.iter_events():
+                    lane = sess.lane_for(msg)
+                    if str(msg.get("sender") or "").startswith("tts"):
+                        # Spoken translation: keep the audio for the WAVs;
+                        # the browser doesn't need the (large) payload.
+                        sess.record_tts(msg)
+                        continue
+                    if lane is not None:
+                        msg["_lane"] = lane
+                    sess.record(msg, lane)
                     yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
                     if (
                         sess.closed
@@ -813,11 +1056,15 @@ def create_live_blueprint(
                     ):
                         break
             except GeneratorExit:  # browser went away
+                if sess.closed:
+                    _finalize(sess)
                 raise
             except Exception as e:
                 if not sess.closed:  # errors after stop are expected
                     log.info("live: event stream %s ended: %s", live_id[:8], e)
                     yield f"event: relay-error\ndata: {json.dumps(str(e))}\n\n"
+            if sess.closed:
+                _finalize(sess)  # before `end`, so Session Output is ready
             yield "event: end\ndata: {}\n\n"
 
         return Response(

@@ -9,17 +9,16 @@
 // Lists the user's finished live sessions saved on the backend
 // (/api/live/saved), newest first.
 
-import 'dart:js_interop';
-
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/models/language_config.dart';
 import 'package:asr_live_translator/screens/live_asr_screen.dart';
 import 'package:asr_live_translator/screens/live_session_view_screen.dart';
-import 'package:asr_live_translator/services/internal_auth_service.dart';
+import 'package:asr_live_translator/screens/session_output_screen.dart';
 import 'package:asr_live_translator/services/live_sessions_api.dart';
 import 'package:asr_live_translator/services/server_config_service.dart';
+import 'package:asr_live_translator/services/ui_mode.dart';
 import 'package:flutter/material.dart';
-import 'package:web/web.dart' as web;
+import 'package:asr_live_translator/widgets/server_connection_panel.dart';
 
 class LiveSessionsScreen extends StatefulWidget {
   const LiveSessionsScreen({super.key});
@@ -28,7 +27,8 @@ class LiveSessionsScreen extends StatefulWidget {
   State<LiveSessionsScreen> createState() => _LiveSessionsScreenState();
 }
 
-class _LiveSessionsScreenState extends State<LiveSessionsScreen> {
+class _LiveSessionsScreenState extends State<LiveSessionsScreen>
+    with UiModeListener<LiveSessionsScreen> {
   bool _isNarrow(BuildContext c) => MediaQuery.sizeOf(c).width < 600;
   double _pad(BuildContext c) => _isNarrow(c) ? 12 : 24;
 
@@ -36,13 +36,22 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen> {
   bool _loading = true;
   String? _error;
   bool _needsConnect = false;
-  bool _connecting = false;
   String _search = '';
 
   @override
   void initState() {
     super.initState();
+    // Sessions belong to the login: reload when it or the server changes.
+    ServerConnection.tokenChanged.addListener(_load);
+    ServerConnection.serverChanged.addListener(_load);
     _init();
+  }
+
+  @override
+  void dispose() {
+    ServerConnection.tokenChanged.removeListener(_load);
+    ServerConnection.serverChanged.removeListener(_load);
+    super.dispose();
   }
 
   Future<void> _init() async {
@@ -94,6 +103,21 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen> {
   }
 
   Future<void> _open(LiveSessionSummary s) async {
+    // Sessions recorded with the current relay have full output files:
+    // open them in the same Session Output screen as uploaded videos.
+    if (s.outputSessionId.isNotEmpty) {
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => SessionOutputScreen(
+            sessionId: s.outputSessionId,
+            sessionUrl: '',
+          ),
+        ),
+      );
+      return;
+    }
+    // Older live sessions only have the saved text.
     final deleted = await Navigator.push<bool>(
       context,
       MaterialPageRoute(builder: (_) => LiveSessionViewScreen(sessionId: s.id)),
@@ -137,33 +161,6 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen> {
     }
   }
 
-  // ─── connection (only shown when the token is missing) ───────────
-  Future<void> _connect() async {
-    setState(() => _connecting = true);
-    try {
-      await InternalAuthService.loginWithOAuth();
-    } catch (_) {}
-    if (mounted) setState(() => _connecting = false);
-    await _load();
-  }
-
-  Future<void> _pasteToken() async {
-    try {
-      final raw =
-          (await web.window.navigator.clipboard.readText().toDart).toDart;
-      final m = RegExp(r"([^\s'<>|]+\|\d{10}\|[^\s'<>]+)").firstMatch(raw);
-      final token = (m?.group(1) ?? raw).trim();
-      if (token.isEmpty) throw 'Clipboard is empty';
-      await InternalAuthService.setManualToken(token);
-      await _load();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not paste token: $e')),
-      );
-    }
-  }
-
   // ═══════════════════════════════════════════════════════════════════
   //  UI
   // ═══════════════════════════════════════════════════════════════════
@@ -185,6 +182,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen> {
         backgroundColor: Colors.blue.shade700,
         foregroundColor: Colors.white,
         actions: [
+          const UiModeToggle(),
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: 'Refresh',
@@ -197,6 +195,11 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen> {
         child: CustomScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
+            // ─── Server + connection (top of every page) ───
+            SliverPadding(
+              padding: EdgeInsets.fromLTRB(pad, pad, pad, 0),
+              sliver: const SliverToBoxAdapter(child: ServerConnectionPanel()),
+            ),
             SliverPadding(
               padding: EdgeInsets.fromLTRB(pad, pad, pad, 8),
               sliver: SliverToBoxAdapter(child: _buildHeader(context)),
@@ -284,8 +287,8 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen> {
       _loading || _needsConnect
           ? ''
           : '${_sessions.length} finished session'
-              '${_sessions.length == 1 ? '' : 's'} · '
-              '${labelForServer(internalServerUrl)}',
+              '${_sessions.length == 1 ? '' : 's'}'
+              '${UiMode.isExpert ? ' · ${labelForServer(internalServerUrl)}' : ''}',
       style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
     );
 
@@ -358,7 +361,8 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen> {
                       children: [
                         _meta(Icons.event, formatDateTime(s.createdAt)),
                         _meta(Icons.timer_outlined, formatDuration(s.duration)),
-                        _meta(Icons.notes, '${s.wordCount} words'),
+                        if (UiMode.isExpert)
+                          _meta(Icons.notes, '${s.wordCount} words'),
                         _meta(
                           Icons.translate,
                           outs.isEmpty ? langs : '$langs → $outs',
@@ -407,37 +411,9 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen> {
     return _buildMessage(
       icon: Icons.link_off,
       title: 'Not connected',
-      text: 'Connect to ${labelForServer(internalServerUrl)} to see your '
-          'live sessions and start new ones.',
-      action: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        alignment: WrapAlignment.center,
-        children: [
-          FilledButton.icon(
-            onPressed: _connecting ? null : _connect,
-            icon: _connecting
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.login, size: 18),
-            label: const Text('Connect'),
-          ),
-          OutlinedButton.icon(
-            onPressed: () => web.window
-                .open('$internalServerUrl/gettoken', 'gettoken_tab'),
-            icon: const Icon(Icons.open_in_new, size: 18),
-            label: const Text('Get Token'),
-          ),
-          OutlinedButton.icon(
-            onPressed: _pasteToken,
-            icon: const Icon(Icons.content_paste, size: 18),
-            label: const Text('Paste Token'),
-          ),
-        ],
-      ),
+      text: 'Connect to ${labelForServer(internalServerUrl)} with the panel '
+          'above (Connect or Manual Token) to see your live sessions and '
+          'start new ones.',
     );
   }
 

@@ -7,6 +7,8 @@ import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:asr_live_translator/screens/session_detail_screen.dart';
 import 'package:asr_live_translator/screens/live_sessions_screen.dart';
+import 'package:asr_live_translator/services/ui_mode.dart';
+import 'package:asr_live_translator/widgets/server_connection_panel.dart';
 import 'package:asr_live_translator/theme/responsive.dart';
 import 'package:asr_live_translator/widgets/job_progress_panel.dart';
 import 'package:flutter/foundation.dart';
@@ -136,7 +138,8 @@ class WorkingScreen extends StatefulWidget {
   State<WorkingScreen> createState() => _WorkingScreenState();
 }
 
-class _WorkingScreenState extends State<WorkingScreen> {
+class _WorkingScreenState extends State<WorkingScreen>
+    with UiModeListener<WorkingScreen> {
   List<VideoProject> _projects = [];
   bool _isLoading = true;
   String _searchQuery = '';
@@ -1309,6 +1312,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
           ],
         ),
         actions: [
+          const UiModeToggle(),
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _fetchProjects,
@@ -1321,15 +1325,27 @@ class _WorkingScreenState extends State<WorkingScreen> {
           ),
         ],
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : CustomScrollView(
-              // Header, storage bar and grid all live in one scroll
-              // view. On a tall window everything fits and no
-              // scrollbar appears; on a short window the header and
-              // storage bar scroll off the top instead of squeezing
-              // the grid into a negative height.
+      body: CustomScrollView(
+              // Connection panel, header, storage bar and grid all live
+              // in one scroll view. On a tall window everything fits and
+              // no scrollbar appears; on a short window the top parts
+              // scroll off instead of squeezing the grid into a negative
+              // height.
               slivers: [
+                // ─── Server + connection (top of every page) ──────
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(
+                        r.spaceL, r.spaceL, r.spaceL, 0),
+                    child: const ServerConnectionPanel(),
+                  ),
+                ),
+                if (_isLoading)
+                  const SliverFillRemaining(
+                    hasScrollBody: false,
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                else ...[
                 // ─── Header: search / sort / upload ───────────────
                 SliverToBoxAdapter(
                   child: Padding(
@@ -1338,7 +1354,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
                   ),
                 ),
 
-                // ─── Storage bar ──────────────────────────────────
+                // ─── Storage bar (Expert only) ────────────────────
+                if (UiMode.isExpert)
                 SliverToBoxAdapter(
                   child: Padding(
                     padding: EdgeInsets.symmetric(horizontal: r.spaceL),
@@ -1395,6 +1412,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
                   ),
                   sliver: _buildGridSliver(),
                 ),
+                ],
               ],
             ),
     );
@@ -1456,11 +1474,12 @@ class _WorkingScreenState extends State<WorkingScreen> {
           onPressed: _showYouTubeImportDialog,
           child: const Text('From YouTube URL'),
         ),
-        MenuItemButton(
-          leadingIcon: const Icon(Icons.text_snippet),
-          onPressed: _importVideosFromText,
-          child: const Text('From text links'),
-        ),
+        if (UiMode.isExpert)
+          MenuItemButton(
+            leadingIcon: const Icon(Icons.text_snippet),
+            onPressed: _importVideosFromText,
+            child: const Text('From text links'),
+          ),
       ],
       builder: (context, controller, _) => ElevatedButton.icon(
         onPressed: () =>
@@ -1508,7 +1527,10 @@ class _WorkingScreenState extends State<WorkingScreen> {
           SizedBox(height: r.spaceS),
           Row(
             children: [
-              Expanded(child: sortDropdown),
+              if (UiMode.isExpert)
+                Expanded(child: sortDropdown)
+              else
+                const Spacer(),
               SizedBox(width: r.spaceS),
               actionButtons,
             ],
@@ -1522,8 +1544,10 @@ class _WorkingScreenState extends State<WorkingScreen> {
       children: [
         Expanded(child: searchField),
         SizedBox(width: r.spaceS),
-        sortDropdown,
-        SizedBox(width: r.spaceS),
+        if (UiMode.isExpert) ...[
+          sortDropdown,
+          SizedBox(width: r.spaceS),
+        ],
         actionButtons,
       ],
     );
@@ -1763,6 +1787,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
+                    if (UiMode.isExpert) ...[
                     Text(
                       project.fileName,
                       style: TextStyle(
@@ -1816,10 +1841,12 @@ class _WorkingScreenState extends State<WorkingScreen> {
                         ),
                       ),
                     ),
+                    ],
 
                     SizedBox(height: r.spaceXS / 2),
 
                     // ── Meta row: duration • segs • codec • date ──
+                    // (segments + codec only in Expert mode)
                     Row(
                       children: [
                         Text(
@@ -1829,6 +1856,7 @@ class _WorkingScreenState extends State<WorkingScreen> {
                             color: Colors.grey[500],
                           ),
                         ),
+                        if (UiMode.isExpert) ...[
                         SizedBox(width: r.spaceXS),
                         Text(
                           '• ${project.segmentCount} segs',
@@ -1837,7 +1865,8 @@ class _WorkingScreenState extends State<WorkingScreen> {
                             color: Colors.grey[500],
                           ),
                         ),
-                        if (project.codec.isNotEmpty) ...[
+                        ],
+                        if (UiMode.isExpert && project.codec.isNotEmpty) ...[
                           SizedBox(width: r.spaceXS),
                           // Flexible so the chip can shrink (and the
                           // inner Text ellipsize) instead of forcing

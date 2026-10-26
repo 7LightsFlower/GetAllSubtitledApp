@@ -47,6 +47,7 @@ class LiveSessionSummary {
     required this.outputLanguages,
     required this.wordCount,
     required this.preview,
+    this.outputSessionId = '',
   });
 
   final String id;
@@ -58,6 +59,10 @@ class LiveSessionSummary {
   final List<String> outputLanguages;
   final int wordCount;
   final String preview;
+
+  /// Session id under which Session Output has this session's files
+  /// (transcripts, VTTs, audio). Empty for sessions saved before that.
+  final String outputSessionId;
 
   factory LiveSessionSummary.fromJson(Map<String, dynamic> j) =>
       LiveSessionSummary(
@@ -71,6 +76,7 @@ class LiveSessionSummary {
         outputLanguages: _strings(j['output_languages']),
         wordCount: (j['word_count'] as num?)?.toInt() ?? 0,
         preview: j['preview']?.toString() ?? '',
+        outputSessionId: j['output_session_id']?.toString() ?? '',
       );
 }
 
@@ -166,6 +172,7 @@ class LiveSessionsApi {
     required List<String> outputLanguages,
     required Map<String, dynamic> settings,
     required List<SavedLane> lanes,
+    String? outputSessionId,
   }) async {
     final r = await http.post(
       Uri.parse(_base),
@@ -180,6 +187,7 @@ class LiveSessionsApi {
         'output_languages': outputLanguages,
         'settings': settings,
         'lanes': lanes.map((l) => l.toJson()).toList(),
+        if (outputSessionId != null) 'output_session_id': outputSessionId,
       }),
     );
     _check(r);

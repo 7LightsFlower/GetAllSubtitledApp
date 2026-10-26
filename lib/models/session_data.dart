@@ -189,3 +189,18 @@ class SessionFile {
   @override
   int get hashCode => Object.hash(name, size, url, modified);
 }
+
+
+/// Human-readable speaker name from KIT's diarization id.
+///
+/// KIT sends speakers as `<session id>:asr:speakerdiarization:<name>`;
+/// only the part after the last ':' is the name. "Anonymous-3" style
+/// labels become "Unknown 3". Returns '' for empty input.
+String displaySpeakerName(String? raw) {
+  if (raw == null) return '';
+  var name = raw.replaceAll(RegExp(r'<[^>]+>'), '').trim();
+  final colon = name.lastIndexOf(':');
+  if (colon >= 0) name = name.substring(colon + 1).trim();
+  name = name.replaceFirst(RegExp(r'^Anonymous-?\s*'), 'Unknown ').trim();
+  return name;
+}

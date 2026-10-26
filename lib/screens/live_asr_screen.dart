@@ -32,8 +32,11 @@ import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/models/language_config.dart';
 import 'package:asr_live_translator/services/browser_microphone.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
+import 'package:asr_live_translator/screens/session_output_screen.dart';
 import 'package:asr_live_translator/services/live_sessions_api.dart';
 import 'package:asr_live_translator/services/server_config_service.dart';
+import 'package:asr_live_translator/services/ui_mode.dart';
+import 'package:asr_live_translator/widgets/server_connection_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -64,7 +67,8 @@ class LiveAsrScreen extends StatefulWidget {
   State<LiveAsrScreen> createState() => _LiveAsrScreenState();
 }
 
-class _LiveAsrScreenState extends State<LiveAsrScreen> {
+class _LiveAsrScreenState extends State<LiveAsrScreen>
+    with UiModeListener<LiveAsrScreen> {
   // ─────────────────────────────────────────────────────────────────
   //  RESPONSIVE HELPERS (same breakpoints as session_detail_screen)
   // ─────────────────────────────────────────────────────────────────
@@ -76,25 +80,8 @@ class _LiveAsrScreenState extends State<LiveAsrScreen> {
       _isNarrow(c) ? 12 : (_isWide(c) ? 24 : 16);
   double _bodySize(BuildContext c) => _isNarrow(c) ? 13 : 14;
 
-  // ─── Connection state ─────────────────────────────────────────────
+  // ─── Connection (UI lives in ServerConnectionPanel) ─────────────
   bool _isConnected = false;
-  bool _isConnecting = false;
-  bool _showTokenInput = false;
-  bool _showBookmarklet = false;
-  final TextEditingController _tokenController = TextEditingController();
-  String _tokenStatus = '';
-
-  // Bookmarklet: one click on the /gettoken page copies the token.
-  static const String _bookmarkletJs =
-      "javascript:(function(){"
-      "const pre=document.querySelector('pre');"
-      "if(!pre){alert('Not on the /gettoken page');return;}"
-      "const t=pre.textContent.trim();"
-      "navigator.clipboard.writeText(t).then("
-      "()=>alert('Token copied — go back to the app and click \"Paste Token\"'),"
-      "()=>prompt('Copy manually:',t)"
-      ");"
-      "})();";
 
   // ─── Session settings (same fields as the offline Job Settings) ───
   // In memory only — nothing here is persisted.
@@ -179,6 +166,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen> {
   _SaveStatus _saveStatus = _SaveStatus.none;
   String? _saveError;
   String? _savedId; // = live_id, so a retry overwrites instead of duplicating
+  String? _outputSessionId; // KIT session id → Session Output files
   DateTime? _startedAt;
 
   double _level = 0;
@@ -207,6 +195,8 @@ class _LiveAsrScreenState extends State<LiveAsrScreen> {
     final now = DateTime.now();
     _date = '${now.year}-${_two(now.month)}-${_two(now.day)}';
     _sessionNameController = TextEditingController(text: _defaultSessionName());
+    ServerConnection.tokenChanged.addListener(_checkConnection);
+    ServerConnection.serverChanged.addListener(_checkConnection);
     _init();
   }
 
@@ -234,12 +224,13 @@ class _LiveAsrScreenState extends State<LiveAsrScreen> {
 
   @override
   void dispose() {
+    ServerConnection.tokenChanged.removeListener(_checkConnection);
+    ServerConnection.serverChanged.removeListener(_checkConnection);
     // Leaving the screen ends the session. Nothing is kept.
     _teardown(notifyServer: true);
     for (final l in _lanes.values) {
       l.scroll.dispose();
     }
-    _tokenController.dispose();
     _sessionNameController.dispose();
     _topicNameController.dispose();
     _speakerNameController.dispose();
@@ -256,175 +247,12 @@ class _LiveAsrScreenState extends State<LiveAsrScreen> {
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  //  SERVER + CONNECTION (same behaviour as session_detail_screen)
+  //  CONNECTION — the controls are in ServerConnectionPanel; this screen
+  //  only needs to know whether a token exists (enables the mic button).
   // ═══════════════════════════════════════════════════════════════════
   Future<void> _checkConnection() async {
-    final token = await InternalAuthService.getToken();
-    if (mounted) {
-      setState(() => _isConnected = token != null && token.isNotEmpty);
-    }
-  }
-
-  Future<void> _changeServer(String url) async {
-    if (url == internalServerUrl || _isActive) return;
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Switch internal server?'),
-        content: Text(
-          'Switch to:\n$url\n\n'
-          'Tokens you created on the previous server may no longer work. '
-          'You will likely need to reconnect and paste a new token.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Switch'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-
-    await ServerConfigService.setServer(url);
-    await ServerConfigService.load();
-    if (!mounted) return;
-
-    // Tokens are per-server; drop the old one.
-    await InternalAuthService.clearManualToken();
-    setState(() {
-      _isConnected = false;
-      _tokenStatus = '🔀 Switched to: $url — paste a token for this host';
-    });
-    await _checkConnection();
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Server switched to $url')),
-      );
-    }
-  }
-
-  Future<void> _connectToInternal() async {
-    if (_isConnecting) return;
-    setState(() => _isConnecting = true);
-    try {
-      final success = await InternalAuthService.loginWithOAuth();
-      await _checkConnection();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(success
-              ? '✅ Connected to internal server!'
-              : '❌ Connection failed. Please try again.'),
-          backgroundColor: success ? null : Colors.red,
-        ),
-      );
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isConnecting = false);
-    }
-  }
-
-  Future<void> _setManualToken() async {
-    final raw = _tokenController.text;
-    final token = _extractToken(raw) ?? raw.trim();
-    if (token.isEmpty) {
-      setState(() => _tokenStatus = '⚠️ Please enter a token');
-      return;
-    }
-    try {
-      await InternalAuthService.setManualToken(token);
-      if (!mounted) return;
-      setState(() {
-        _isConnected = true;
-        _tokenStatus = '✅ Token set successfully!';
-        _showTokenInput = false;
-        _tokenController.clear();
-      });
-    } catch (e) {
-      if (mounted) setState(() => _tokenStatus = '❌ Error: $e');
-    }
-  }
-
-  Future<void> _clearManualToken() async {
-    try {
-      await InternalAuthService.clearManualToken();
-      if (!mounted) return;
-      setState(() {
-        _isConnected = false;
-        _tokenStatus = 'Token cleared';
-        _tokenController.clear();
-        _showTokenInput = false;
-      });
-      await _checkConnection();
-    } catch (e) {
-      if (mounted) setState(() => _tokenStatus = '❌ Error: $e');
-    }
-  }
-
-  void _openTokenPage() {
-    web.window.open('$internalServerUrl/gettoken', 'gettoken_tab');
-    setState(() => _tokenStatus =
-        '📋 Copy the token from the new tab, then click "Paste Token"');
-  }
-
-  Future<void> _pasteFromClipboard() async {
-    try {
-      final text =
-          (await web.window.navigator.clipboard.readText().toDart).toDart;
-      if (text.isEmpty) {
-        setState(() => _tokenStatus = '⚠️ Clipboard is empty');
-        return;
-      }
-      final token = _extractToken(text);
-      if (token == null || token.isEmpty) {
-        setState(() => _tokenStatus = '⚠️ No token found in clipboard');
-        return;
-      }
-      _tokenController.text = token;
-      setState(() => _tokenStatus = '✅ Token extracted — saving...');
-      await _setManualToken();
-    } catch (e) {
-      if (mounted) {
-        setState(() => _tokenStatus = '⚠️ Clipboard read failed: $e');
-      }
-    }
-  }
-
-  void _copyBookmarklet() {
-    Clipboard.setData(const ClipboardData(text: _bookmarkletJs));
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text(
-          'Bookmarklet copied. Create a new bookmark and paste this as its URL.',
-        ),
-      ),
-    );
-  }
-
-  String? _extractToken(String raw) {
-    if (raw.trim().isEmpty) return null;
-    final pre = RegExp(r'<pre>\s*([^<]+?)\s*</pre>', multiLine: true)
-        .firstMatch(raw);
-    if (pre != null) {
-      final t = pre.group(1)?.trim();
-      if (t != null && t.isNotEmpty) return t;
-    }
-    final cookie = RegExp(r"([^\s'<>|]+\|\d{10}\|[^\s'<>]+)").firstMatch(raw);
-    if (cookie != null) return cookie.group(1)?.trim();
-    final trimmed = raw.trim();
-    return trimmed.isNotEmpty ? trimmed : null;
+    final connected = await ServerConnection.isConnected();
+    if (mounted) setState(() => _isConnected = connected);
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -520,6 +348,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen> {
       }
       _liveId = body!['live_id'] as String;
       _savedId = _liveId;
+      _outputSessionId = body['session_id']?.toString();
       _startedAt = DateTime.now();
       _saveStatus = _SaveStatus.none;
       _saveError = null;
@@ -627,6 +456,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen> {
         outputLanguages: List.of(_outputLanguages),
         settings: _settingsPayload(),
         lanes: lanes,
+        outputSessionId: _outputSessionId,
       );
       if (mounted) setState(() => _saveStatus = _SaveStatus.saved);
     } catch (e) {
@@ -694,6 +524,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen> {
       _saveStatus = _SaveStatus.none;
       _saveError = null;
       _savedId = null;
+      _outputSessionId = null;
       _startedAt = null;
       _sessionNameController.text = _defaultSessionName();
     });
@@ -782,9 +613,16 @@ class _LiveAsrScreenState extends State<LiveAsrScreen> {
         .trim();
     if (sender.isEmpty || text.isEmpty) return;
 
-    final laneKey = _laneKeyForSender(sender, msg);
-    final lane = laneKey == null ? null : _lanes[laneKey];
-    if (lane == null) return;
+    // The relay resolves the language (SSE event name, language field,
+    // sender) and sends it as `_lane`; older relays don't, so fall back.
+    final relayLane = msg['_lane']?.toString();
+    final laneKey = (relayLane != null && relayLane.isNotEmpty)
+        ? relayLane.toLowerCase()
+        : _laneKeyForSender(sender, msg);
+    if (laneKey == null) return;
+    // Every translation gets a panel, even one that was not pre-selected
+    // or whose language KIT does not name.
+    final lane = _lanes.putIfAbsent(laneKey, () => _Lane(laneKey, _laneTitle(laneKey)));
 
     final unstable = msg['unstable'] == true;
     setState(() {
@@ -796,6 +634,28 @@ class _LiveAsrScreenState extends State<LiveAsrScreen> {
       }
     });
     _scrollToEnd(lane);
+  }
+
+  String _laneTitle(String key) {
+    if (key == 'asr') {
+      return 'Original · '
+          '${_inputLanguages.map(LanguageConfig.getDisplayName).join(', ')}';
+    }
+    if (RegExp(r'^[a-z]{2,3}$').hasMatch(key)) {
+      return LanguageConfig.getDisplayName(key);
+    }
+    return 'Translation ($key)';
+  }
+
+  void _openFullOutput() {
+    final id = _outputSessionId;
+    if (id == null || id.isEmpty) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => SessionOutputScreen(sessionId: id, sessionUrl: ''),
+      ),
+    );
   }
 
   /// Maps a KIT sender ("asr:…", "mt:…_de", …) to one of our panels.
@@ -946,6 +806,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen> {
           title: const Text('Live Session'),
           backgroundColor: Colors.blue.shade700,
           foregroundColor: Colors.white,
+          actions: const [UiModeToggle()],
         ),
         body: Form(
           key: _formKey,
@@ -959,29 +820,16 @@ class _LiveAsrScreenState extends State<LiveAsrScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // ─── 1. Microphone ───
+                // ─── 1. Server + connection (top of every page) ───
+                ServerConnectionPanel(enabled: !_isActive),
+                SizedBox(height: gap),
+
+                // ─── 2. Microphone ───
                 _buildControlBar(context),
                 if (_error != null) ...[
                   const SizedBox(height: 8),
                   _buildErrorBanner(),
                 ],
-                SizedBox(height: gap),
-
-                // ─── 2. Server + connection ───
-                AbsorbPointer(
-                  absorbing: _isActive,
-                  child: Opacity(
-                    opacity: _isActive ? 0.5 : 1,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        _buildServerPicker(),
-                        SizedBox(height: gap),
-                        _buildConnectionSection(),
-                      ],
-                    ),
-                  ),
-                ),
                 SizedBox(height: gap),
 
                 // ─── 3. Settings ───
@@ -1013,7 +861,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen> {
       case _LiveState.idle:
         status = _isConnected
             ? 'Press the microphone to start'
-            : 'Connect to the server below to start';
+            : 'Connect to the server above to start';
       case _LiveState.starting:
         status = 'Starting…';
       case _LiveState.recording:
@@ -1134,6 +982,16 @@ class _LiveAsrScreenState extends State<LiveAsrScreen> {
                 ),
               ),
             ],
+            if (_state == _LiveState.finished &&
+                _saveStatus == _SaveStatus.saved &&
+                (_outputSessionId ?? '').isNotEmpty) ...[
+              const SizedBox(width: 12),
+              FilledButton.icon(
+                onPressed: _openFullOutput,
+                icon: const Icon(Icons.subtitles, size: 18),
+                label: Text(_isNarrow(c) ? 'Output' : 'Open output'),
+              ),
+            ],
             if (_state == _LiveState.finished) ...[
               const SizedBox(width: 12),
               OutlinedButton.icon(
@@ -1164,549 +1022,6 @@ class _LiveAsrScreenState extends State<LiveAsrScreen> {
     );
   }
 
-  // ─── 2a. Server picker (same as session_detail_screen) ──────────
-  Widget _buildServerPicker() {
-    final currentLabel = labelForServer(internalServerUrl);
-    final allServers = ServerConfigService.allServers;
-    final customSet = ServerConfigService.customServers.toSet();
-
-    return Card(
-      elevation: 1,
-      margin: EdgeInsets.zero,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        child: Row(
-          children: [
-            const Icon(Icons.dns_outlined, size: 20, color: Colors.blueGrey),
-            const SizedBox(width: 10),
-            Text(
-              'Internal server',
-              style: TextStyle(
-                fontWeight: FontWeight.w600,
-                fontSize: _isNarrow(context) ? 12 : 14,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    currentLabel,
-                    style: TextStyle(fontSize: _isNarrow(context) ? 12 : 13),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  Text(
-                    internalServerUrl,
-                    style: TextStyle(
-                      fontSize: _isNarrow(context) ? 9 : 10,
-                      color: Colors.grey[600],
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ),
-            ),
-            IconButton(
-              tooltip: 'Add custom server',
-              icon: const Icon(Icons.add_circle_outline, size: 20),
-              onPressed: _showAddServerDialog,
-            ),
-            PopupMenuButton<String>(
-              tooltip: 'Switch server',
-              icon: const Icon(Icons.swap_horiz, size: 20),
-              onSelected: (value) async {
-                if (value == '__add__') {
-                  await _showAddServerDialog();
-                } else {
-                  await _changeServer(value);
-                }
-              },
-              itemBuilder: (context) {
-                final items = <PopupMenuEntry<String>>[];
-                for (final url in allServers) {
-                  final isSelected = url == internalServerUrl;
-                  final isCustom = customSet.contains(url);
-                  items.add(
-                    PopupMenuItem<String>(
-                      value: url,
-                      child: Row(
-                        children: [
-                          Icon(
-                            isSelected
-                                ? Icons.radio_button_checked
-                                : Icons.radio_button_unchecked,
-                            size: 18,
-                            color: isSelected ? Colors.blue : Colors.grey,
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Row(
-                                  children: [
-                                    Flexible(
-                                      child: Text(
-                                        labelForServer(url),
-                                        style: TextStyle(
-                                          fontWeight: isSelected
-                                              ? FontWeight.bold
-                                              : FontWeight.normal,
-                                        ),
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                    ),
-                                    if (isCustom) ...[
-                                      const SizedBox(width: 6),
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 6, vertical: 1),
-                                        decoration: BoxDecoration(
-                                          color: Colors.teal.shade50,
-                                          borderRadius:
-                                              BorderRadius.circular(8),
-                                          border: Border.all(
-                                              color: Colors.teal.shade200),
-                                        ),
-                                        child: Text(
-                                          'custom',
-                                          style: TextStyle(
-                                            fontSize: 9,
-                                            color: Colors.teal.shade800,
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                  ],
-                                ),
-                                Text(
-                                  url,
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    color: Colors.grey[600],
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ],
-                            ),
-                          ),
-                          if (isCustom)
-                            IconButton(
-                              tooltip: 'Remove',
-                              icon: const Icon(Icons.close, size: 16),
-                              onPressed: () async {
-                                await ServerConfigService.removeCustomServer(
-                                    url);
-                                if (!mounted) return;
-                                setState(() {});
-                              },
-                            ),
-                        ],
-                      ),
-                    ),
-                  );
-                }
-                items.add(const PopupMenuDivider());
-                items.add(
-                  const PopupMenuItem<String>(
-                    value: '__add__',
-                    child: Row(
-                      children: [
-                        Icon(Icons.add, size: 18, color: Colors.blue),
-                        SizedBox(width: 8),
-                        Text('Add server…',
-                            style: TextStyle(color: Colors.blue)),
-                      ],
-                    ),
-                  ),
-                );
-                return items;
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _showAddServerDialog() async {
-    final controller = TextEditingController(text: 'https://lt2srv-');
-    final formKey = GlobalKey<FormState>();
-
-    final result = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Row(
-          children: [
-            Icon(Icons.dns_outlined, color: Colors.blueGrey),
-            SizedBox(width: 8),
-            Text('Add internal server'),
-          ],
-        ),
-        content: SizedBox(
-          width: 420,
-          child: Form(
-            key: formKey,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Enter the base URL of an LT2SRV host. The same '
-                  'pattern the backend accepts is enforced here.',
-                  style: TextStyle(fontSize: 12, color: Colors.black54),
-                ),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: controller,
-                  autofocus: true,
-                  keyboardType: TextInputType.url,
-                  decoration: const InputDecoration(
-                    labelText: 'Server URL',
-                    hintText: 'https://lt2srv-alice.isl.iar.kit.edu',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.link),
-                  ),
-                  validator: (value) {
-                    final raw = (value ?? '').trim();
-                    if (raw.isEmpty) return 'Enter a URL';
-                    if (!raw.startsWith('https://')) {
-                      return 'Must start with https://';
-                    }
-                    if (!isAllowedInternalServer(raw)) {
-                      return 'Not a recognised lt2srv host';
-                    }
-                    final normalised = raw.endsWith('/')
-                        ? raw.substring(0, raw.length - 1)
-                        : raw;
-                    if (ServerConfigService.allServers.contains(normalised)) {
-                      return 'Already in the list';
-                    }
-                    return null;
-                  },
-                ),
-              ],
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton.icon(
-            icon: const Icon(Icons.check, size: 18),
-            label: const Text('Add'),
-            onPressed: () {
-              if (!(formKey.currentState?.validate() ?? false)) return;
-              var url = controller.text.trim();
-              if (url.endsWith('/')) url = url.substring(0, url.length - 1);
-              Navigator.pop(ctx, url);
-            },
-          ),
-        ],
-      ),
-    );
-    controller.dispose();
-    if (result == null) return;
-
-    final outcome = await ServerConfigService.addCustomServer(result);
-    if (!mounted) return;
-    switch (outcome) {
-      case AddResult.added:
-        setState(() {});
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Added $result'),
-            action: SnackBarAction(
-              label: 'Switch to it',
-              onPressed: () => _changeServer(result),
-            ),
-          ),
-        );
-      case AddResult.duplicate:
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('That server is already in the list.')),
-        );
-      case AddResult.invalid:
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('That does not look like a valid lt2srv host.')),
-        );
-    }
-  }
-
-  // ─── 2b. Connect / Token (same as session_detail_screen) ────────
-  Widget _buildConnectionSection() {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.grey[50],
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.grey[300]!),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(
-                _isConnected ? Icons.check_circle : Icons.info_outline,
-                color: _isConnected ? Colors.green : Colors.grey,
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  _isConnected
-                      ? 'Connected'
-                      : 'Not connected — required for live sessions',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w500,
-                    color: _isConnected ? Colors.green : Colors.grey.shade700,
-                  ),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              TextButton.icon(
-                onPressed: () => setState(() {
-                  _showTokenInput = !_showTokenInput;
-                  if (!_showTokenInput) {
-                    _tokenStatus = '';
-                    _tokenController.clear();
-                    _showBookmarklet = false;
-                  }
-                }),
-                icon: Icon(
-                  _showTokenInput ? Icons.keyboard_arrow_up : Icons.vpn_key,
-                  size: 18,
-                ),
-                label: Text(_showTokenInput ? 'Hide Token' : 'Manual Token'),
-                style: TextButton.styleFrom(foregroundColor: Colors.blue),
-              ),
-              const SizedBox(width: 4),
-              IconButton(
-                onPressed: _isConnecting ? null : _connectToInternal,
-                tooltip: _isConnected ? 'Reconnect' : 'Connect',
-                icon: _isConnecting
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : Icon(_isConnected ? Icons.link : Icons.link_off),
-              ),
-            ],
-          ),
-          if (_showTokenInput) ...[
-            const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: Colors.amber[50],
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: Colors.amber[200]!),
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Icon(Icons.lightbulb_outline,
-                      size: 18, color: Colors.amber[800]),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      '1. Click "Get Token" → new tab opens.\n'
-                      '2. On that tab press Ctrl+A then Ctrl+C.\n'
-                      '3. Come back and click "Paste Token".',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.amber[900],
-                        height: 1.4,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: _tokenController,
-              decoration: InputDecoration(
-                hintText: 'Token will appear here after pasting...',
-                border: const OutlineInputBorder(),
-                contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                errorText: _tokenStatus.contains('❌') ? _tokenStatus : null,
-                helperText: _tokenStatus.contains('✅') ? _tokenStatus : null,
-                helperStyle: const TextStyle(color: Colors.green),
-                suffixIcon: _tokenController.text.isNotEmpty
-                    ? IconButton(
-                        icon: const Icon(Icons.clear, size: 18),
-                        onPressed: () =>
-                            setState(() => _tokenController.clear()),
-                      )
-                    : null,
-              ),
-              maxLines: 2,
-              minLines: 1,
-              onChanged: (_) {
-                if (_tokenStatus.isNotEmpty && !_tokenStatus.startsWith('📋')) {
-                  setState(() => _tokenStatus = '');
-                }
-              },
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _openTokenPage,
-                    icon: const Icon(Icons.open_in_new, size: 18),
-                    label: const Text('Get Token'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.blue,
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _pasteFromClipboard,
-                    icon: const Icon(Icons.content_paste, size: 18),
-                    label: const Text('Paste Token'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.teal,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _setManualToken,
-                    icon: const Icon(Icons.save, size: 18),
-                    label: const Text('Set Manually'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                OutlinedButton.icon(
-                  onPressed: _clearManualToken,
-                  icon: const Icon(Icons.clear, size: 18),
-                  label: const Text('Clear'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.red,
-                    padding:
-                        const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-                  ),
-                ),
-              ],
-            ),
-            if (_tokenStatus.isNotEmpty &&
-                !_tokenStatus.contains('❌') &&
-                !_tokenStatus.contains('✅'))
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text(
-                  _tokenStatus,
-                  style: const TextStyle(fontSize: 12, color: Colors.grey),
-                ),
-              ),
-            const SizedBox(height: 8),
-            InkWell(
-              onTap: () => setState(() => _showBookmarklet = !_showBookmarklet),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Row(
-                  children: [
-                    Icon(
-                      _showBookmarklet
-                          ? Icons.keyboard_arrow_up
-                          : Icons.keyboard_arrow_down,
-                      size: 18,
-                      color: Colors.blueGrey,
-                    ),
-                    const SizedBox(width: 6),
-                    const Text(
-                      'Power-user tip: one-click copy bookmarklet',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.blueGrey,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            if (_showBookmarklet) ...[
-              const SizedBox(height: 6),
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: Colors.blueGrey[50],
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: Colors.blueGrey[200]!),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Create a bookmark whose URL is the text below. Then '
-                      'on the /gettoken page, click it once to copy the token.',
-                      style: TextStyle(fontSize: 11, color: Colors.blueGrey),
-                    ),
-                    const SizedBox(height: 8),
-                    Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(4),
-                        border: Border.all(color: Colors.blueGrey[100]!),
-                      ),
-                      child: const SelectableText(
-                        _bookmarkletJs,
-                        style:
-                            TextStyle(fontSize: 11, fontFamily: 'monospace'),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    SizedBox(
-                      width: double.infinity,
-                      child: OutlinedButton.icon(
-                        onPressed: _copyBookmarklet,
-                        icon: const Icon(Icons.copy, size: 16),
-                        label: const Text('Copy Bookmarklet'),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: Colors.blueGrey[800],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ],
-        ],
-      ),
-    );
-  }
-
   // ─── 3. Settings (same options as the offline Job Settings) ─────
   Widget _buildSettingsCard(BuildContext c) {
     return Card(
@@ -1724,9 +1039,10 @@ class _LiveAsrScreenState extends State<LiveAsrScreen> {
             spacing: 8,
             runSpacing: 4,
             children: [
-              const Text(
-                'Live Session Settings',
-                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
+              Text(
+                UiMode.isExpert ? 'Live Session Settings' : 'Languages',
+                style:
+                    const TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
               ),
               Container(
                 padding:
@@ -1815,6 +1131,48 @@ class _LiveAsrScreenState extends State<LiveAsrScreen> {
           controlAffinity: ListTileControlAffinity.leading,
           dense: true,
         );
+
+    // Simple mode: only the languages. Everything else keeps its
+    // current value and is still sent to KIT.
+    if (UiMode.isSimple) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildLanguageBlock(
+            title: 'Spoken languages',
+            availableCodes: inputLangCodes,
+            selected: _inputLanguages,
+            nameFor: LanguageConfig.getInputLanguageName,
+            onToggle: (c) => toggle(_inputLanguages, c),
+            onReplaceAll: (l) => replace(_inputLanguages, l),
+          ),
+          const SizedBox(height: 16),
+          _buildLanguageBlock(
+            title: 'Translate into',
+            availableCodes: outputLangCodes,
+            selected: _outputLanguages,
+            nameFor: LanguageConfig.getOutputLanguageName,
+            onToggle: (c) => toggle(_outputLanguages, c),
+            onReplaceAll: (l) => replace(_outputLanguages, l),
+          ),
+          const SizedBox(height: 16),
+          _buildLanguageBlock(
+            title: 'Generated audio (spoken translation)',
+            availableCodes: audioLangCodes,
+            selected: _audioLanguages,
+            nameFor: LanguageConfig.getAudioLanguageName,
+            onToggle: (c) => toggle(_audioLanguages, c),
+            onReplaceAll: (l) => replace(_audioLanguages, l),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'More options (session name, availability, features …) '
+            'in Expert mode.',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+          ),
+        ],
+      );
+    }
 
     final mute = numberField(_muteController, 'Notify timeout (minutes)', true);
     final pause =

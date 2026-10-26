@@ -10,6 +10,8 @@ import 'dart:js_interop';
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/models/language_config.dart';
 import 'package:asr_live_translator/services/live_sessions_api.dart';
+import 'package:asr_live_translator/services/ui_mode.dart';
+import 'package:asr_live_translator/widgets/server_connection_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:web/web.dart' as web;
@@ -22,7 +24,8 @@ class LiveSessionViewScreen extends StatefulWidget {
   State<LiveSessionViewScreen> createState() => _LiveSessionViewScreenState();
 }
 
-class _LiveSessionViewScreenState extends State<LiveSessionViewScreen> {
+class _LiveSessionViewScreenState extends State<LiveSessionViewScreen>
+    with UiModeListener<LiveSessionViewScreen> {
   bool _isNarrow(BuildContext c) => MediaQuery.sizeOf(c).width < 600;
   bool _isWide(BuildContext c) => MediaQuery.sizeOf(c).width >= 1000;
   double _pad(BuildContext c) => _isNarrow(c) ? 12 : 24;
@@ -34,7 +37,14 @@ class _LiveSessionViewScreenState extends State<LiveSessionViewScreen> {
   @override
   void initState() {
     super.initState();
+    ServerConnection.tokenChanged.addListener(_load);
     _load();
+  }
+
+  @override
+  void dispose() {
+    ServerConnection.tokenChanged.removeListener(_load);
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -144,6 +154,7 @@ class _LiveSessionViewScreenState extends State<LiveSessionViewScreen> {
         backgroundColor: Colors.blue.shade700,
         foregroundColor: Colors.white,
         actions: [
+          const UiModeToggle(),
           if (rec != null) ...[
             IconButton(
               tooltip: 'Download all languages',
@@ -158,21 +169,31 @@ class _LiveSessionViewScreenState extends State<LiveSessionViewScreen> {
           ],
         ],
       ),
-      body: _error != null
-          ? _buildError()
-          : rec == null
-              ? const Center(child: CircularProgressIndicator())
-              : Padding(
-                  padding: EdgeInsets.all(_pad(context)),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      _buildInfoCard(rec),
-                      const SizedBox(height: 12),
-                      Expanded(child: _buildLanes(rec)),
-                    ],
-                  ),
-                ),
+      body: Padding(
+        padding: EdgeInsets.all(_pad(context)),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // ─── Server + connection (top of every page) ───
+            const ServerConnectionPanel(),
+            const SizedBox(height: 12),
+            Expanded(
+              child: _error != null
+                  ? _buildError()
+                  : rec == null
+                      ? const Center(child: CircularProgressIndicator())
+                      : Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            _buildInfoCard(rec),
+                            const SizedBox(height: 12),
+                            Expanded(child: _buildLanes(rec)),
+                          ],
+                        ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -197,9 +218,12 @@ class _LiveSessionViewScreenState extends State<LiveSessionViewScreen> {
     final ins = rec.inputLanguages.map(LanguageConfig.getDisplayName).join(', ');
     final outs =
         rec.outputLanguages.map(LanguageConfig.getDisplayName).join(', ');
-    final settings = rec.settings.entries
-        .where((e) => e.value != null && e.value.toString().isNotEmpty)
-        .toList();
+    // Settings used + server are Expert-only details.
+    final settings = UiMode.isSimple
+        ? const <MapEntry<String, dynamic>>[]
+        : rec.settings.entries
+            .where((e) => e.value != null && e.value.toString().isNotEmpty)
+            .toList();
 
     return Card(
       margin: EdgeInsets.zero,
@@ -215,7 +239,7 @@ class _LiveSessionViewScreenState extends State<LiveSessionViewScreen> {
               _meta(Icons.event, formatDateTime(rec.createdAt)),
               _meta(Icons.timer_outlined, formatDuration(rec.duration)),
               _meta(Icons.translate, outs.isEmpty ? ins : '$ins → $outs'),
-              if (rec.server.isNotEmpty)
+              if (UiMode.isExpert && rec.server.isNotEmpty)
                 _meta(Icons.dns_outlined, labelForServer(rec.server)),
             ],
           ),

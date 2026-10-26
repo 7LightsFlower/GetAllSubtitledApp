@@ -443,8 +443,11 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     setState(() {
       _subtitleTracks = newTracks;
       _parsedSubtitles = newParsed;
-      if (_subtitleTracks.isNotEmpty && _selectedSubtitle == null) {
-        _selectedSubtitle = _subtitleTracks.first.language;
+      // Subtitles start "Off"; the viewer picks a track in the player.
+      // A track picked earlier stays selected only if it still exists.
+      if (_selectedSubtitle != null &&
+          !_subtitleTracks.any((t) => t.language == _selectedSubtitle)) {
+        _selectedSubtitle = null;
       }
     });
   }
@@ -473,16 +476,15 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       ));
     }
 
-    setState(() {
-      _ttsTracks = tracks;
-      _selectedTts = null;
-    });
-
-    if (tracks.isNotEmpty) {
-      // Defer to let the widget tree settle (context/dialog safety).
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _applyTTSSource(tracks.first.label);
-      });
+    // Default is the original audio ("Original audio" in the menu); a
+    // spoken translation plays only after the viewer picks one. On a
+    // reload (refresh / TTS backfill) keep the viewer's choice if that
+    // track still exists, otherwise go back to the original sound.
+    final keep = _selectedTts != null &&
+        tracks.any((t) => t.label == _selectedTts);
+    setState(() => _ttsTracks = tracks);
+    if (!keep && _selectedTts != null) {
+      await _applyTTSSource(null); // stops TTS, restores video volume
     }
   }
 
@@ -1173,8 +1175,10 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
       // No Authorization header → no CORS preflight → no 30 MB ceiling.
       // Works whether the backend serves a local file or proxies KIT.
-      // Explicitly declare the source as a WAV file
-      await _ttsPlayer.play(UrlSource(track.url, mimeType: 'audio/wav'));
+      // setSource only LOADS the WAV — it must not start playing until
+      // the user presses play (the play button resumes it in sync with
+      // the video). `play()` here used to start the audio immediately.
+      await _ttsPlayer.setSource(UrlSource(track.url, mimeType: 'audio/wav'));
 
       if (video != null && video.value.isInitialized) {
         await _ttsPlayer.seek(video.value.position);
@@ -1696,11 +1700,8 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           segment.text.replaceAll(RegExp(r'<[^>]+>'), '').trim();
       if (cleanText.isEmpty) continue;
 
-      if (segment.speakerName != null &&
-          segment.speakerName!.isNotEmpty) {
-        final cleanSpeaker = segment.speakerName!
-            .replaceAll(RegExp(r'<[^>]+>'), '')
-            .trim();
+      final cleanSpeaker = displaySpeakerName(segment.speakerName);
+      if (cleanSpeaker.isNotEmpty) {
         buffer.writeln('<v $cleanSpeaker>$cleanText</v>');
       } else {
         buffer.writeln(cleanText);

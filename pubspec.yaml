@@ -1,7 +1,7 @@
 name: asr_live_translator
 description: Get all automatically translated and subtitled in 25 languages, editing and downloading the video with subtitles.
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.1+1
 
 environment:
   sdk: '>=3.4.0 <4.0.0'

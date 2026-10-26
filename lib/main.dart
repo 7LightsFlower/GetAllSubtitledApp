@@ -8,11 +8,13 @@ import 'package:asr_live_translator/screens/working_screen.dart';
 import 'package:asr_live_translator/screens/splash_screen.dart';
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/models/language_config.dart';
+import 'package:asr_live_translator/services/ui_mode.dart';
 
 Future<void> main() async {
     WidgetsFlutterBinding.ensureInitialized();
 
   await LanguageConfig.load();
+  await UiMode.load();
   refreshLanguageConstants();
   debugPrint('authBaseUrl    = $authBaseUrl');
   debugPrint('flaskServerUrl = $flaskServerUrl');
