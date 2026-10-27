@@ -220,8 +220,10 @@ def _resolve_target_url(requested: str | None) -> str:
 # and when backend.py is run directly as a script.
 try:
     from .live_relay import create_live_blueprint
+    from . import live_relay as _live_relay_mod
 except ImportError:
     from live_relay import create_live_blueprint
+    import live_relay as _live_relay_mod
 
 
 def _resolve_live_server(requested: str | None) -> str:
@@ -253,6 +255,8 @@ def _decode_tts_chunk(chunk: dict, rate: int) -> bytes | None:
             pass
         src = ["-f", "wav"]
     elif "pcm" in key or "s16" in key:
+        if (chunk.get("rate") or 16000) == rate:
+            return audio[: len(audio) - len(audio) % 2]  # already right
         src = ["-f", "s16le", "-ar", str(chunk.get("rate") or 16000), "-ac", "1"]
     else:
         src = []  # let ffmpeg detect (opus/ogg/mp3/webm…)
@@ -279,7 +283,7 @@ def _build_live_tts_wavs(session_dir: str, chunks: list, label_for) -> list:
 
     written = []
     for lane, items in by_lane.items():
-        rate = 24000
+        rate = items[0].get("rate") or 24000  # raw PCM: its own rate
         first = items[0].get("audio") or b""
         if first[:4] == b"RIFF":
             try:
@@ -308,11 +312,18 @@ def _build_live_tts_wavs(session_dir: str, chunks: list, label_for) -> list:
             continue
         simple = _extract_simple_language_name(label_for(lane))
         name = "tts_{}.wav".format(re.sub(r"[^0-9A-Za-z_\-]", "_", simple))
-        with wave.open(os.path.join(session_dir, name), "wb") as w:
+        # Complete file first, under a name Session Output does not list,
+        # so a half-written WAV is never offered for playback.
+        partial = os.path.join(
+            os.path.dirname(session_dir),
+            f".{os.path.basename(session_dir)}.{name}.part",
+        )
+        with wave.open(partial, "wb") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
             w.setframerate(rate)
             w.writeframes(bytes(pcm))
+        os.replace(partial, os.path.join(session_dir, name))
         written.append(name)
         logging.info(
             "live: wrote %s (%d/%d chunks, %.1f s)",
@@ -408,6 +419,15 @@ def _finalize_live_session(info: dict) -> str | None:
             }
         )
     transcripts = organize_transcripts(raw)
+    # Original first, then translations A→Z, unidentified ones last.
+    transcripts.sort(
+        key=lambda t: (
+            0 if t["language"] == asr_label
+            else 2 if t["language"].startswith("Translation (")
+            else 1,
+            t["language"].lower(),
+        )
+    )
     save_transcripts_to_files(session_dir, transcripts)
     vtts = generate_vtt_files_from_transcripts(session_dir)
     save_state(force=True)
@@ -444,6 +464,14 @@ def _finalize_live_session(info: dict) -> str | None:
 
         def _encode():
             out = os.path.join(session_dir, "live_audio.mp4")
+            # Encode next to the session folder under a name Session Output
+            # does not list, and rename only when complete: an MP4 is not
+            # playable until ffmpeg has finished writing its index, and a
+            # half-written file makes the browser fail with
+            # MEDIA_ERR_SRC_NOT_SUPPORTED.
+            partial = os.path.join(
+                os.path.dirname(session_dir), f".{os.path.basename(session_dir)}.live_audio.part.mp4"
+            )
             try:
                 subprocess.run(
                     [
@@ -451,20 +479,31 @@ def _finalize_live_session(info: dict) -> str | None:
                         "-f", "s16le", "-ar", str(info.get("sample_rate", 16000)),
                         "-ac", "1", "-i", kept,
                         "-c:a", "aac", "-b:a", "64k", "-movflags", "+faststart",
-                        out,
+                        partial,
                     ],
                     check=True,
                     capture_output=True,
                     timeout=1800,
                 )
+                os.replace(partial, out)
                 logging.info("live: audio saved for %s", _short_sid(session_id))
+            except FileNotFoundError:
+                logging.warning(
+                    "live: audio encoding failed for %s: ffmpeg not found "
+                    "(install ffmpeg and put it on PATH)", session_id,
+                )
             except (OSError, subprocess.SubprocessError) as e:
-                logging.warning("live: audio encoding failed for %s: %s", session_id, e)
+                err = getattr(e, "stderr", b"") or b""
+                logging.warning(
+                    "live: audio encoding failed for %s: %s %s",
+                    session_id, e, err.decode("utf-8", "replace")[-300:],
+                )
             finally:
-                try:
-                    os.remove(kept)
-                except OSError:
-                    pass
+                for leftover in (kept, partial):
+                    try:
+                        os.remove(leftover)
+                    except OSError:
+                        pass
 
         threading.Thread(target=_encode, daemon=True).start()
     return session_id
@@ -1807,6 +1846,25 @@ def _clear_cancel(session_id: str) -> None:
         _cancelled_sessions.discard(session_id)
 
 
+# Sessions where the user pressed "Finish now": stop waiting for slow
+# translation tracks and download whatever KIT has produced so far.
+_finish_now_sessions: set[str] = set()
+
+
+def _request_finish_now(session_id: str) -> None:
+    with _cancelled_sessions_lock:
+        _finish_now_sessions.add(session_id)
+
+
+def _take_finish_now(session_id: str) -> bool:
+    """True once if "Finish now" was requested (clears the flag)."""
+    with _cancelled_sessions_lock:
+        if session_id in _finish_now_sessions:
+            _finish_now_sessions.discard(session_id)
+            return True
+        return False
+
+
 def _job_start(session_id: str, video_key: str | None, session_name: str | None):
     """Create a job-progress entry for a session.
 
@@ -2103,6 +2161,36 @@ def job_progress(session_id):
         ),
         200,
     )
+
+
+@app.route("/finish_session/<path:session_id>", methods=["POST", "OPTIONS"])
+def finish_session_now(session_id):
+    """Stop waiting for unfinished translations: the worker downloads
+    what is ready (complete languages fully, slow ones partially)."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+    with job_progress_lock:
+        entry = _job_progress_store.get(session_id)
+        active = entry is not None and not entry.get("done")
+    if not active:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "reason": "not_running",
+                    "message": "No running job for this session on this "
+                    "backend (finished, cancelled, or the backend restarted).",
+                }
+            ),
+            404,
+        )
+    _request_finish_now(session_id)
+    _job_log(
+        session_id,
+        "Finish now requested — downloading the translations that are ready…",
+        stage="translating",
+    )
+    return jsonify({"success": True, "session_id": session_id}), 200
 
 
 @app.route("/cancel_session/<path:session_id>", methods=["POST", "OPTIONS"])
@@ -3538,6 +3626,20 @@ def _is_original_asr_language(language: str) -> bool:
     return "original" in lower or "asr" in lower
 
 
+def _display_speaker(raw) -> str:
+    """KIT speaker id `<sid>:asr:speakerdiarization:<name>` → `<name>`."""
+    if not raw or not isinstance(raw, str):
+        return ""
+    name = re.sub(r"<[^>]+>", "", raw).strip()
+    name = name.rsplit(":", 1)[-1].strip()
+    return re.sub(r"^Anonymous-?\s*", "Unknown ", name).strip()
+
+
+def _segment_speaker(seg: dict) -> str:
+    """Clean speaker name of a transcript segment ('' when none)."""
+    return _display_speaker(seg.get("speaker_name") or seg.get("speakerName"))
+
+
 def generate_vtt_files_from_transcripts(session_dir):
     """Materialise per-language .vtt files from transcripts.json."""
     json_path = os.path.join(session_dir, "transcripts.json")
@@ -3589,8 +3691,10 @@ def generate_vtt_files_from_transcripts(session_dir):
             lines.append(
                 f"{_format_vtt_timestamp(start)} --> {_format_vtt_timestamp(end)}"
             )
-            speaker = seg.get("speakerName") or seg.get("speaker_name")
-            if speaker and speaker.strip():
+            speaker = _display_speaker(
+                seg.get("speakerName") or seg.get("speaker_name")
+            )
+            if speaker:
                 lines.append(f"<v {speaker}>{text}</v>")
             else:
                 lines.append(text)
@@ -4058,6 +4162,7 @@ def format_structured_text(structured_data, language_filter=None):
 
             segments = ch.get("segments", [])
             current_sender = None
+            current_speaker = ""
             has_content = False
 
             for seg in segments:
@@ -4079,6 +4184,12 @@ def format_structured_text(structured_data, language_filter=None):
                     lines.append("")  # Single blank line between paragraphs
                 # For asr and mt: show as plain text (no marker)
                 elif is_asr_or_mt(sender):
+                    speaker = _segment_speaker(seg)
+                    if speaker and speaker != current_speaker:
+                        current_speaker = speaker
+                        if lines and lines[-1] != "":
+                            lines.append("")
+                        lines.append(f"{speaker}:")
                     if clean_text:
                         lines.append(clean_text)
                 # For summarizer: show with "Summary:" prefix
@@ -4102,6 +4213,7 @@ def format_structured_text(structured_data, language_filter=None):
             lines.append(f"--- {lang} ---")
             segments = selected_transcript.get("segments", [])
             current_sender = None
+            current_speaker = ""
 
             for seg in segments:
                 text = seg.get("text", "")
@@ -4117,6 +4229,12 @@ def format_structured_text(structured_data, language_filter=None):
                     lines.append(clean_text)
                     lines.append("")
                 elif is_asr_or_mt(sender):
+                    speaker = _segment_speaker(seg)
+                    if speaker and speaker != current_speaker:
+                        current_speaker = speaker
+                        if lines and lines[-1] != "":
+                            lines.append("")
+                        lines.append(f"{speaker}:")
                     if clean_text:
                         lines.append(clean_text)
                 elif is_summarizer(sender):
@@ -4270,6 +4388,7 @@ def export_structured_docx(session_id, session_dir, language_filter=None):
 
             segments = ch.get("segments", [])
             current_sender = None
+            current_speaker = ""
             has_content = False
 
             for seg in segments:
@@ -4297,6 +4416,13 @@ def export_structured_docx(session_id, session_dir, language_filter=None):
 
                 # asr and mt: plain text (no marker)
                 elif is_asr_or_mt(sender):
+                    speaker = _segment_speaker(seg)
+                    if speaker and speaker != current_speaker:
+                        current_speaker = speaker
+                        p = doc.add_paragraph()
+                        run = p.add_run(f"{speaker}:")
+                        run.bold = True
+                        run.font.color.rgb = RGBColor(0, 102, 204)
                     p = doc.add_paragraph()
                     p.add_run(clean_text)
 
@@ -4334,6 +4460,7 @@ def export_structured_docx(session_id, session_dir, language_filter=None):
             doc.add_heading(lang, level=2)
             segments = selected_transcript.get("segments", [])
             current_sender = None
+            current_speaker = ""
             for seg in segments:
                 text = seg.get("text", "")
                 sender = seg.get("sender", "")
@@ -4354,6 +4481,13 @@ def export_structured_docx(session_id, session_dir, language_filter=None):
                     p = doc.add_paragraph()
                     p.add_run(clean_text)
                 elif is_asr_or_mt(sender):
+                    speaker = _segment_speaker(seg)
+                    if speaker and speaker != current_speaker:
+                        current_speaker = speaker
+                        p = doc.add_paragraph()
+                        run = p.add_run(f"{speaker}:")
+                        run.bold = True
+                        run.font.color.rgb = RGBColor(0, 102, 204)
                     p = doc.add_paragraph()
                     p.add_run(clean_text)
                 elif is_summarizer(sender):
@@ -4506,6 +4640,7 @@ def export_structured_rtf(session_id, session_dir, language_filter=None):
 
             segments = ch.get("segments", [])
             current_sender = None
+            current_speaker = ""
             has_content = False
 
             for seg in segments:
@@ -4525,6 +4660,12 @@ def export_structured_rtf(session_id, session_dir, language_filter=None):
                     )
                     rtf_parts.append(escape_rtf(clean_text) + r"\par")
                 elif is_asr_or_mt(sender):
+                    speaker = _segment_speaker(seg)
+                    if speaker and speaker != current_speaker:
+                        current_speaker = speaker
+                        rtf_parts.append(
+                            r"\par\b " + escape_rtf(f"{speaker}:") + r"\b0\par"
+                        )
                     rtf_parts.append(escape_rtf(clean_text) + r"\par")
                 elif is_summarizer(sender):
                     rtf_parts.append(
@@ -4554,6 +4695,7 @@ def export_structured_rtf(session_id, session_dir, language_filter=None):
             rtf_parts.append(r"\b\fs24 " + escape_rtf(lang) + r"\b0\par")
             segments = selected_transcript.get("segments", [])
             current_sender = None
+            current_speaker = ""
             for seg in segments:
                 text = seg.get("text", "")
                 sender = seg.get("sender", "")
@@ -4569,6 +4711,12 @@ def export_structured_rtf(session_id, session_dir, language_filter=None):
                     )
                     rtf_parts.append(escape_rtf(clean_text) + r"\par")
                 elif is_asr_or_mt(sender):
+                    speaker = _segment_speaker(seg)
+                    if speaker and speaker != current_speaker:
+                        current_speaker = speaker
+                        rtf_parts.append(
+                            r"\par\b " + escape_rtf(f"{speaker}:") + r"\b0\par"
+                        )
                     rtf_parts.append(escape_rtf(clean_text) + r"\par")
                 elif is_summarizer(sender):
                     rtf_parts.append(
@@ -5565,8 +5713,10 @@ def session_transcript_save_vtt(session_id):
                 f"{_format_vtt_timestamp(start)} --> " f"{_format_vtt_timestamp(end)}"
             )
 
-            speaker_name = seg.get("speakerName") or seg.get("speaker_name")
-            if speaker_name and speaker_name.strip():
+            speaker_name = _display_speaker(
+                seg.get("speakerName") or seg.get("speaker_name")
+            )
+            if speaker_name:
                 vtt_lines.append(f"<v {speaker_name}>{text}</v>")
             else:
                 vtt_lines.append(text)
@@ -6543,6 +6693,60 @@ def _messages_look_done(raw: bytes, expected_langs=None, log: bool = True) -> bo
     return True
 
 
+def _mt_track_status(raw: bytes) -> tuple[float, dict]:
+    """(asr_end, {mt sender: end}) from a full messages dump."""
+    asr_end = 0.0
+    tracks: dict = {}
+    try:
+        data = json.loads(raw) if raw else []
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return asr_end, tracks
+    for item in data if isinstance(data, list) else []:
+        if not (isinstance(item, list) and len(item) >= 2):
+            continue
+        try:
+            m = json.loads(item[1]) if isinstance(item[1], str) else item[1]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(m, dict) or not str(m.get("seq", "")).strip():
+            continue
+        try:
+            end = float(m.get("end", 0) or 0)
+        except (ValueError, TypeError):
+            end = 0.0
+        sender = str(m.get("sender", ""))
+        if sender.startswith("asr:"):
+            asr_end = max(asr_end, end)
+        elif sender.startswith("mt:") or sender.startswith("translation:"):
+            if end > tracks.get(sender, 0.0):
+                tracks[sender] = end
+    return asr_end, tracks
+
+
+def _mt_summary(asr_end: float, tracks: dict) -> tuple[str, float, list]:
+    """Human summary, average coverage (0..1) and the unfinished tracks."""
+    if not tracks or asr_end <= 0:
+        return "", 0.0, []
+    unfinished = sorted(
+        (t for t, e in tracks.items() if not _coverage_is_ok(e, asr_end)),
+        key=lambda t: tracks[t],
+    )
+    done = len(tracks) - len(unfinished)
+    avg = sum(min(e / asr_end, 1.0) for e in tracks.values()) / len(tracks)
+    text = f"Translations: {done} of {len(tracks)} languages complete"
+    if unfinished:
+        slow = unfinished[0]
+        text += (
+            f" — slowest {slow} at {tracks[slow]:.0f}s of {asr_end:.0f}s"
+        )
+    return text, avg, unfinished
+
+
+# No new message from KIT for this long while some translations are still
+# short → stop waiting and download what is there (env-configurable).
+_MT_STALL_SECONDS = float(os.environ.get("MT_STALL_SECONDS", "900"))
+
+
 def _compute_translation_progress(raw: bytes) -> tuple[float, float]:
     """Return (mt_max_end_seconds, asr_max_end_seconds).
 
@@ -6795,6 +6999,7 @@ def wait_for_session_ready(
     # Fires the shape-diagnostic log line exactly once per call to this
     # function — i.e. once per session — instead of once per process.
     _logged_shape = False
+    last_mt_summary = ""
 
     # Cooldown between two events of the same kind. Complements the
     # value-advance check below.
@@ -6802,8 +7007,26 @@ def wait_for_session_ready(
         if _is_cancelled(session_id):
             raise _JobCancelled(f"Session {_short_sid(session_id)} cancelled by user")
 
+        if _take_finish_now(session_id):
+            logging.info(
+                "Session %s: finish now requested — taking what is ready",
+                _short_sid(session_id),
+            )
+            return True
+
         elapsed = time.time() - started
         if elapsed > timeout:
+            if last_size >= MIN_MESSAGES_COUNT:
+                # Plenty of output exists: keep it instead of failing.
+                _job_log(
+                    session_id,
+                    f"⚠️ Still not finished after {timeout / 60:.0f} min — "
+                    "downloading what is ready (some translations may be "
+                    "incomplete).",
+                    level="warning",
+                    stage="translating",
+                )
+                return True
             raise TimeoutError(
                 f"Session {_short_sid(session_id)} not ready after {timeout}s"
             )
@@ -6999,7 +7222,13 @@ def wait_for_session_ready(
         # user knows we are still polling and not wedged.
         if now - last_heartbeat >= _PROGRESS_HEARTBEAT_SECONDS:
             last_heartbeat = now
-            if last_reported_mt_end > 0:
+            if last_mt_summary:
+                _job_log(
+                    session_id,
+                    f"Waiting — {last_mt_summary}",
+                    stage="translating",
+                )
+            elif last_reported_mt_end > 0:
                 _job_log(
                     session_id,
                     f"Waiting — translation still at {last_reported_mt_end:.0f}s",
@@ -7072,6 +7301,28 @@ def wait_for_session_ready(
                     "resetting stability counter",
                     _short_sid(session_id),
                 )
+                # Per-language status for the panel, instead of only the
+                # fastest track (which sits at 99% while others lag).
+                asr_end, tracks = _mt_track_status(raw)
+                summary, avg, unfinished = _mt_summary(asr_end, tracks)
+                if summary and summary != last_mt_summary:
+                    last_mt_summary = summary
+                    _job_log(session_id, summary, stage="translating")
+                quiet = time.time() - _quiet_since
+                if unfinished and asr_end > 0 and quiet >= _MT_STALL_SECONDS:
+                    _job_log(
+                        session_id,
+                        f"⚠️ No new output from the server for "
+                        f"{quiet / 60:.0f} min — finishing with what is "
+                        f"ready. Incomplete: "
+                        + ", ".join(
+                            f"{t} ({tracks[t]:.0f}s of {asr_end:.0f}s)"
+                            for t in unfinished
+                        ),
+                        level="warning",
+                        stage="translating",
+                    )
+                    return True
             stable_count = 0
         # Adaptive backoff: 2s while the file is still growing, longer
         # once it has settled. KIT starts throttling if we hit it every
@@ -8529,6 +8780,132 @@ def update_project_name(video_key):
     target["name"] = new_name
     save_state()
     return jsonify({"success": True, "project": target}), 200
+
+
+# ─── Video folders (working screen) ─────────────────────────────────
+# One level of folders. A video's folder is stored on the video entry
+# itself ("folder": name or absent); the list of folder names — so empty
+# folders survive too — lives in state/folders.json (persistent volume).
+_FOLDERS_FILE = os.path.join(os.path.dirname(STATE_FILE), "folders.json")
+_folders_lock = threading.Lock()
+
+
+def _clean_folder_name(name) -> str:
+    name = re.sub(r"\s+", " ", str(name or "")).strip()
+    return name[:80]
+
+
+def _read_folders() -> list:
+    try:
+        with open(_FOLDERS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        names = data.get("folders") if isinstance(data, dict) else data
+        return [n for n in (names or []) if isinstance(n, str) and n.strip()]
+    except (OSError, ValueError):
+        return []
+
+
+def _write_folders(names: list) -> None:
+    os.makedirs(os.path.dirname(_FOLDERS_FILE), exist_ok=True)
+    tmp = _FOLDERS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"folders": names}, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, _FOLDERS_FILE)
+
+
+def _all_folders() -> list:
+    """Saved folder names plus any a video still points to, A→Z."""
+    names = {n.lower(): n for n in _read_folders()}
+    for v in videos:
+        f = v.get("folder")
+        if f and f.lower() not in names:
+            names[f.lower()] = f
+    return sorted(names.values(), key=str.lower)
+
+
+def _find_folder(name: str):
+    low = name.lower()
+    return next((n for n in _all_folders() if n.lower() == low), None)
+
+
+@app.route("/api/folders", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+def video_folders():
+    """GET → {"folders": [...]}
+    POST {"name"}                → create
+    PUT {"old", "new"}            → rename (moves its videos along)
+    DELETE ?name=…                → delete (its videos become unsorted)"""
+    if request.method == "OPTIONS":
+        return ("", 204)
+    with _folders_lock:
+        if request.method == "GET":
+            return jsonify({"folders": _all_folders()}), 200
+
+        if request.method == "DELETE":
+            name = _find_folder(_clean_folder_name(request.args.get("name")))
+            if not name:
+                return jsonify({"error": "Folder not found"}), 404
+            moved = 0
+            for v in videos:
+                if (v.get("folder") or "").lower() == name.lower():
+                    v.pop("folder", None)
+                    moved += 1
+            _write_folders([n for n in _all_folders() if n.lower() != name.lower()])
+            save_state(force=True)
+            moved += _live_relay_mod.clear_folder(name)  # live sessions too
+            return jsonify({"success": True, "unsorted": moved}), 200
+
+        data = request.get_json(silent=True) or {}
+        if request.method == "POST":
+            name = _clean_folder_name(data.get("name"))
+            if not name:
+                return jsonify({"error": "name is required"}), 400
+            if _find_folder(name):
+                return jsonify({"error": f'A folder "{name}" already exists'}), 409
+            _write_folders(_all_folders() + [name])
+            return jsonify({"success": True, "folders": _all_folders()}), 201
+
+        # PUT = rename
+        old = _find_folder(_clean_folder_name(data.get("old")))
+        new = _clean_folder_name(data.get("new"))
+        if not old:
+            return jsonify({"error": "Folder not found"}), 404
+        if not new:
+            return jsonify({"error": "new name is required"}), 400
+        clash = _find_folder(new)
+        if clash and clash.lower() != old.lower():
+            return jsonify({"error": f'A folder "{new}" already exists'}), 409
+        for v in videos:
+            if (v.get("folder") or "").lower() == old.lower():
+                v["folder"] = new
+        _write_folders(
+            [new if n.lower() == old.lower() else n for n in _all_folders()]
+        )
+        save_state(force=True)
+        _live_relay_mod.rename_folder(old, new)  # live sessions too
+        return jsonify({"success": True, "folders": _all_folders()}), 200
+
+
+@app.route("/api/videos/<video_key>/folder", methods=["POST", "OPTIONS"])
+def set_video_folder(video_key):
+    """Move a video into a folder: {"folder": "Name"} or {"folder": null}."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+    target = next((v for v in videos if v.get("key") == video_key), None)
+    if not target:
+        return jsonify({"error": "Video not found"}), 404
+    raw = (request.get_json(silent=True) or {}).get("folder")
+    with _folders_lock:
+        if raw in (None, ""):
+            target.pop("folder", None)
+        else:
+            name = _clean_folder_name(raw)
+            existing = _find_folder(name)
+            if not existing:  # moving into a new name creates the folder
+                _write_folders(_all_folders() + [name])
+                existing = name
+            target["folder"] = existing
+        save_state(force=True)
+    return jsonify({"success": True, "folder": target.get("folder")}), 200
 
 
 @app.route("/stop-segmentation/<video_key>", methods=["POST", "OPTIONS"])

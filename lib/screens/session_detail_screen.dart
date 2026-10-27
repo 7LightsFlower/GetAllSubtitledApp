@@ -11,6 +11,7 @@ import 'package:asr_live_translator/models/language_config.dart';
 import 'package:asr_live_translator/services/server_config_service.dart';
 import 'package:asr_live_translator/services/ui_mode.dart';
 import 'package:asr_live_translator/widgets/server_connection_panel.dart';
+import 'package:asr_live_translator/widgets/language_picker.dart';
 import 'package:asr_live_translator/widgets/job_progress_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -271,6 +272,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen>
   String _savedSessionUrl = '';
   bool _isCheckingOutput = false;
   bool _isCancelling = false; 
+  bool _isFinishing = false;
   String _outputStatus = '';
 
   // Job history
@@ -1326,6 +1328,52 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen>
           _outputStatus = '❌ Error checking output: $e';
         });
       }
+    }
+  }
+
+    /// Stop waiting for slow translations: the backend downloads what is
+  /// ready (finished languages complete, slow ones up to where they got).
+  Future<void> _finishNow() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Finish with what is ready?'),
+        content: const Text(
+          'The transcript and all finished translations are downloaded now. '
+          'Translations that are still running are cut off where they are.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Keep waiting'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Finish now'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    setState(() => _isFinishing = true);
+    try {
+      final token = await _getToken();
+      final response = await http.post(
+        Uri.parse('$flaskServerUrl/finish_session/$_savedSessionId'),
+        headers: {'Authorization': 'Bearer $token'},
+      );
+      if (!mounted) return;
+      setState(() {
+        _outputStatus = response.statusCode == 200
+            ? '⏩ Finishing — downloading what is ready. Use "Check Status" '
+                'in a minute.'
+            : '❌ Finish now failed: '
+                '${response.statusCode == 404 ? 'no running job on this backend' : 'HTTP ${response.statusCode}'}';
+      });
+    } catch (e) {
+      if (mounted) setState(() => _outputStatus = '❌ Finish now error: $e');
+    } finally {
+      if (mounted) setState(() => _isFinishing = false);
     }
   }
 
@@ -2732,22 +2780,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen>
     );
   }
 
-  Widget _chipAction(
-    BuildContext c, {
-    required String label,
-    required VoidCallback? onPressed,
-  }) {
-    return TextButton(
-      onPressed: onPressed,
-      style: TextButton.styleFrom(
-        padding: EdgeInsets.symmetric(horizontal: _isNarrow(c) ? 6 : 8),
-        minimumSize: Size(0, _isNarrow(c) ? 28 : 32),
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        textStyle: TextStyle(fontSize: _isNarrow(c) ? 12 : 13),
-      ),
-      child: Text(label),
-    );
-  }
 
   Widget _buildLanguageBlock({
     required BuildContext context,
@@ -2758,59 +2790,15 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen>
     required void Function(String code) onToggle,
     required void Function(List<String>) onReplaceAll,
   }) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                title,
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: _bodySize(context),
-                ),
-              ),
-            ),
-            // Compact action buttons; on narrow screens they shrink a bit
-            // further so the title still has room to breathe.
-            _chipAction(
-              context,
-              label: 'All',
-              onPressed: selected.length == availableCodes.length
-                  ? null
-                  : () => onReplaceAll([...availableCodes]),
-            ),
-            const SizedBox(width: 2),
-            _chipAction(
-              context,
-              label: 'None',
-              onPressed: selected.isEmpty
-                  ? null
-                  : () => onReplaceAll(const []),
-            ),
-          ],
-        ),
-        const SizedBox(height: 4),
-        Wrap(
-          spacing: _isNarrow(context) ? 6 : 8,
-          runSpacing: 4,
-          children: availableCodes.map((code) {
-            final displayName = nameFor(code);
-            return FilterChip(
-              label: Text(
-                '$displayName ($code)',
-                style: TextStyle(fontSize: _isNarrow(context) ? 11 : 13),
-              ),
-              selected: selected.contains(code),
-              onSelected: (_) => onToggle(code),
-              visualDensity: _isNarrow(context)
-                  ? VisualDensity.compact
-                  : VisualDensity.standard,
-            );
-          }).toList(),
-        ),
-      ],
+    // Chosen languages visible; all others in a collapsed list.
+    return LanguagePicker(
+      title: title,
+      availableCodes: availableCodes,
+      selected: selected,
+      nameFor: nameFor,
+      onToggle: onToggle,
+      onReplaceAll: onReplaceAll,
+      titleSize: _bodySize(context),
     );
   }
 
@@ -3681,7 +3669,34 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen>
                       ),
                     ),
                   if (isRunning) ...[
-                    if (!hasOutput) const SizedBox(width: 8),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Tooltip(
+                        message: 'Stop waiting for slow translations and '
+                            'download what is ready',
+                        child: ElevatedButton.icon(
+                          onPressed: _isFinishing ? null : _finishNow,
+                          icon: _isFinishing
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Icon(Icons.fast_forward, size: 18),
+                          label: Text(
+                            _isFinishing ? 'Finishing…' : 'Finish now',
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.orange.shade700,
+                            foregroundColor: Colors.white,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
                     Expanded(
                       child: ElevatedButton.icon(
                         onPressed: _isCancelling ? null : _cancelJob,

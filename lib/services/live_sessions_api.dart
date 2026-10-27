@@ -48,6 +48,7 @@ class LiveSessionSummary {
     required this.wordCount,
     required this.preview,
     this.outputSessionId = '',
+    this.folder,
   });
 
   final String id;
@@ -64,6 +65,10 @@ class LiveSessionSummary {
   /// (transcripts, VTTs, audio). Empty for sessions saved before that.
   final String outputSessionId;
 
+  /// Folder (shared with the video list), null = unsorted. Mutable so the
+  /// list can move a card immediately.
+  String? folder;
+
   factory LiveSessionSummary.fromJson(Map<String, dynamic> j) =>
       LiveSessionSummary(
         id: j['id']?.toString() ?? '',
@@ -77,6 +82,9 @@ class LiveSessionSummary {
         wordCount: (j['word_count'] as num?)?.toInt() ?? 0,
         preview: j['preview']?.toString() ?? '',
         outputSessionId: j['output_session_id']?.toString() ?? '',
+        folder: (j['folder']?.toString() ?? '').isEmpty
+            ? null
+            : j['folder'].toString(),
       );
 }
 
@@ -158,6 +166,17 @@ class LiveSessionsApi {
   static Future<void> delete(String id) async {
     final r =
         await http.delete(Uri.parse('$_base/$id'), headers: await _headers());
+    _check(r);
+  }
+
+  /// Moves a session into [folder] (null = unsorted). The folder must
+  /// exist in /api/folders, or it won't show up in the folder bar.
+  static Future<void> moveToFolder(String id, String? folder) async {
+    final r = await http.post(
+      Uri.parse('$_base/$id/folder'),
+      headers: await _headers(json: true),
+      body: jsonEncode({'folder': folder}),
+    );
     _check(r);
   }
 

@@ -7,6 +7,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:http/http.dart' as http;
 // ignore: deprecated_member_use, avoid_web_libraries_in_flutter
 import 'dart:html' as html;
+import 'dart:async';
 import 'dart:convert';
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
@@ -184,6 +185,13 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   final AudioPlayer _ttsPlayer = AudioPlayer();   // package:audioplayers
 
   List<TTSTrack> _ttsTracks = <TTSTrack>[];
+
+  // Position / length of the selected spoken-translation track (slider).
+  Duration _ttsPosition = Duration.zero;
+  Duration _ttsDuration = Duration.zero;
+  bool _ttsPlaying = false;
+  bool _ttsDragging = false;
+  final List<StreamSubscription<dynamic>> _ttsSubs = [];
   
   List<TTSTrack> get ttsTracks => _ttsTracks;
   String? get selectedTts => _selectedTts;
@@ -201,11 +209,31 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   @override
   void initState() {
     super.initState();
+    _ttsSubs.addAll([
+      _ttsPlayer.onPositionChanged.listen((p) {
+        if (!mounted || _ttsDragging) return;
+        setState(() => _ttsPosition = p);
+        // Without a video/recording the TTS track drives the highlight.
+        final v = _videoController;
+        if (v == null || !v.value.isInitialized) {
+          _highlightAt(p.inMilliseconds / 1000.0);
+        }
+      }),
+      _ttsPlayer.onDurationChanged.listen((d) {
+        if (mounted) setState(() => _ttsDuration = d);
+      }),
+      _ttsPlayer.onPlayerStateChanged.listen((st) {
+        if (mounted) setState(() => _ttsPlaying = st == PlayerState.playing);
+      }),
+    ]);
     _loadSessionData();
   }
 
   @override
   void dispose() {
+    for (final sub in _ttsSubs) {
+      sub.cancel();
+    }
     _ttsPlayer.dispose();
     _videoController?.removeListener(_onVideoProgress);
     _videoController?.dispose();
@@ -486,6 +514,127 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     if (!keep && _selectedTts != null) {
       await _applyTTSSource(null); // stops TTS, restores video volume
     }
+  }
+
+  /// The shown text follows the chosen spoken translation: "German Audio"
+  /// shows the German transcript (and German subtitles, if subtitles are
+  /// on), so what you read is exactly what you hear.
+  void _showTextForAudio(String label) {
+    TTSTrack? track;
+    for (final t in _ttsTracks) {
+      if (t.label == label) {
+        track = t;
+        break;
+      }
+    }
+    if (track == null) return;
+    final lang = track.language;
+
+    for (final t in _transcripts) {
+      if (t.language.contains('Original ASR')) continue;
+      if (_extractSimpleLanguage(t.language) == lang) {
+        if (t.language != _selectedLanguage) _selectLanguage(t.language);
+        break;
+      }
+    }
+    if (_selectedSubtitle != null) {
+      for (final st in _subtitleTracks) {
+        if (st.language.replaceAll(' ', '_') == lang ||
+            _extractSimpleLanguage(st.language) == lang) {
+          _onSubtitleChanged(st.language);
+          break;
+        }
+      }
+    }
+  }
+
+  String _fmt(Duration d) {
+    final h = d.inHours, m = d.inMinutes % 60, s = d.inSeconds % 60;
+    String two(int n) => n.toString().padLeft(2, '0');
+    return h > 0 ? '$h:${two(m)}:${two(s)}' : '${two(m)}:${two(s)}';
+  }
+
+  /// Position / length of the selected spoken translation, with a slider
+  /// to jump. Moves the video/recording along so both stay in sync.
+  Widget _buildTtsBar() {
+    final video = _videoController;
+    final hasVideo = video != null && video.value.isInitialized;
+    final maxMs = _ttsDuration.inMilliseconds.toDouble();
+    final posMs =
+        _ttsPosition.inMilliseconds.toDouble().clamp(0.0, maxMs > 0 ? maxMs : 0.0);
+    final playing = hasVideo ? video.value.isPlaying : _ttsPlaying;
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(4, 0, 4, 4),
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      decoration: BoxDecoration(
+        color: Colors.blue.shade50,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.blue.shade100),
+      ),
+      child: Row(
+        children: [
+          IconButton(
+            tooltip: playing ? 'Pause' : 'Play',
+            visualDensity: VisualDensity.compact,
+            icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+            onPressed: () async {
+              if (hasVideo) {
+                _togglePlayPause();
+              } else if (_ttsPlaying) {
+                await _ttsPlayer.pause();
+              } else {
+                await _ttsPlayer.resume();
+              }
+            },
+          ),
+          Icon(Icons.graphic_eq, size: 16, color: Colors.blue.shade700),
+          const SizedBox(width: 4),
+          Text(
+            _selectedTts ?? '',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: Colors.blue.shade900,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(_fmt(Duration(milliseconds: posMs.round())),
+              style: const TextStyle(
+                  fontSize: 12, fontFeatures: [FontFeature.tabularFigures()])),
+          Expanded(
+            child: Slider(
+              value: posMs,
+              max: maxMs > 0 ? maxMs : 1,
+              onChangeStart: maxMs > 0 ? (_) => _ttsDragging = true : null,
+              onChanged: maxMs > 0
+                  ? (v) => setState(
+                      () => _ttsPosition = Duration(milliseconds: v.round()))
+                  : null,
+              onChangeEnd: maxMs > 0
+                  ? (v) async {
+                      _ttsDragging = false;
+                      final secs = v / 1000.0;
+                      if (hasVideo) {
+                        _seekTo(secs); // moves video and TTS together
+                      } else {
+                        await _ttsPlayer
+                            .seek(Duration(milliseconds: v.round()));
+                        _highlightAt(secs);
+                      }
+                    }
+                  : null,
+            ),
+          ),
+          Text(
+            maxMs > 0 ? _fmt(_ttsDuration) : '--:--',
+            style: const TextStyle(
+                fontSize: 12, fontFeatures: [FontFeature.tabularFigures()]),
+          ),
+          const SizedBox(width: 4),
+        ],
+      ),
+    );
   }
 
   /// Extract language name from filename.
@@ -971,9 +1120,11 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       return;
     }
 
-    final currentTime =
-        _videoController!.value.position.inMilliseconds / 1000.0;
+    _highlightAt(_videoController!.value.position.inMilliseconds / 1000.0);
+  }
 
+  /// Highlight the segment of the shown transcript at [currentTime].
+  void _highlightAt(double currentTime) {
     final transcript = _transcripts.firstWhere(
       (t) => t.language == _selectedLanguage,
       orElse: () => _transcripts.isNotEmpty
@@ -1206,6 +1357,11 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   /// Entry point for the TTS dropdown. Dispatches to the selected
   /// implementation so both remain available and neither is dead code.
   Future<void> _applyTTSSource(String? label) {
+    setState(() {
+      _ttsPosition = Duration.zero;
+      _ttsDuration = Duration.zero;
+    });
+    if (label != null) _showTextForAudio(label);
     switch (_ttsPath) {
       case TtsPath.stream:
         return _applyTTSSourceStreaming(label);
@@ -1997,6 +2153,12 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                               ],
                             ),
                     ),
+
+                    // Spoken translation: position / length slider
+                    if (_selectedTts != null &&
+                        !_isEditingMode &&
+                        _view != SessionView.split)
+                      _buildTtsBar(),
 
                     // Transcript view
                     Expanded(

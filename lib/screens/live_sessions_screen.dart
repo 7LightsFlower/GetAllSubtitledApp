@@ -7,7 +7,10 @@
 //                                         └──► finished session (read-only)
 //
 // Lists the user's finished live sessions saved on the backend
-// (/api/live/saved), newest first.
+// (/api/live/saved), newest first. Sessions can be sorted into the same
+// folders as the videos on the working screen (/api/folders).
+
+import 'dart:convert';
 
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/models/language_config.dart';
@@ -19,6 +22,8 @@ import 'package:asr_live_translator/services/server_config_service.dart';
 import 'package:asr_live_translator/services/ui_mode.dart';
 import 'package:flutter/material.dart';
 import 'package:asr_live_translator/widgets/server_connection_panel.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 class LiveSessionsScreen extends StatefulWidget {
   const LiveSessionsScreen({super.key});
@@ -37,6 +42,13 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
   String? _error;
   bool _needsConnect = false;
   String _search = '';
+
+  // ─── Folders (shared with the video list) ───
+  static const String _unsortedFilter = '\u0000unsorted';
+  static const String _folderFilterPref = 'live_folder_filter';
+  List<String> _folders = [];
+  String? _folderFilter; // null = all, _unsortedFilter, or a folder name
+  String? _dropHover;
 
   @override
   void initState() {
@@ -65,6 +77,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
   }
 
   Future<void> _load() async {
+    _fetchFolders();
     setState(() {
       _loading = true;
       _error = null;
@@ -161,6 +174,348 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
     }
   }
 
+  // ─── folders ─────────────────────────────────────────────────────
+  void _snack(String text, {bool error = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(text),
+      backgroundColor: error ? Colors.red : null,
+    ));
+  }
+
+  String _apiError(http.Response r) {
+    try {
+      final b = jsonDecode(r.body);
+      if (b is Map && b['error'] != null) return b['error'].toString();
+    } catch (_) {}
+    return 'HTTP ${r.statusCode}';
+  }
+
+  Future<void> _fetchFolders() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getString(_folderFilterPref);
+      final resp = await http
+          .get(Uri.parse('$authBaseUrl/api/folders'))
+          .timeout(const Duration(seconds: 10));
+      if (resp.statusCode != 200 || !mounted) return;
+      final list = ((jsonDecode(resp.body) as Map)['folders'] as List? ?? [])
+          .map((e) => e.toString())
+          .toList();
+      setState(() {
+        _folders = list;
+        if (_folderFilter == null && saved != null && saved.isNotEmpty) {
+          _folderFilter = saved;
+        }
+        if (_folderFilter != null &&
+            _folderFilter != _unsortedFilter &&
+            !_folders.contains(_folderFilter)) {
+          _folderFilter = null;
+        }
+      });
+    } catch (e) {
+      debugPrint('loading folders failed: $e');
+    }
+  }
+
+  Future<void> _setFolderFilter(String? value) async {
+    setState(() => _folderFilter = value);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (value == null) {
+        await prefs.remove(_folderFilterPref);
+      } else {
+        await prefs.setString(_folderFilterPref, value);
+      }
+    } catch (_) {}
+  }
+
+  Future<String?> _askFolderName(
+      {String title = 'New folder', String initial = ''}) {
+    final controller = TextEditingController(text: initial);
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 80,
+          decoration: const InputDecoration(
+            labelText: 'Folder name',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    // Controller left to the GC (disposing races the closing animation).
+  }
+
+  /// Creates [name] on the backend. true if it exists afterwards.
+  Future<bool> _ensureFolder(String name) async {
+    if (_folders.contains(name)) return true;
+    try {
+      final r = await http.post(
+        Uri.parse('$authBaseUrl/api/folders'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'name': name}),
+      );
+      if (r.statusCode == 201 || r.statusCode == 409) {
+        await _fetchFolders();
+        return true;
+      }
+      _snack(_apiError(r), error: true);
+    } catch (e) {
+      _snack('Could not create folder: $e', error: true);
+    }
+    return false;
+  }
+
+  Future<void> _createFolder() async {
+    final name = await _askFolderName();
+    if (name == null || name.isEmpty) return;
+    if (await _ensureFolder(name)) _setFolderFilter(name);
+  }
+
+  Future<void> _renameFolder(String oldName) async {
+    final name =
+        await _askFolderName(title: 'Rename folder', initial: oldName);
+    if (name == null || name.isEmpty || name == oldName) return;
+    try {
+      final r = await http.put(
+        Uri.parse('$authBaseUrl/api/folders'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'old': oldName, 'new': name}),
+      );
+      if (r.statusCode != 200) {
+        _snack(_apiError(r), error: true);
+        return;
+      }
+      setState(() {
+        for (final s in _sessions) {
+          if (s.folder == oldName) s.folder = name;
+        }
+      });
+      await _fetchFolders();
+      _setFolderFilter(name);
+    } catch (e) {
+      _snack('Could not rename folder: $e', error: true);
+    }
+  }
+
+  Future<void> _deleteFolder(String name) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete folder?'),
+        content: Text('Nothing inside "$name" is deleted — its live sessions '
+            'and videos move to "Unsorted".'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete folder'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      final r = await http.delete(Uri.parse(
+          '$authBaseUrl/api/folders?name=${Uri.encodeQueryComponent(name)}'));
+      if (r.statusCode != 200) {
+        _snack(_apiError(r), error: true);
+        return;
+      }
+      setState(() {
+        for (final s in _sessions) {
+          if (s.folder == name) s.folder = null;
+        }
+      });
+      await _fetchFolders();
+      _setFolderFilter(null);
+    } catch (e) {
+      _snack('Could not delete folder: $e', error: true);
+    }
+  }
+
+  Future<void> _moveToFolder(LiveSessionSummary s, String? folder) async {
+    if (s.folder == folder) return;
+    if (folder != null && !await _ensureFolder(folder)) return;
+    final before = s.folder;
+    setState(() => s.folder = folder); // immediate
+    try {
+      await LiveSessionsApi.moveToFolder(s.id, folder);
+      _snack(folder == null
+          ? '"${s.name}" moved to Unsorted'
+          : '"${s.name}" moved to "$folder"');
+    } catch (e) {
+      if (mounted) setState(() => s.folder = before);
+      _snack('Could not move session: $e', error: true);
+    }
+  }
+
+  Future<void> _pickFolderFor(LiveSessionSummary s) async {
+    const newFolder = '\u0000new';
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: Text('Move "${s.name}" to'),
+        children: [
+          for (final f in _folders)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, f),
+              child: Row(children: [
+                Icon(s.folder == f ? Icons.folder : Icons.folder_outlined,
+                    size: 20, color: Colors.amber.shade800),
+                const SizedBox(width: 10),
+                Expanded(child: Text(f, overflow: TextOverflow.ellipsis)),
+                if (s.folder == f) const Icon(Icons.check, size: 18),
+              ]),
+            ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, _unsortedFilter),
+            child: Row(children: [
+              const Icon(Icons.inbox_outlined, size: 20),
+              const SizedBox(width: 10),
+              const Expanded(child: Text('Unsorted (no folder)')),
+              if (s.folder == null) const Icon(Icons.check, size: 18),
+            ]),
+          ),
+          const Divider(),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, newFolder),
+            child: const Row(children: [
+              Icon(Icons.create_new_folder_outlined,
+                  size: 20, color: Colors.blue),
+              SizedBox(width: 10),
+              Text('New folder…', style: TextStyle(color: Colors.blue)),
+            ]),
+          ),
+        ],
+      ),
+    );
+    if (choice == null) return;
+    if (choice == newFolder) {
+      final name = await _askFolderName();
+      if (name == null || name.isEmpty) return;
+      await _moveToFolder(s, name);
+      return;
+    }
+    await _moveToFolder(s, choice == _unsortedFilter ? null : choice);
+  }
+
+  /// "All · Unsorted · folders…" chips. Folder chips accept dragged
+  /// session cards (wide screens).
+  Widget _buildFolderBar() {
+    Widget chip({
+      required String label,
+      required int count,
+      required bool selected,
+      required IconData icon,
+      required VoidCallback onTap,
+      String? dropKey,
+    }) {
+      Widget c(bool hover) => ChoiceChip(
+            avatar: Icon(icon,
+                size: 18,
+                color: hover ? Colors.white : Colors.amber.shade800),
+            label: Text('$label · $count'),
+            selected: selected || hover,
+            selectedColor: hover ? Colors.blue : null,
+            labelStyle: hover ? const TextStyle(color: Colors.white) : null,
+            onSelected: (_) => onTap(),
+            visualDensity: VisualDensity.compact,
+          );
+      if (dropKey == null) return c(false);
+      return DragTarget<String>(
+        onWillAcceptWithDetails: (_) {
+          setState(() => _dropHover = dropKey);
+          return true;
+        },
+        onLeave: (_) => setState(() => _dropHover = null),
+        onAcceptWithDetails: (d) {
+          setState(() => _dropHover = null);
+          final s = _sessions.where((x) => x.id == d.data).firstOrNull;
+          if (s != null) {
+            _moveToFolder(s, dropKey == _unsortedFilter ? null : dropKey);
+          }
+        },
+        builder: (_, __, ___) => c(_dropHover == dropKey),
+      );
+    }
+
+    final selectedFolder =
+        (_folderFilter != null && _folderFilter != _unsortedFilter)
+            ? _folderFilter
+            : null;
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 4,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        chip(
+          label: 'All sessions',
+          count: _sessions.length,
+          selected: _folderFilter == null,
+          icon: Icons.mic_none,
+          onTap: () => _setFolderFilter(null),
+        ),
+        chip(
+          label: 'Unsorted',
+          count: _sessions.where((s) => s.folder == null).length,
+          selected: _folderFilter == _unsortedFilter,
+          icon: Icons.inbox_outlined,
+          onTap: () => _setFolderFilter(_unsortedFilter),
+          dropKey: _unsortedFilter,
+        ),
+        for (final f in _folders)
+          chip(
+            label: f,
+            count: _sessions.where((s) => s.folder == f).length,
+            selected: _folderFilter == f,
+            icon: _folderFilter == f ? Icons.folder : Icons.folder_outlined,
+            onTap: () => _setFolderFilter(f),
+            dropKey: f,
+          ),
+        ActionChip(
+          avatar: const Icon(Icons.create_new_folder_outlined, size: 18),
+          label: const Text('New folder'),
+          onPressed: _createFolder,
+          visualDensity: VisualDensity.compact,
+        ),
+        if (selectedFolder != null) ...[
+          TextButton.icon(
+            onPressed: () => _renameFolder(selectedFolder),
+            icon: const Icon(Icons.edit_outlined, size: 16),
+            label: const Text('Rename'),
+          ),
+          TextButton.icon(
+            onPressed: () => _deleteFolder(selectedFolder),
+            icon: const Icon(Icons.delete_outline, size: 16),
+            label: const Text('Delete folder'),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+          ),
+        ],
+      ],
+    );
+  }
+
   // ═══════════════════════════════════════════════════════════════════
   //  UI
   // ═══════════════════════════════════════════════════════════════════
@@ -168,9 +523,16 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
   Widget build(BuildContext context) {
     final pad = _pad(context);
     final q = _search.trim().toLowerCase();
-    final visible = q.isEmpty
+    final inFolder = _folderFilter == null
         ? _sessions
         : _sessions
+            .where((s) => _folderFilter == _unsortedFilter
+                ? s.folder == null
+                : s.folder == _folderFilter)
+            .toList();
+    final visible = q.isEmpty
+        ? inFolder
+        : inFolder
             .where((s) =>
                 s.name.toLowerCase().contains(q) ||
                 s.preview.toLowerCase().contains(q))
@@ -204,6 +566,11 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
               padding: EdgeInsets.fromLTRB(pad, pad, pad, 8),
               sliver: SliverToBoxAdapter(child: _buildHeader(context)),
             ),
+            if (!_loading && !_needsConnect && _error == null)
+              SliverPadding(
+                padding: EdgeInsets.fromLTRB(pad, 0, pad, 12),
+                sliver: SliverToBoxAdapter(child: _buildFolderBar()),
+              ),
             if (_loading)
               const SliverFillRemaining(
                 hasScrollBody: false,
@@ -241,11 +608,18 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
             else if (visible.isEmpty)
               SliverFillRemaining(
                 hasScrollBody: false,
-                child: _buildMessage(
-                  icon: Icons.search_off,
-                  title: 'No matches',
-                  text: 'No live session matches "$_search".',
-                ),
+                child: q.isEmpty
+                    ? _buildMessage(
+                        icon: Icons.folder_open,
+                        title: 'This folder is empty',
+                        text: 'Move live sessions here with the folder button '
+                            'on a session, or drag a session onto the folder.',
+                      )
+                    : _buildMessage(
+                        icon: Icons.search_off,
+                        title: 'No matches',
+                        text: 'No live session matches "$_search".',
+                      ),
               )
             else
               SliverPadding(
@@ -320,7 +694,38 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
     );
   }
 
+  /// Card, draggable onto a folder chip on wide screens (on phones a
+  /// drag would fight the list scrolling — use the folder button there).
   Widget _buildSessionCard(LiveSessionSummary s) {
+    final card = _buildSessionCardBody(s);
+    if (_isNarrow(context)) return card;
+    return Draggable<String>(
+      data: s.id,
+      dragAnchorStrategy: pointerDragAnchorStrategy,
+      feedback: Material(
+        elevation: 6,
+        borderRadius: BorderRadius.circular(8),
+        color: Colors.blue.shade700,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            const Icon(Icons.record_voice_over, color: Colors.white, size: 18),
+            const SizedBox(width: 8),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 260),
+              child: Text(s.name,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Colors.white)),
+            ),
+          ]),
+        ),
+      ),
+      childWhenDragging: Opacity(opacity: 0.4, child: card),
+      child: card,
+    );
+  }
+
+  Widget _buildSessionCardBody(LiveSessionSummary s) {
     final langs = <String>[
       ...s.inputLanguages.map(LanguageConfig.getDisplayName),
     ].join(', ');
@@ -359,6 +764,8 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
                       spacing: 12,
                       runSpacing: 2,
                       children: [
+                        if (s.folder != null && _folderFilter == null)
+                          _meta(Icons.folder_outlined, s.folder!),
                         _meta(Icons.event, formatDateTime(s.createdAt)),
                         _meta(Icons.timer_outlined, formatDuration(s.duration)),
                         if (UiMode.isExpert)
@@ -384,6 +791,16 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
                     ],
                   ],
                 ),
+              ),
+              IconButton(
+                tooltip: s.folder == null
+                    ? 'Move to folder'
+                    : 'Folder: ${s.folder} — move',
+                icon: Icon(
+                  s.folder == null ? Icons.drive_file_move_outline : Icons.folder,
+                  color: Colors.amber.shade800,
+                ),
+                onPressed: () => _pickFolderFor(s),
               ),
               IconButton(
                 tooltip: 'Delete',

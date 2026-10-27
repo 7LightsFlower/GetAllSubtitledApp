@@ -1,6 +1,7 @@
 // working_screen.dart
 import 'dart:async';
 
+import 'dart:js_interop';
 import 'package:web/web.dart' as web;
 
 import 'package:asr_live_translator/constants.dart';
@@ -62,6 +63,10 @@ class VideoProject {
   final int greenscreenProgress;    // 0..100
   final String source;
 
+  /// Folder on the working screen (null = unsorted). Mutable so a move
+  /// can update the card immediately.
+  String? folder;
+
   VideoProject({
     required this.key,
     required this.name,
@@ -81,6 +86,7 @@ class VideoProject {
     required this.greenscreenStatus,
     required this.greenscreenProgress,
     required this.source,
+    this.folder,
   });
 
   factory VideoProject.fromJson(Map<String, dynamic> json) {
@@ -109,6 +115,9 @@ class VideoProject {
           json['greenscreen_status'] as String? ?? 'pending',
       greenscreenProgress: json['greenscreen_progress'] as int? ?? 0,
       source: json['source'] as String? ?? 'Desktop Upload',
+      folder: (json['folder'] as String?)?.trim().isEmpty ?? true
+          ? null
+          : (json['folder'] as String).trim(),
     );
   }
 }
@@ -156,6 +165,7 @@ class _WorkingScreenState extends State<WorkingScreen>
   @override
   void initState() {
     super.initState();
+    _registerDropZone();
     _updateWorkingScreenUrl();
     _fetchProjects();
     // Re-run once the token is known, in case the first call raced
@@ -165,8 +175,540 @@ class _WorkingScreenState extends State<WorkingScreen>
     });
   }
 
+  @override
+  void dispose() {
+    _unregisterDropZone();
+    super.dispose();
+  }
+
+  // ─── Drag & drop upload (from Windows Explorer / Finder) ────────
+  // Uses the browser's own drag events on the whole page. A dropped
+  // video goes through the same chunked upload as "From this device".
+  static const _videoExtensions = {
+    'mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v', 'mpg', 'mpeg', 'wmv', 'flv',
+    '3gp', 'ts', 'mts', 'm2ts', 'ogv',
+  };
+  int _dragDepth = 0; // dragenter/dragleave fire for every child element
+  bool _isDraggingFile = false;
+  bool _dropBusy = false;
+  JSFunction? _onDragEnter, _onDragOver, _onDragLeave, _onDrop;
+
+  bool _hasFiles(web.DragEvent e) {
+    final types = e.dataTransfer?.types.toDart ?? const <JSString>[];
+    return types.any((t) => t.toDart == 'Files');
+  }
+
+  /// Only the visible page reacts; a pushed screen on top stays untouched.
+  bool get _isTopRoute => mounted && (ModalRoute.of(context)?.isCurrent ?? false);
+
+  void _registerDropZone() {
+    _onDragEnter = ((web.DragEvent e) {
+      if (!_hasFiles(e)) return;
+      e.preventDefault();
+      _dragDepth++;
+      if (_isTopRoute && !_isDraggingFile) setState(() => _isDraggingFile = true);
+    }).toJS;
+    _onDragOver = ((web.DragEvent e) {
+      if (!_hasFiles(e)) return;
+      // Without preventDefault the browser would open the file itself.
+      e.preventDefault();
+      e.dataTransfer?.dropEffect = _isTopRoute ? 'copy' : 'none';
+    }).toJS;
+    _onDragLeave = ((web.DragEvent e) {
+      if (!_hasFiles(e)) return;
+      if (_dragDepth > 0) _dragDepth--;
+      if (_dragDepth == 0 && _isDraggingFile && mounted) {
+        setState(() => _isDraggingFile = false);
+      }
+    }).toJS;
+    _onDrop = ((web.DragEvent e) {
+      if (!_hasFiles(e)) return;
+      e.preventDefault();
+      _dragDepth = 0;
+      if (mounted && _isDraggingFile) setState(() => _isDraggingFile = false);
+      if (!_isTopRoute) return;
+      final list = e.dataTransfer?.files;
+      if (list == null) return;
+      final files = <web.File>[
+        for (var i = 0; i < list.length; i++)
+          if (list.item(i) != null) list.item(i)!,
+      ];
+      _uploadDroppedFiles(files);
+    }).toJS;
+
+    web.document
+      ..addEventListener('dragenter', _onDragEnter)
+      ..addEventListener('dragover', _onDragOver)
+      ..addEventListener('dragleave', _onDragLeave)
+      ..addEventListener('drop', _onDrop);
+  }
+
+  void _unregisterDropZone() {
+    web.document
+      ..removeEventListener('dragenter', _onDragEnter)
+      ..removeEventListener('dragover', _onDragOver)
+      ..removeEventListener('dragleave', _onDragLeave)
+      ..removeEventListener('drop', _onDrop);
+  }
+
+  bool _looksLikeVideo(web.File f) {
+    if (f.type.startsWith('video/')) return true;
+    final dot = f.name.lastIndexOf('.');
+    return dot > 0 && _videoExtensions.contains(f.name.substring(dot + 1).toLowerCase());
+  }
+
+  Future<void> _uploadDroppedFiles(List<web.File> files) async {
+    if (_dropBusy) {
+      _showSnackBar('Please wait until the current upload has finished.',
+          isError: true);
+      return;
+    }
+    final videos = files.where(_looksLikeVideo).toList();
+    final skipped = files.length - videos.length;
+    if (videos.isEmpty) {
+      _showSnackBar(
+        files.length == 1
+            ? '"${files.first.name}" is not a video file.'
+            : 'None of the dropped files is a video.',
+        isError: true,
+      );
+      return;
+    }
+    if (skipped > 0) {
+      _showSnackBar('$skipped non-video file(s) skipped.', isError: true);
+    }
+
+    _dropBusy = true;
+    try {
+      // One after another, each with the usual upload dialog.
+      for (final f in videos) {
+        if (!mounted) return;
+        final buffer = await f.arrayBuffer().toDart;
+        final bytes = buffer.toDart.asUint8List();
+        if (!mounted) return;
+        await showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (ctx) => _UploadDialog(
+            bytes: bytes,
+            fileName: f.name,
+            mode: UploadMode.chunked,
+            onUploadComplete: _fetchProjects,
+          ),
+        );
+      }
+    } catch (e) {
+      _showSnackBar('Could not read the dropped file: $e', isError: true);
+    } finally {
+      _dropBusy = false;
+    }
+  }
+
+  /// Page body with the "drop video here" overlay while dragging a file.
+  Widget _withDropZone(Widget child) {
+    return Stack(
+      children: [
+        child,
+        if (_isDraggingFile)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: Container(
+                margin: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.blue.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.blue.shade400, width: 3),
+                ),
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 28, vertical: 20),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(14),
+                      boxShadow: const [
+                        BoxShadow(blurRadius: 16, color: Colors.black26),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.file_upload_outlined,
+                            size: 48, color: Colors.blue.shade600),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Drop video to upload',
+                          style: TextStyle(
+                              fontSize: 18, fontWeight: FontWeight.w600),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'MP4, MOV, MKV, WebM, AVI … — several at once is fine',
+                          style: TextStyle(
+                              fontSize: 12, color: Colors.grey.shade600),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  // ─── Folders ────────────────────────────────────────────────
+  // One level of folders, stored on the backend (/api/folders). The bar
+  // above the grid filters by folder; cards are moved by dragging them
+  // onto a folder, or with the folder button / long-press menu.
+  static const String _unsortedFilter = '\u0000unsorted';
+  static const String _folderFilterPref = 'working_folder_filter';
+  List<String> _folders = [];
+  String? _folderFilter; // null = all videos, _unsortedFilter, or a name
+  String? _dropHover;    // folder chip currently under a dragged card
+
+  Future<void> _fetchFolders() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getString(_folderFilterPref);
+      final resp = await http
+          .get(Uri.parse('$authBaseUrl/api/folders'))
+          .timeout(const Duration(seconds: 10));
+      if (resp.statusCode != 200 || !mounted) return;
+      final list = ((jsonDecode(resp.body) as Map)['folders'] as List? ?? [])
+          .map((e) => e.toString())
+          .toList();
+      setState(() {
+        _folders = list;
+        if (_folderFilter == null && saved != null && saved.isNotEmpty) {
+          _folderFilter = saved;
+        }
+        if (_folderFilter != null &&
+            _folderFilter != _unsortedFilter &&
+            !_folders.contains(_folderFilter)) {
+          _folderFilter = null;
+        }
+      });
+    } catch (e) {
+      debugPrint('loading folders failed: $e');
+    }
+  }
+
+  Future<void> _setFolderFilter(String? value) async {
+    setState(() => _folderFilter = value);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (value == null) {
+        await prefs.remove(_folderFilterPref);
+      } else {
+        await prefs.setString(_folderFilterPref, value);
+      }
+    } catch (_) {}
+  }
+
+  Future<String?> _askFolderName({String title = 'New folder', String initial = ''}) {
+    final controller = TextEditingController(text: initial);
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 80,
+          decoration: const InputDecoration(
+            labelText: 'Folder name',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    // The controller is left to the GC: disposing it here would race the
+    // dialog's closing animation, which still reads it.
+  }
+
+  String _apiError(http.Response r) {
+    try {
+      final b = jsonDecode(r.body);
+      if (b is Map && b['error'] != null) return b['error'].toString();
+    } catch (_) {}
+    return 'HTTP ${r.statusCode}';
+  }
+
+  Future<void> _createFolder() async {
+    final name = await _askFolderName();
+    if (name == null || name.isEmpty) return;
+    try {
+      final r = await http.post(
+        Uri.parse('$authBaseUrl/api/folders'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'name': name}),
+      );
+      if (r.statusCode == 201) {
+        await _fetchFolders();
+        _setFolderFilter(name);
+      } else {
+        _showSnackBar(_apiError(r), isError: true);
+      }
+    } catch (e) {
+      _showSnackBar('Could not create folder: $e', isError: true);
+    }
+  }
+
+  Future<void> _renameFolder(String oldName) async {
+    final name = await _askFolderName(title: 'Rename folder', initial: oldName);
+    if (name == null || name.isEmpty || name == oldName) return;
+    try {
+      final r = await http.put(
+        Uri.parse('$authBaseUrl/api/folders'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'old': oldName, 'new': name}),
+      );
+      if (r.statusCode != 200) {
+        _showSnackBar(_apiError(r), isError: true);
+        return;
+      }
+      setState(() {
+        for (final p in _projects) {
+          if (p.folder == oldName) p.folder = name;
+        }
+      });
+      await _fetchFolders();
+      _setFolderFilter(name);
+    } catch (e) {
+      _showSnackBar('Could not rename folder: $e', isError: true);
+    }
+  }
+
+  Future<void> _deleteFolder(String name) async {
+    final count = _projects.where((p) => p.folder == name).length;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete folder?'),
+        content: Text(count == 0
+            ? 'The folder "$name" is empty.'
+            : 'The $count video(s) in "$name" are not deleted — they move '
+                'to "Unsorted".'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete folder'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      final r = await http.delete(
+          Uri.parse('$authBaseUrl/api/folders?name=${Uri.encodeQueryComponent(name)}'));
+      if (r.statusCode != 200) {
+        _showSnackBar(_apiError(r), isError: true);
+        return;
+      }
+      setState(() {
+        for (final p in _projects) {
+          if (p.folder == name) p.folder = null;
+        }
+      });
+      await _fetchFolders();
+      _setFolderFilter(null);
+    } catch (e) {
+      _showSnackBar('Could not delete folder: $e', isError: true);
+    }
+  }
+
+  Future<void> _moveToFolder(VideoProject project, String? folder) async {
+    if (project.folder == folder) return;
+    final before = project.folder;
+    setState(() => project.folder = folder); // immediate
+    try {
+      final r = await http.post(
+        Uri.parse('$authBaseUrl/api/videos/${Uri.encodeComponent(project.key)}/folder'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'folder': folder}),
+      );
+      if (r.statusCode != 200) {
+        setState(() => project.folder = before);
+        _showSnackBar(_apiError(r), isError: true);
+        return;
+      }
+      if (folder != null && !_folders.contains(folder)) await _fetchFolders();
+      _showSnackBar(folder == null
+          ? '"${project.name}" moved to Unsorted'
+          : '"${project.name}" moved to "$folder"');
+    } catch (e) {
+      setState(() => project.folder = before);
+      _showSnackBar('Could not move video: $e', isError: true);
+    }
+  }
+
+  Future<void> _pickFolderFor(VideoProject project) async {
+    const newFolder = '\u0000new';
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: Text('Move "${project.name}" to'),
+        children: [
+          for (final f in _folders)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, f),
+              child: Row(children: [
+                Icon(project.folder == f ? Icons.folder : Icons.folder_outlined,
+                    size: 20, color: Colors.amber.shade800),
+                const SizedBox(width: 10),
+                Expanded(child: Text(f, overflow: TextOverflow.ellipsis)),
+                if (project.folder == f) const Icon(Icons.check, size: 18),
+              ]),
+            ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, _unsortedFilter),
+            child: Row(children: [
+              const Icon(Icons.inbox_outlined, size: 20),
+              const SizedBox(width: 10),
+              const Expanded(child: Text('Unsorted (no folder)')),
+              if (project.folder == null) const Icon(Icons.check, size: 18),
+            ]),
+          ),
+          const Divider(),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, newFolder),
+            child: const Row(children: [
+              Icon(Icons.create_new_folder_outlined, size: 20, color: Colors.blue),
+              SizedBox(width: 10),
+              Text('New folder…', style: TextStyle(color: Colors.blue)),
+            ]),
+          ),
+        ],
+      ),
+    );
+    if (choice == null) return;
+    if (choice == newFolder) {
+      final name = await _askFolderName();
+      if (name == null || name.isEmpty) return;
+      await _moveToFolder(project, name);
+      return;
+    }
+    await _moveToFolder(project, choice == _unsortedFilter ? null : choice);
+  }
+
+  /// "All videos · Unsorted · folders…" bar. Folder chips accept dragged
+  /// video cards.
+  Widget _buildFolderBar(Responsive r) {
+    final unsortedCount = _projects.where((p) => p.folder == null).length;
+
+    Widget chip({
+      required String label,
+      required int count,
+      required bool selected,
+      required IconData icon,
+      required VoidCallback onTap,
+      String? dropKey, // folder name, _unsortedFilter, or null = no drop
+    }) {
+      Widget c(bool hover) => ChoiceChip(
+            avatar: Icon(icon,
+                size: 18,
+                color: hover ? Colors.white : Colors.amber.shade800),
+            label: Text('$label · $count'),
+            selected: selected || hover,
+            selectedColor: hover ? Colors.blue : null,
+            labelStyle: hover ? const TextStyle(color: Colors.white) : null,
+            onSelected: (_) => onTap(),
+            visualDensity: VisualDensity.compact,
+          );
+      if (dropKey == null) return c(false);
+      return DragTarget<String>(
+        onWillAcceptWithDetails: (_) {
+          setState(() => _dropHover = dropKey);
+          return true;
+        },
+        onLeave: (_) => setState(() => _dropHover = null),
+        onAcceptWithDetails: (d) {
+          setState(() => _dropHover = null);
+          final project = _projects.where((p) => p.key == d.data).firstOrNull;
+          if (project != null) {
+            _moveToFolder(project, dropKey == _unsortedFilter ? null : dropKey);
+          }
+        },
+        builder: (_, __, ___) => c(_dropHover == dropKey),
+      );
+    }
+
+    final selectedFolder = (_folderFilter != null && _folderFilter != _unsortedFilter)
+        ? _folderFilter
+        : null;
+
+    return Wrap(
+      spacing: r.spaceS,
+      runSpacing: r.spaceXS,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        chip(
+          label: 'All videos',
+          count: _projects.length,
+          selected: _folderFilter == null,
+          icon: Icons.video_library_outlined,
+          onTap: () => _setFolderFilter(null),
+        ),
+        chip(
+          label: 'Unsorted',
+          count: unsortedCount,
+          selected: _folderFilter == _unsortedFilter,
+          icon: Icons.inbox_outlined,
+          onTap: () => _setFolderFilter(_unsortedFilter),
+          dropKey: _unsortedFilter,
+        ),
+        for (final f in _folders)
+          chip(
+            label: f,
+            count: _projects.where((p) => p.folder == f).length,
+            selected: _folderFilter == f,
+            icon: _folderFilter == f ? Icons.folder : Icons.folder_outlined,
+            onTap: () => _setFolderFilter(f),
+            dropKey: f,
+          ),
+        ActionChip(
+          avatar: const Icon(Icons.create_new_folder_outlined, size: 18),
+          label: const Text('New folder'),
+          onPressed: _createFolder,
+          visualDensity: VisualDensity.compact,
+        ),
+        if (selectedFolder != null) ...[
+          TextButton.icon(
+            onPressed: () => _renameFolder(selectedFolder),
+            icon: const Icon(Icons.edit_outlined, size: 16),
+            label: const Text('Rename'),
+          ),
+          TextButton.icon(
+            onPressed: () => _deleteFolder(selectedFolder),
+            icon: const Icon(Icons.delete_outline, size: 16),
+            label: const Text('Delete folder'),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+          ),
+        ],
+      ],
+    );
+  }
+
   Future<void> _fetchProjects() async {
     if (!mounted) return;
+    _fetchFolders();
     setState(() {
       _isLoading = true;
       _listError = null;
@@ -856,6 +1398,16 @@ class _WorkingScreenState extends State<WorkingScreen>
               },
             ),
             ListTile(
+              leading: const Icon(Icons.drive_file_move_outlined),
+              title: Text(project.folder == null
+                  ? 'Move to folder'
+                  : 'Move to folder (now: ${project.folder})'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _pickFolderFor(project);
+              },
+            ),
+            ListTile(
               leading: const Icon(Icons.drive_file_rename_outline),
               title: const Text('Rename Project'),
               onTap: () {
@@ -1180,6 +1732,7 @@ class _WorkingScreenState extends State<WorkingScreen>
       greenscreenStatus: p.greenscreenStatus,
       greenscreenProgress: p.greenscreenProgress,
       source: source,
+      folder: p.folder,
     );
   }
 
@@ -1325,7 +1878,7 @@ class _WorkingScreenState extends State<WorkingScreen>
           ),
         ],
       ),
-      body: CustomScrollView(
+      body: _withDropZone(CustomScrollView(
               // Connection panel, header, storage bar and grid all live
               // in one scroll view. On a tall window everything fits and
               // no scrollbar appears; on a short window the top parts
@@ -1351,6 +1904,15 @@ class _WorkingScreenState extends State<WorkingScreen>
                   child: Padding(
                     padding: EdgeInsets.all(r.spaceL),
                     child: _buildHeaderRow(r),
+                  ),
+                ),
+
+                // ─── Folders ──────────────────────────────────────
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(
+                        r.spaceL, 0, r.spaceL, r.spaceS),
+                    child: _buildFolderBar(r),
                   ),
                 ),
 
@@ -1414,7 +1976,7 @@ class _WorkingScreenState extends State<WorkingScreen>
                 ),
                 ],
               ],
-            ),
+            )),
     );
   }
   /// Search field, sort dropdown and upload button. Wraps to two lines
@@ -1633,6 +2195,12 @@ class _WorkingScreenState extends State<WorkingScreen>
 
     // ── Filter + sort ────────────────────────────────────────────
     final filtered = _projects.where((p) {
+      if (_folderFilter == _unsortedFilter && p.folder != null) return false;
+      if (_folderFilter != null &&
+          _folderFilter != _unsortedFilter &&
+          p.folder != _folderFilter) {
+        return false;
+      }
       final q = _searchQuery.toLowerCase();
       return p.name.toLowerCase().contains(q) ||
           p.fileName.toLowerCase().contains(q);
@@ -1672,7 +2240,7 @@ class _WorkingScreenState extends State<WorkingScreen>
                 Text('No projects found',
                     style: TextStyle(fontSize: r.fontSubtitle)),
                 Text(
-                  'Upload a video to get started.',
+                  'Upload a video or drag one onto this window to get started.',
                   style: TextStyle(fontSize: r.fontBody, color: Colors.grey),
                 ),
               ],
@@ -1716,7 +2284,41 @@ class _WorkingScreenState extends State<WorkingScreen>
     );
   }
 
+  /// Card that can be dragged onto a folder chip (mouse / wide screens;
+  /// on phones dragging would fight with scrolling, so the folder button
+  /// and long-press menu are used there).
   Widget _buildCard(VideoProject project) {
+    final card = _buildCardBody(project);
+    if (MediaQuery.sizeOf(context).width < 600) return card;
+    return Draggable<String>(
+      data: project.key,
+      dragAnchorStrategy: pointerDragAnchorStrategy,
+      feedback: Material(
+        elevation: 6,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 260),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.movie_outlined, size: 18),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(project.name,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.w600)),
+              ),
+            ],
+          ),
+        ),
+      ),
+      childWhenDragging: Opacity(opacity: 0.35, child: card),
+      child: card,
+    );
+  }
+
+  Widget _buildCardBody(VideoProject project) {
     final r = Responsive.of(context);
 
     return GestureDetector(
@@ -1920,6 +2522,24 @@ class _WorkingScreenState extends State<WorkingScreen>
                       size: r.iconSmall,
                     ),
                     tooltip: 'Delete',
+                    padding: EdgeInsets.zero,
+                    constraints: BoxConstraints(
+                      minWidth: r.spaceXL,
+                      minHeight: r.spaceXL,
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => _pickFolderFor(project),
+                    icon: Icon(
+                      project.folder == null
+                          ? Icons.drive_file_move_outlined
+                          : Icons.folder,
+                      color: Colors.amber.shade800,
+                      size: r.iconSmall,
+                    ),
+                    tooltip: project.folder == null
+                        ? 'Move to folder'
+                        : 'Folder: ${project.folder} — move',
                     padding: EdgeInsets.zero,
                     constraints: BoxConstraints(
                       minWidth: r.spaceXL,

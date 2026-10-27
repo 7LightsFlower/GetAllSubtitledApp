@@ -67,8 +67,9 @@ mixin UiModeListener<T extends StatefulWidget> on State<T> {
   }
 }
 
-/// Simple / Expert switch for an AppBar. Shows the *current* mode;
-/// tapping switches to the other one.
+/// Simple ◯━ Expert switch for an AppBar: both labels are always
+/// visible, the active one is bold, the thumb sits on the active side.
+/// Tapping either label or the switch flips the mode.
 class UiModeToggle extends StatelessWidget {
   const UiModeToggle({super.key});
 
@@ -79,32 +80,60 @@ class UiModeToggle extends StatelessWidget {
       builder: (context, expert, _) {
         final narrow = MediaQuery.sizeOf(context).width < 600;
         // Inside an AppBar, IconTheme carries the bar's foreground colour
-        // (each screen sets its own), so the button matches the icons.
+        // (each screen sets its own), so the switch matches the icons.
         final fg = IconTheme.of(context).color ??
             DefaultTextStyle.of(context).style.color ??
             Colors.white;
+
+        Widget label(String text, bool active, bool targetExpert) {
+          return InkWell(
+            borderRadius: BorderRadius.circular(6),
+            onTap: () => UiMode.set(targetExpert),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+              child: AnimatedDefaultTextStyle(
+                duration: const Duration(milliseconds: 150),
+                style: TextStyle(
+                  color: active ? fg : fg.withValues(alpha: 0.55),
+                  fontWeight: active ? FontWeight.w700 : FontWeight.w400,
+                  fontSize: narrow ? 12 : 13,
+                ),
+                child: Text(text),
+              ),
+            ),
+          );
+        }
+
         return Tooltip(
           message: expert
-              ? 'Expert mode: all settings and details.\nTap for Simple mode.'
-              : 'Simple mode: only the main options.\nTap for Expert mode.',
+              ? 'Expert mode: all settings and details'
+              : 'Simple mode: only the main options',
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
-            child: OutlinedButton.icon(
-              onPressed: UiMode.toggle,
-              style: OutlinedButton.styleFrom(
-                foregroundColor: fg,
-                side: BorderSide(color: fg.withValues(alpha: 0.6)),
-                backgroundColor:
-                    expert ? fg.withValues(alpha: 0.15) : Colors.transparent,
-                padding: EdgeInsets.symmetric(horizontal: narrow ? 8 : 12),
-                visualDensity: VisualDensity.compact,
-                shape: const StadiumBorder(),
-              ),
-              icon: Icon(expert ? Icons.tune : Icons.auto_awesome_outlined,
-                  size: 18),
-              label: Text(
-                expert ? 'Expert' : 'Simple',
-                style: const TextStyle(fontWeight: FontWeight.w600),
+            padding: EdgeInsets.symmetric(horizontal: narrow ? 2 : 8),
+            child: Semantics(
+              label: 'Expert mode',
+              toggled: expert,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  label('Simple', !expert, false),
+                  Transform.scale(
+                    scale: narrow ? 0.75 : 0.85,
+                    child: Switch(
+                      value: expert,
+                      onChanged: UiMode.set,
+                      // Neutral track both ways: neither mode is "off".
+                      activeThumbColor: fg,
+                      activeTrackColor: fg.withValues(alpha: 0.35),
+                      inactiveThumbColor: fg,
+                      inactiveTrackColor: fg.withValues(alpha: 0.35),
+                      trackOutlineColor:
+                          WidgetStatePropertyAll(fg.withValues(alpha: 0.6)),
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  ),
+                  label('Expert', expert, true),
+                ],
               ),
             ),
           ),

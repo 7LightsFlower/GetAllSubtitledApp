@@ -34,9 +34,11 @@ import 'package:asr_live_translator/services/browser_microphone.dart';
 import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:asr_live_translator/screens/session_output_screen.dart';
 import 'package:asr_live_translator/services/live_sessions_api.dart';
+import 'package:asr_live_translator/services/live_tts_player.dart';
 import 'package:asr_live_translator/services/server_config_service.dart';
 import 'package:asr_live_translator/services/ui_mode.dart';
 import 'package:asr_live_translator/widgets/server_connection_panel.dart';
+import 'package:asr_live_translator/widgets/language_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -128,11 +130,13 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
     'kitall',
     'public'
   ];
+  // No 'offline' here: with it KIT only processes after the recording
+  // ends, so a live session shows nothing while speaking. Loaded settings
+  // (video defaults / presets) with format 'offline' are therefore ignored.
   static const List<String> _formatOptions = [
+    'online',
     'mixed',
     'resending',
-    'online',
-    'offline'
   ];
   static const List<String> _chapteringOptions = [
     'online_dynamic',
@@ -179,6 +183,10 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
 
   // Output panels; key order = display order.
   final Map<String, _Lane> _lanes = <String, _Lane>{};
+
+  // Live spoken translation (TTS): which language is heard, and the player.
+  String? _ttsLane;
+  final LiveTtsPlayer _tts = LiveTtsPlayer();
   String _selectedLane = 'asr';
 
   bool get _isActive =>
@@ -209,6 +217,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
         debugPrint('LanguageConfig.load failed: $e');
       }
     }
+    await _loadLiveSettings();
     final inputs = LanguageConfig.getSortedInputLanguages();
     final outputs = LanguageConfig.getSortedOutputLanguages();
     final audio = LanguageConfig.getSortedAudioLanguages();
@@ -261,6 +270,244 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
 
   /// The same fields the offline `/upload` sends, minus the video and
   /// the token. The relay forwards them to KIT unchanged.
+  // ═══════════════════════════════════════════════════════════════════
+  //  SAVED SETTINGS + PRESETS — same backend and same keys as the video
+  //  Job Settings, so languages/options and presets are shared.
+  // ═══════════════════════════════════════════════════════════════════
+
+  /// Settings slot for live sessions (like a video key). With nothing
+  /// saved yet the backend answers with the global defaults, exactly as
+  /// for a new video.
+  static const String _liveSettingsKey = '__live__';
+
+  Map<String, dynamic> _currentSettingsMap() => <String, dynamic>{
+        'input_languages': List<String>.from(_inputLanguages),
+        'output_languages': List<String>.from(_outputLanguages),
+        'audio_languages': List<String>.from(_audioLanguages),
+        'availability': _availability,
+        'format': _format,
+        'smart_chaptering': _smartChaptering,
+        'tts_quality_mode': _ttsQualityMode,
+        'error_correction': _errorCorrection,
+        'profanity_filter': _profanityFilter,
+        'filter_music': _filterMusic,
+        'summarization': _enableSummarization,
+        'live_notes': _enableLiveNotes,
+        'diarization': _enableDiarization,
+        'ai_assistant': _enableAIAssistant,
+        'save_session': _saveSession,
+        'distinguish_unknown_speakers': _distinguishUnknownSpeakers,
+        'postproduction': List<String>.from(_postproduction),
+        'mute': _muteController.text,
+        'pause': _pauseController.text,
+        'speaker_name': _speakerNameController.text,
+        'shorten': _shortenController.text,
+        'saved_at': DateTime.now().toIso8601String(),
+      };
+
+  /// Apply a settings map (saved live settings, defaults or a preset).
+  /// Missing keys keep their current value; unknown language codes are
+  /// dropped.
+  void _applySettingsMap(Map<String, dynamic> data) {
+    void loadList(List<String> target, dynamic raw, List<String> valid) {
+      if (raw is! List) return;
+      target
+        ..clear()
+        ..addAll(raw.map((e) => e.toString()).where(valid.contains));
+    }
+
+    loadList(_inputLanguages, data['input_languages'],
+        LanguageConfig.getSortedInputLanguages());
+    loadList(_outputLanguages, data['output_languages'],
+        LanguageConfig.getSortedOutputLanguages());
+    loadList(_audioLanguages, data['audio_languages'],
+        LanguageConfig.getSortedAudioLanguages());
+    loadList(_postproduction, data['postproduction'], _postproductionOptions);
+
+    String pick(dynamic v, List<String> options, String current) =>
+        (v is String && options.contains(v)) ? v : current;
+    _availability = pick(data['availability'], _availabilityOptions, _availability);
+    _format = pick(data['format'], _formatOptions, _format);
+    _smartChaptering =
+        pick(data['smart_chaptering'], _chapteringOptions, _smartChaptering);
+    _ttsQualityMode =
+        pick(data['tts_quality_mode'], _ttsQualityOptions, _ttsQualityMode);
+    _errorCorrection =
+        pick(data['error_correction'], _errorCorrectionOptions, _errorCorrection);
+
+    bool flag(dynamic v, bool current) => v is bool ? v : current;
+    _profanityFilter = flag(data['profanity_filter'], _profanityFilter);
+    _filterMusic = flag(data['filter_music'], _filterMusic);
+    _enableSummarization = flag(data['summarization'], _enableSummarization);
+    _enableLiveNotes = flag(data['live_notes'], _enableLiveNotes);
+    _enableDiarization = flag(data['diarization'], _enableDiarization);
+    _enableAIAssistant = flag(data['ai_assistant'], _enableAIAssistant);
+    _saveSession = flag(data['save_session'], _saveSession);
+    _distinguishUnknownSpeakers =
+        flag(data['distinguish_unknown_speakers'], _distinguishUnknownSpeakers);
+
+    if (data['mute'] is String) _muteController.text = data['mute'] as String;
+    if (data['pause'] is String) _pauseController.text = data['pause'] as String;
+    if (data['speaker_name'] is String) {
+      _speakerNameController.text = data['speaker_name'] as String;
+    }
+    if (data['shorten'] is String) {
+      _shortenController.text = data['shorten'] as String;
+    }
+    if (_inputLanguages.isEmpty) {
+      final inputs = LanguageConfig.getSortedInputLanguages();
+      if (inputs.isNotEmpty) _inputLanguages.add(inputs.first);
+    }
+  }
+
+  Future<void> _loadLiveSettings() async {
+    try {
+      final resp = await http
+          .get(Uri.parse(
+              '$flaskServerUrl/video-job-settings/$_liveSettingsKey'))
+          .timeout(const Duration(seconds: 5));
+      if (resp.statusCode != 200) return;
+      final parsed = jsonDecode(resp.body);
+      if (parsed is Map && parsed.isNotEmpty && mounted) {
+        setState(() => _applySettingsMap(parsed.cast<String, dynamic>()));
+      }
+    } catch (e) {
+      debugPrint('loading live settings failed: $e');
+    }
+  }
+
+  /// Remember the settings a live session was started with, so the next
+  /// live session opens the same way.
+  Future<void> _saveLiveSettings() async {
+    try {
+      await http
+          .put(
+            Uri.parse('$flaskServerUrl/video-job-settings/$_liveSettingsKey'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(_currentSettingsMap()),
+          )
+          .timeout(const Duration(seconds: 5));
+    } catch (e) {
+      debugPrint('saving live settings failed: $e');
+    }
+  }
+
+  Future<void> _saveCurrentAsPreset() async {
+    final controller = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Save as preset'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Preset name',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || name.isEmpty || !mounted) return;
+    try {
+      final resp = await http.post(
+        Uri.parse('$flaskServerUrl/job-settings-presets'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'name': name, 'settings': _currentSettingsMap()}),
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(resp.statusCode == 200
+            ? 'Preset "$name" saved — also available for videos'
+            : 'Failed: HTTP ${resp.statusCode}'),
+      ));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Failed: $e')));
+      }
+    }
+  }
+
+  Future<void> _loadPresetDialog() async {
+    Map<String, dynamic> presets = {};
+    try {
+      final resp = await http
+          .get(Uri.parse('$flaskServerUrl/job-settings-presets'))
+          .timeout(const Duration(seconds: 5));
+      if (resp.statusCode == 200) {
+        final raw = (jsonDecode(resp.body) as Map)['presets'];
+        if (raw is Map) presets = raw.cast<String, dynamic>();
+      }
+    } catch (e) {
+      debugPrint('load presets failed: $e');
+    }
+    if (!mounted) return;
+
+    final names = presets.keys.toList()..sort();
+    final chosen = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.download_outlined, color: Colors.blue),
+            SizedBox(width: 8),
+            Text('Load preset'),
+          ],
+        ),
+        content: SizedBox(
+          width: 420,
+          child: names.isEmpty
+              ? const Text('No presets saved yet. Presets saved for videos '
+                  'or live sessions appear here.')
+              : ListView(
+                  shrinkWrap: true,
+                  children: [
+                    for (final n in names)
+                      ListTile(
+                        leading: const Icon(Icons.bookmark_outline),
+                        title: Text(n),
+                        subtitle: Builder(builder: (_) {
+                          final p = presets[n];
+                          final outs = (p is Map && p['output_languages'] is List)
+                              ? (p['output_languages'] as List).length
+                              : 0;
+                          return Text('$outs output languages');
+                        }),
+                        onTap: () => Navigator.pop(ctx, n),
+                      ),
+                  ],
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+    final p = chosen == null ? null : presets[chosen];
+    if (p is Map && mounted) {
+      setState(() => _applySettingsMap(p.cast<String, dynamic>()));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Preset "$chosen" loaded')),
+      );
+    }
+  }
+
   Map<String, dynamic> _settingsPayload() => <String, dynamic>{
         'name': _sessionNameController.text.trim(),
         'topicname': _topicNameController.text.trim(),
@@ -306,6 +553,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
       return;
     }
     _token = token;
+    _saveLiveSettings(); // next live session opens with these settings
 
     _settingsTileController.collapse();
     setState(() {
@@ -496,6 +744,8 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
     final mic = _mic;
     _mic = null;
     mic?.dispose();
+    _tts.stop();
+    _ttsLane = null;
     _events?.close();
     _events = null;
     _outbox.clear();
@@ -601,6 +851,29 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
   }
 
   void _onKitMessage(Map<String, dynamic> msg) {
+    // The relay has identified a stream's language: move what was shown
+    // under the temporary panel (e.g. "Translation (mt:2)") into it.
+    if (msg['_relabel'] == true) {
+      _mergeLane(
+        msg['from']?.toString() ?? '',
+        (msg['to']?.toString() ?? '').toLowerCase(),
+      );
+      return;
+    }
+
+    // Spoken translation for the language being listened to.
+    if (msg['_tts'] == true) {
+      final audio = msg['audio']?.toString();
+      if (audio != null && audio.isNotEmpty && msg['_lane'] == _ttsLane) {
+        _tts.enqueue(
+          audio,
+          format: msg['format']?.toString(),
+          rate: (msg['rate'] as num?)?.toInt(),
+        );
+      }
+      return;
+    }
+
     final control = msg['controll'] ?? msg['control'];
     if (control == 'END' && _state == _LiveState.finishing) {
       _finish();
@@ -634,6 +907,114 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
       }
     });
     _scrollToEnd(lane);
+  }
+
+  /// Switch the spoken translation heard live (null = off). Called from a
+  /// tap, which also lets the browser start audio.
+  Future<void> _selectTts(String? lane) async {
+    await _tts.stop();
+    setState(() => _ttsLane = lane);
+    if (lane != null) await _tts.unlock();
+    final id = _liveId;
+    if (id == null) return;
+    try {
+      await http.post(
+        Uri.parse('$flaskServerUrl/api/live/$id/tts'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $_token',
+        },
+        body: jsonEncode({'lane': lane}),
+      );
+    } catch (e) {
+      debugPrint('live TTS select failed: $e');
+    }
+  }
+
+  /// Panels: original first, then languages A→Z, unidentified last.
+  List<_Lane> _sortedLanes() {
+    int group(_Lane l) => l.key == 'asr'
+        ? 0
+        : (RegExp(r'^[a-z]{2,3}$').hasMatch(l.key) ? 1 : 2);
+    final list = _lanes.values.toList()
+      ..sort((a, b) {
+        final g = group(a).compareTo(group(b));
+        return g != 0 ? g : a.title.toLowerCase().compareTo(b.title.toLowerCase());
+      });
+    return list;
+  }
+
+  Widget _buildTtsSelector(BuildContext c) {
+    final langs = [..._audioLanguages]
+      ..sort((a, b) => LanguageConfig.getDisplayName(a)
+          .compareTo(LanguageConfig.getDisplayName(b)));
+    final live = _state == _LiveState.recording;
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(
+              spacing: 6,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Icon(Icons.record_voice_over,
+                    size: 18, color: Colors.grey.shade700),
+                Text(
+                  'Spoken translation:',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: _bodySize(c),
+                  ),
+                ),
+                ChoiceChip(
+                  label: const Text('Off'),
+                  selected: _ttsLane == null,
+                  onSelected: live ? (_) => _selectTts(null) : null,
+                  visualDensity: VisualDensity.compact,
+                ),
+                for (final code in langs)
+                  ChoiceChip(
+                    avatar: _ttsLane == code
+                        ? const Icon(Icons.volume_up, size: 16)
+                        : null,
+                    label: Text(LanguageConfig.getDisplayName(code)),
+                    selected: _ttsLane == code,
+                    onSelected: live ? (_) => _selectTts(code) : null,
+                    visualDensity: VisualDensity.compact,
+                  ),
+              ],
+            ),
+            if (_ttsLane != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  'Use headphones, so the microphone does not pick up the '
+                  'spoken translation.',
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _mergeLane(String from, String to) {
+    if (from.isEmpty || to.isEmpty || from == to) return;
+    final src = _lanes.remove(from);
+    if (src == null) return;
+    setState(() {
+      final dst = _lanes.putIfAbsent(to, () => _Lane(to, _laneTitle(to)));
+      // The temporary panel's lines came first.
+      dst.finals.insertAll(0, src.finals);
+      if (dst.pending.isEmpty) dst.pending = src.pending;
+      if (_selectedLane == from) _selectedLane = to;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => src.scroll.dispose());
   }
 
   String _laneTitle(String key) {
@@ -826,6 +1207,12 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
 
                 // ─── 2. Microphone ───
                 _buildControlBar(context),
+                if (_audioLanguages.isNotEmpty &&
+                    (_state == _LiveState.recording ||
+                        _state == _LiveState.finishing)) ...[
+                  const SizedBox(height: 8),
+                  _buildTtsSelector(context),
+                ],
                 if (_error != null) ...[
                   const SizedBox(height: 8),
                   _buildErrorBanner(),
@@ -1079,13 +1466,27 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-              child: Align(
-                alignment: Alignment.centerRight,
-                child: TextButton.icon(
-                  onPressed: () => _settingsTileController.collapse(),
-                  icon: const Icon(Icons.keyboard_arrow_up, size: 18),
-                  label: const Text('Collapse'),
-                ),
+              child: Wrap(
+                alignment: WrapAlignment.end,
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _loadPresetDialog,
+                    icon: const Icon(Icons.download_outlined, size: 18),
+                    label: const Text('Load preset'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: _saveCurrentAsPreset,
+                    icon: const Icon(Icons.bookmark_add_outlined, size: 18),
+                    label: const Text('Save as preset'),
+                  ),
+                  TextButton.icon(
+                    onPressed: () => _settingsTileController.collapse(),
+                    icon: const Icon(Icons.keyboard_arrow_up, size: 18),
+                    label: const Text('Collapse'),
+                  ),
+                ],
               ),
             ),
           ],
@@ -1363,7 +1764,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
     );
   }
 
-  /// Same chip block as session_detail_screen's _buildLanguageBlock.
+  /// Chosen languages visible; all others in a collapsed list.
   Widget _buildLanguageBlock({
     required String title,
     required List<String> availableCodes,
@@ -1372,61 +1773,14 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
     required void Function(String code) onToggle,
     required void Function(List<String>) onReplaceAll,
   }) {
-    final narrow = _isNarrow(context);
-    Widget action(String label, VoidCallback? onPressed) => TextButton(
-          onPressed: onPressed,
-          style: TextButton.styleFrom(
-            padding: EdgeInsets.symmetric(horizontal: narrow ? 6 : 8),
-            minimumSize: Size(0, narrow ? 28 : 32),
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            textStyle: TextStyle(fontSize: narrow ? 12 : 13),
-          ),
-          child: Text(label),
-        );
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                title,
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: _bodySize(context),
-                ),
-              ),
-            ),
-            action(
-              'All',
-              selected.length == availableCodes.length
-                  ? null
-                  : () => onReplaceAll([...availableCodes]),
-            ),
-            const SizedBox(width: 2),
-            action('None',
-                selected.isEmpty ? null : () => onReplaceAll(const [])),
-          ],
-        ),
-        const SizedBox(height: 4),
-        Wrap(
-          spacing: narrow ? 6 : 8,
-          runSpacing: 4,
-          children: availableCodes
-              .map((code) => FilterChip(
-                    label: Text(
-                      '${nameFor(code)} ($code)',
-                      style: TextStyle(fontSize: narrow ? 11 : 13),
-                    ),
-                    selected: selected.contains(code),
-                    onSelected: (_) => onToggle(code),
-                    visualDensity:
-                        narrow ? VisualDensity.compact : VisualDensity.standard,
-                  ))
-              .toList(),
-        ),
-      ],
+    return LanguagePicker(
+      title: title,
+      availableCodes: availableCodes,
+      selected: selected,
+      nameFor: nameFor,
+      onToggle: onToggle,
+      onReplaceAll: onReplaceAll,
+      titleSize: _bodySize(context),
     );
   }
 
@@ -1478,7 +1832,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
       );
     }
 
-    final lanes = _lanes.values.toList();
+    final lanes = _sortedLanes();
 
     if (_isWide(c) && lanes.length <= 3) {
       return Row(

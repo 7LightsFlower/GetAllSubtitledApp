@@ -390,6 +390,87 @@ _LANG_FIELDS = (
     "mt_language", "language_code", "target",
 )
 _CODE_RE = re.compile(r"^[a-z]{2,3}(?:[-_][a-z]{2,4})?$", re.I)
+_INDEXED_SENDER_RE = re.compile(r"^(mt|tts)[:_](\d+)$", re.I)
+
+# Languages recognisable from their script alone. Used to double-check
+# (and if needed correct) the order-based mapping mt:N → N-th language.
+_SCRIPTS = [
+    (re.compile(r"[\u0400-\u04FF]"), ("ru", "uk", "bg", "sr", "mk", "be", "kk")),
+    (re.compile(r"[\u0600-\u06FF]"), ("ar", "fa", "ur", "ps")),
+    (re.compile(r"[\u0590-\u05FF]"), ("he", "yi")),
+    (re.compile(r"[\u0370-\u03FF]"), ("el",)),
+    (re.compile(r"[\u3040-\u30FF]"), ("ja",)),
+    (re.compile(r"[\uAC00-\uD7AF]"), ("ko",)),
+    (re.compile(r"[\u4E00-\u9FFF]"), ("zh", "ja")),
+    (re.compile(r"[\u0900-\u097F]"), ("hi", "mr", "ne")),
+    (re.compile(r"[\u0980-\u09FF]"), ("bn",)),
+    (re.compile(r"[\u0B80-\u0BFF]"), ("ta",)),
+    (re.compile(r"[\u0E00-\u0E7F]"), ("th",)),
+    (re.compile(r"[\u10A0-\u10FF]"), ("ka",)),
+    (re.compile(r"[\u0530-\u058F]"), ("hy",)),
+]
+
+
+# Frequent short words + typical letters for Latin-script languages. Only
+# used to choose among the languages the user selected, so small lists
+# are enough to tell e.g. English/German/Turkish apart.
+_STOPWORDS = {
+    "en": "the and is of to in that it you for was with on are this be have not we they what but so my just".split(),
+    "de": "der die das und ist nicht ich es zu den mit sie ein eine auf für auch wir sich dass aber wie von im war mein noch".split(),
+    "fr": "le la les et est un une que qui pas je il elle nous vous des du ce pour dans sur mais avec au ne".split(),
+    "es": "el la los las y es que un una no en por para con lo se del al como pero yo mi este esta muy".split(),
+    "it": "il la le e è di che un una non per con del della mi io sono ma come questo anche nel gli si".split(),
+    "pt": "o a os as e é que um uma não em para com do da se mas como eu meu isso por no na".split(),
+    "nl": "de het een en is van dat niet ik je op te met zijn voor maar wat er we ze hij ook dit aan".split(),
+    "tr": "ve bir bu da de ne için ile ben sen değil var yok gibi çok ama mi mı daha bunu bunun şey kadar her olan ki".split(),
+    "pl": "i w nie się na to że jest z do jak ale co tak mnie ja po czy jestem być tylko".split(),
+    "cs": "a je v se na to že s z do jak ale co tak já není jsem jsou".split(),
+    "sv": "och att det är en som på inte jag med för av till den har de om ett vi men".split(),
+    "da": "og at det er en som på ikke jeg med for af til den har de vi men et".split(),
+    "no": "og at det er en som på ikke jeg med for av til den har de vi men et".split(),
+    "fi": "ja on ei se että oli hän mutta kun niin minä olen tämä".split(),
+    "ro": "și este de la în că nu o un cu pe pentru care se sunt dar mai".split(),
+    "hu": "a az és hogy nem is egy ez van de meg már csak mint".split(),
+    "vi": "và là của không có những một được cho này tôi các".split(),
+    "id": "dan yang di ini itu tidak dengan untuk saya ada dari ke".split(),
+}
+_LETTERS = {
+    # ö/ü are shared by German, Turkish, Finnish, Hungarian … — not used.
+    "tr": "ğşıİ", "de": "ßä", "pl": "łąęśżźćń", "cs": "řěůč", "ro": "șțăî",
+    "hu": "őű", "es": "ñ¿¡", "fr": "çèêàœ", "pt": "ãõ", "sv": "å", "fi": "äö",
+    "da": "æø", "no": "æø", "vi": "ơưđ",
+}
+_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+
+def _latin_scores(text: str, candidates: list) -> dict:
+    words = [w.lower() for w in _WORD_RE.findall(text)]
+    scores = {}
+    for code in candidates:
+        stop = _STOPWORDS.get(code)
+        letters = _LETTERS.get(code, "")
+        if not stop and not letters:
+            continue
+        sc = sum(1 for w in words if stop and w in stop)
+        sc += 2 * sum(1 for ch in text if ch in letters)
+        scores[code] = sc
+    return scores
+
+
+def _script_candidates(text: str) -> tuple[str, ...]:
+    """Language codes whose script dominates `text` (empty if Latin/unclear)."""
+    letters = [ch for ch in text if ch.isalpha()]
+    if len(letters) < 3:
+        return ()
+    for pattern, codes in _SCRIPTS:
+        if len(pattern.findall(text)) >= len(letters) * 0.5:
+            if "ru" in codes:  # tell Russian / Ukrainian apart
+                if re.search("[іїєґІЇЄҐ]", text):
+                    return ("uk",) + tuple(c for c in codes if c != "uk")
+                if re.search("[ыэъёЫЭЪЁ]", text):
+                    return ("ru",) + tuple(c for c in codes if c != "ru")
+            return codes
+    return ()
 
 
 class _LiveSession:
@@ -422,6 +503,14 @@ class _LiveSession:
         # Spoken translation (TTS) chunks: lane, start, end, bytes, hint.
         self.tts_chunks: list[dict] = []
         self._seen_senders: set[str] = set()
+        self._sender_lane: dict[str, str] = {}  # decided once per sender
+        self._sender_scores: dict[str, dict] = {}
+        self._sender_msgs: dict[str, int] = {}
+        self._provisional: set[str] = set()  # senders shown under a temp lane
+        # Events for the browser, e.g. {"_relabel": True, "from": "mt:2", "to": "tr"}
+        self.pending_events: list[dict] = []
+        # Spoken-translation language the browser wants to hear live.
+        self.tts_listen: Optional[str] = None
         fd, self.pcm_path = tempfile.mkstemp(prefix="live_", suffix=".pcm")
         os.close(fd)
         self.finalized = False
@@ -459,10 +548,13 @@ class _LiveSession:
                 return code
         if len(langs) == 1:
             return langs[0]
+        m = _INDEXED_SENDER_RE.match(sender)
+        if m:  # tts:N speaks what mt:N translated
+            return self._sender_lane.get(f"mt:{m.group(2)}")
         return None
 
-    def record_tts(self, msg: dict) -> bool:
-        """Keep the audio of a TTS message. True if audio was found."""
+    def record_tts(self, msg: dict) -> Optional[dict]:
+        """Keep the audio of a TTS message; returns the stored chunk."""
         lane = self.tts_lane_for(msg)
         best_key, best = None, None
         for k, v in msg.items():
@@ -474,30 +566,48 @@ class _LiveSession:
                 if best is None or len(v) > len(best):
                     best_key, best = k, v
         if best is None:
-            return False
+            return None
         try:
             raw = base64.b64decode(best.split(",", 1)[-1], validate=False)
         except (ValueError, TypeError):
-            return False
+            return None
         if not raw:
-            return False
+            return None
         rate = None
         for k in ("sample_rate", "sampleRate", "sr", "rate"):
             try:
                 rate = int(msg.get(k)) if msg.get(k) else rate
             except (TypeError, ValueError):
                 pass
-        self.tts_chunks.append(
-            {
-                "lane": lane or str(msg.get("sender") or "tts"),
-                "start": self._rebase(msg.get("start")) if "start" in msg else None,
-                "end": self._rebase(msg.get("end")) if "end" in msg else None,
-                "audio": raw,
-                "key": best_key,
-                "rate": rate,
-            }
-        )
-        return True
+        if rate is None and raw[:4] != b"RIFF" and "pcm" in best_key.lower():
+            # KIT sends no rate for raw PCM: derive it from the chunk's
+            # length and its start/end, snapped to a standard rate.
+            try:
+                dur = float(msg.get("end")) - float(msg.get("start"))
+            except (TypeError, ValueError):
+                dur = 0.0
+            if dur > 0.05:
+                guess = (len(raw) // 2) / dur
+                std = min((8000, 16000, 22050, 24000, 32000, 44100, 48000),
+                          key=lambda r: abs(r - guess))
+                if abs(std - guess) / std < 0.15:
+                    rate = std
+                    if not getattr(self, "_rate_logged", False):
+                        self._rate_logged = True
+                        log.info("live: %s TTS PCM sample rate %d Hz (from chunk timing)",
+                                 self.id[:8], rate)
+        chunk = {
+            "sender": str(msg.get("sender") or "tts"),
+            "lane": lane or str(msg.get("sender") or "tts"),
+            "start": self._rebase(msg.get("start")) if "start" in msg else None,
+            "end": self._rebase(msg.get("end")) if "end" in msg else None,
+            "audio": raw,
+            "key": best_key,
+            "rate": rate,
+            "b64": best.split(",", 1)[-1],
+        }
+        self.tts_chunks.append(chunk)
+        return chunk
 
     def _resolve_lane(self, sender: str, msg: dict) -> Optional[str]:
         if not sender or sender.startswith(
@@ -520,7 +630,55 @@ class _LiveSession:
                 return code
         if len(self.mt_langs) == 1:
             return self.mt_langs[0]
-        return sender  # unknown language: still shown, under its sender
+        text = msg.get("seq") or msg.get("text") or msg.get("translation") or ""
+        lane = self._detect(sender, str(text))
+        if lane:
+            return lane
+        self._provisional.add(sender)
+        return sender  # shown under a temporary panel until identified
+
+    def _decide(self, sender: str, lang: str, how: str) -> str:
+        self._sender_lane[sender] = lang
+        log.info("live: %s %s identified as %s (%s)", self.id[:8], sender, lang, how)
+        if sender in self._provisional:
+            self.pending_events.append({"_relabel": True, "from": sender, "to": lang})
+        return lang
+
+    def _detect(self, sender: str, text: str) -> Optional[str]:
+        """Which selected target language a stream (mt:N) is in, from its
+        text: script first, then common words/letters; each language is
+        given to one stream only. None while still unsure."""
+        if sender in self._sender_lane:
+            return self._sender_lane[sender]
+        claimed = set(self._sender_lane.values())
+        free = [l for l in self.mt_langs if l not in claimed]
+        if not free:
+            return None
+        if len(_WORD_RE.findall(text)) == 0:
+            return None  # "♪" and the like say nothing
+        n = self._sender_msgs[sender] = self._sender_msgs.get(sender, 0) + 1
+
+        by_script = [c for c in _script_candidates(text) if c in free]
+        if len(by_script) == 1:
+            return self._decide(sender, by_script[0], "script")
+        if by_script:
+            free = by_script
+
+        acc = self._sender_scores.setdefault(sender, {})
+        for code, sc in _latin_scores(text, free).items():
+            acc[code] = acc.get(code, 0) + sc
+        ranked = sorted(((acc.get(c, 0), c) for c in free), reverse=True)
+        best = ranked[0] if ranked else (0, None)
+        second = ranked[1][0] if len(ranked) > 1 else 0
+        if best[1] and best[0] >= 3 and best[0] >= 2 * second:
+            return self._decide(sender, best[1], f"words {best[0]} vs {second}")
+        if len(free) == 1 and n >= 2:
+            return self._decide(sender, free[0], "last remaining language")
+        return None
+
+    def final_lane(self, sender: str, lane: Optional[str]) -> Optional[str]:
+        """Lane to use in the saved output, after identification."""
+        return self._sender_lane.get(sender, lane)
 
     # ── recording ────────────────────────────────────────────────────
     def _rebase(self, v):
@@ -584,8 +742,18 @@ def _finalize(sess: _LiveSession) -> None:
         "settings": sess.settings,
         "started_at": sess.started_at,
         "duration_s": sess.samples_sent / SAMPLE_RATE,
-        "messages": sess.recorded,
-        "tts_chunks": sess.tts_chunks,
+        "messages": [
+            {**m, "_lane": sess.final_lane(str(m.get("sender") or ""), m.get("_lane"))}
+            for m in sess.recorded
+        ],
+        "tts_chunks": [
+            {
+                **{k: v for k, v in c.items() if k not in ("b64", "sender")},
+                "lane": c["lane"] if c["lane"] != c.get("sender")
+                else sess.tts_lane_for({"sender": c.get("sender")}) or c["lane"],
+            }
+            for c in sess.tts_chunks
+        ],
         "audio_languages": sess.audio_langs,
         "pcm_path": sess.pcm_path,
         "sample_rate": SAMPLE_RATE,
@@ -713,6 +881,60 @@ class _SavedStore:
         return out
 
 
+
+# Set by create_live_blueprint, so backend.py's folder rename/delete can
+# update live sessions too (folders are shared with the video list).
+_store_ref: Optional["_SavedStore"] = None
+
+
+def _rewrite_folders(change) -> int:
+    """Apply `change(folder) -> new folder or None` to every saved live
+    session of every user. Returns how many were changed."""
+    store = _store_ref
+    if store is None or not os.path.isdir(store.root):
+        return 0
+    changed = 0
+    for user in os.listdir(store.root):
+        d = os.path.join(store.root, user)
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(d, name)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    rec = json.load(f)
+            except (OSError, ValueError):
+                continue
+            old = rec.get("folder") or None
+            if not old:
+                continue
+            new = change(old)
+            if new == old:
+                continue
+            if new:
+                rec["folder"] = new
+            else:
+                rec.pop("folder", None)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(rec, f, ensure_ascii=False)
+            os.replace(tmp, path)
+            changed += 1
+    return changed
+
+
+def rename_folder(old: str, new: str) -> int:
+    """Folder renamed on the video list → live sessions follow."""
+    return _rewrite_folders(lambda f: new if f.lower() == old.lower() else f)
+
+
+def clear_folder(name: str) -> int:
+    """Folder deleted → its live sessions become unsorted."""
+    return _rewrite_folders(lambda f: None if f.lower() == name.lower() else f)
+
+
 def _summary(rec: dict) -> dict:
     lanes = rec.get("lanes") or []
     original = next((l for l in lanes if l.get("key") == "asr"), None)
@@ -729,6 +951,7 @@ def _summary(rec: dict) -> dict:
         "word_count": len(text.split()),
         "preview": text[:PREVIEW_CHARS],
         "output_session_id": rec.get("output_session_id") or "",
+        "folder": rec.get("folder") or "",
     }
 
 
@@ -766,6 +989,8 @@ def create_live_blueprint(
     _on_finished = on_finished
     bp = Blueprint("live_relay", __name__, url_prefix="/api/live")
     store = _SavedStore(storage_dir)
+    global _store_ref
+    _store_ref = store
 
     def _caller_email():
         """(email, error_response). Saved sessions belong to the email
@@ -826,6 +1051,9 @@ def create_live_blueprint(
                 r"[^0-9A-Za-z_\-]", "", str(body.get("output_session_id") or "")
             )[:200],
         }
+        previous = store.load(email, sid)
+        if previous and previous.get("folder"):
+            record["folder"] = previous["folder"]
         try:
             store.save(email, record)
         except OSError as e:
@@ -843,6 +1071,23 @@ def create_live_blueprint(
         if rec is None:
             return jsonify({"error": "Not found"}), 404
         return jsonify(rec), 200
+
+    @bp.route("/saved/<sid>/folder", methods=["POST"])
+    def saved_move(sid):
+        """Move a live session into a folder: {"folder": "Name"} / null."""
+        email, err = _caller_email()
+        if err:
+            return err
+        rec = store.load(email, sid) if _SAVED_ID_RE.match(sid) else None
+        if rec is None:
+            return jsonify({"error": "Not found"}), 404
+        folder = re.sub(r"\s+", " ", str((request.get_json(silent=True) or {}).get("folder") or "")).strip()[:80]
+        if folder:
+            rec["folder"] = folder
+        else:
+            rec.pop("folder", None)
+        store.save(email, rec)
+        return jsonify({"success": True, "folder": rec.get("folder")}), 200
 
     @bp.route("/saved/<sid>", methods=["DELETE"])
     def saved_delete(sid):
@@ -883,6 +1128,10 @@ def create_live_blueprint(
             "language": language,
             "mtLanguage": mt,
         }
+        if payload.get("format") == "offline":
+            # Offline = KIT processes only after the end: useless live.
+            log.info("live: format 'offline' requested — using 'online'")
+            payload["format"] = "online"
 
         server = resolve_server(body.get("targetServer"))
         adapter = KitLiveAdapter(server, token)
@@ -979,6 +1228,19 @@ def create_live_blueprint(
         sess = _LiveSession(adapter, token, language, mt, payload)
         with _registry_lock:
             _sessions[sess.id] = sess
+
+        def _silence_check():
+            # Audio is flowing but KIT has sent nothing back: say so, with
+            # the settings most likely responsible.
+            if not sess.closed and not sess._seen_senders and sess.samples_sent:
+                log.warning(
+                    "live: %s no results from KIT after 20 s of the session "
+                    "(%.1f s audio sent; format=%r, language=%s, mt=%s) — "
+                    "format 'offline' only produces output after the end",
+                    sess.id[:8], sess.samples_sent / SAMPLE_RATE,
+                    payload.get("format"), ",".join(language), ",".join(mt),
+                )
+        threading.Timer(20, _silence_check).start()
         log.info(
             "live: started %s on %s (%s → %s)",
             sess.id[:8],
@@ -1041,10 +1303,22 @@ def create_live_blueprint(
             try:
                 for msg in sess.adapter.iter_events():
                     lane = sess.lane_for(msg)
+                    while sess.pending_events:
+                        yield f"data: {json.dumps(sess.pending_events.pop(0))}\n\n"
                     if str(msg.get("sender") or "").startswith("tts"):
-                        # Spoken translation: keep the audio for the WAVs;
-                        # the browser doesn't need the (large) payload.
-                        sess.record_tts(msg)
+                        # Spoken translation: always kept for the WAVs; sent
+                        # to the browser only for the language it listens to.
+                        chunk = sess.record_tts(msg)
+                        if chunk and sess.tts_listen and chunk["lane"] == sess.tts_listen:
+                            out = {
+                                "_tts": True,
+                                "_lane": chunk["lane"],
+                                "sender": msg.get("sender"),
+                                "format": chunk["key"],
+                                "rate": chunk["rate"],
+                                "audio": chunk["b64"],
+                            }
+                            yield f"data: {json.dumps(out)}\n\n"
                         continue
                     if lane is not None:
                         msg["_lane"] = lane
@@ -1075,6 +1349,19 @@ def create_live_blueprint(
                 "X-Accel-Buffering": "no",  # nginx: don't buffer SSE
             },
         )
+
+    @bp.route("/<live_id>/tts", methods=["POST"])
+    def live_tts(live_id):
+        """Choose which spoken translation the browser hears live
+        ({"lane": "de"} or {"lane": null} for off)."""
+        sess = _get(live_id)
+        if sess is None:
+            return jsonify({"error": "Unknown or closed live session"}), 404
+        if _bearer() != sess.token:
+            return jsonify({"error": "Forbidden"}), 403
+        lane = (request.get_json(silent=True) or {}).get("lane")
+        sess.tts_listen = str(lane).lower() if lane else None
+        return ("", 204)
 
     @bp.route("/<live_id>/stop", methods=["POST"])
     def live_stop(live_id):
