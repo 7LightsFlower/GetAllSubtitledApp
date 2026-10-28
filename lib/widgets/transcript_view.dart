@@ -23,6 +23,26 @@ class TranscriptView extends StatefulWidget {
 class _TranscriptViewState extends State<TranscriptView> {
   final GlobalKey _highlightKey = GlobalKey();
 
+  /// Running text (default) or one line per segment with timestamps.
+  /// Shared by all transcript panels and kept while the app is open.
+  static final ValueNotifier<bool> _fluent = ValueNotifier<bool>(true);
+
+  @override
+  void initState() {
+    super.initState();
+    _fluent.addListener(_onModeChanged);
+  }
+
+  @override
+  void dispose() {
+    _fluent.removeListener(_onModeChanged);
+    super.dispose();
+  }
+
+  void _onModeChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void didUpdateWidget(TranscriptView oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -69,26 +89,38 @@ class _TranscriptViewState extends State<TranscriptView> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (widget.title != null)
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.blue.shade50,
-                border: Border(
-                  bottom: BorderSide(color: Colors.blue.shade200),
-                ),
-              ),
-              child: Text(
-                widget.title!,
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.blue.shade800,
-                ),
+          Container(
+            padding: EdgeInsets.fromLTRB(12, widget.title != null ? 4 : 0, 4,
+                widget.title != null ? 4 : 0),
+            decoration: BoxDecoration(
+              color: widget.title != null ? Colors.blue.shade50 : null,
+              border: Border(
+                bottom: BorderSide(
+                    color: widget.title != null
+                        ? Colors.blue.shade200
+                        : Colors.grey.shade200),
               ),
             ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: widget.title == null
+                      ? const SizedBox.shrink()
+                      : Text(
+                          widget.title!,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.blue.shade800,
+                          ),
+                        ),
+                ),
+                _modeToggle(),
+              ],
+            ),
+          ),
           Expanded(
-            child: ListView.builder(
+            child: _fluent.value ? _buildFluent() : ListView.builder(
               controller: widget.scrollController,
               padding: const EdgeInsets.symmetric(vertical: 8),
               itemCount: widget.transcript.segments.length,
@@ -108,6 +140,136 @@ class _TranscriptViewState extends State<TranscriptView> {
       ),
     );
   }
+
+  Widget _modeToggle() {
+    final fluent = _fluent.value;
+    return TextButton.icon(
+      onPressed: () => _fluent.value = !fluent,
+      icon: Icon(fluent ? Icons.format_list_bulleted : Icons.notes, size: 16),
+      label: Text(fluent ? 'Lines' : 'Running text',
+          style: const TextStyle(fontSize: 12)),
+      style: TextButton.styleFrom(
+        visualDensity: VisualDensity.compact,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+      ),
+    );
+  }
+
+  bool _isPlainSegment(SegmentData s) =>
+      s.markup == null || s.markup == 'paragraphBreak' || s.markup == 'heading';
+
+  /// Running text: segments flow on in one paragraph; a new paragraph
+  /// starts when the speaker changes or KIT marks a paragraph break.
+  /// Summaries / notes keep their boxes. The segment being played is
+  /// highlighted inside the paragraph.
+  Widget _buildFluent() {
+    final segs = widget.transcript.segments;
+    final blocks = <Widget>[];
+    var spans = <InlineSpan>[];
+    var lastChar = -1;
+    var speaker = '';
+    var hasHighlight = false;
+
+    void flush() {
+      if (spans.isEmpty) return;
+      blocks.add(Padding(
+        key: hasHighlight ? _highlightKey : null,
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 10),
+        child: Text.rich(
+          TextSpan(
+            style: TextStyle(
+                fontSize: 14, height: 1.5, color: Colors.grey.shade900),
+            children: spans,
+          ),
+        ),
+      ));
+      spans = <InlineSpan>[];
+      lastChar = -1;
+      hasHighlight = false;
+    }
+
+    for (var i = 0; i < segs.length; i++) {
+      final seg = segs[i];
+      final text = seg.text.trim();
+      if (text.isEmpty) continue;
+      if (text.contains('<br') || seg.markup == 'paragraphBreak') {
+        flush();
+        continue;
+      }
+      if (!_isPlainSegment(seg)) {
+        flush();
+        blocks.add(_buildSpecialMarkup(seg));
+        continue;
+      }
+      final name = displaySpeakerName(seg.speakerName);
+      if (name.isNotEmpty && name != speaker) {
+        flush();
+        speaker = name;
+        blocks.add(Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 2),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.blue.shade100,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                name,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.blue.shade800,
+                ),
+              ),
+            ),
+          ),
+        ));
+      }
+      if (seg.markup == 'heading') {
+        flush();
+        blocks.add(Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+          child: Text(text,
+              style:
+                  const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        ));
+        continue;
+      }
+      // Space between segments, except inside CJK / Thai text.
+      if (lastChar >= 0 && !(_noSpace(lastChar) && _noSpace(text.codeUnitAt(0)))) {
+        spans.add(const TextSpan(text: ' '));
+      }
+      final isHi = i == widget.highlightedIndex;
+      if (isHi) hasHighlight = true;
+      spans.add(TextSpan(
+        text: text,
+        style: isHi
+            ? TextStyle(
+                backgroundColor: Colors.yellow.shade200,
+                color: Colors.black,
+              )
+            : null,
+      ));
+      lastChar = text.codeUnitAt(text.length - 1);
+    }
+    flush();
+
+    return SelectionArea(
+      child: ListView(
+        controller: widget.scrollController,
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        children: blocks,
+      ),
+    );
+  }
+
+  static bool _noSpace(int c) =>
+      (c >= 0x3000 && c <= 0x9FFF) ||
+      (c >= 0xF900 && c <= 0xFAFF) ||
+      (c >= 0xFF00 && c <= 0xFFEF) ||
+      (c >= 0x0E00 && c <= 0x0E7F);
 
   /// Speaker of the nearest earlier segment that is actually shown.
   String _previousSpeaker(int index) {

@@ -32,14 +32,22 @@ class LiveTtsPlayer {
     }
   }
 
+  final List<Timer> _timers = <Timer>[];
+
   /// Queue one chunk. Returns immediately; playback is serialized.
-  void enqueue(String base64Audio, {String? format, int? rate}) {
-    _chain = _chain.then((_) => _play(base64Audio, format, rate)).catchError(
-      (Object e) => debugPrint('live TTS chunk skipped: $e'),
-    );
+  /// [onStart] / [onEnd] fire when this chunk is actually heard (it may
+  /// wait behind earlier chunks).
+  void enqueue(String base64Audio,
+      {String? format, int? rate, VoidCallback? onStart, VoidCallback? onEnd}) {
+    _chain = _chain
+        .then((_) => _play(base64Audio, format, rate, onStart, onEnd))
+        .catchError(
+          (Object e) => debugPrint('live TTS chunk skipped: $e'),
+        );
   }
 
-  Future<void> _play(String b64, String? format, int? rate) async {
+  Future<void> _play(String b64, String? format, int? rate,
+      VoidCallback? onStart, VoidCallback? onEnd) async {
     final ctx = _ctx;
     if (ctx == null) return; // stopped
     final bytes = Uint8List.fromList(base64Decode(b64));
@@ -71,6 +79,12 @@ class LiveTtsPlayer {
     // the previous chunk.
     if (_nextStart < now) _nextStart = now + 0.05;
     source.start(_nextStart);
+    final startsIn = Duration(milliseconds: ((_nextStart - now) * 1000).round());
+    final endsIn = startsIn +
+        Duration(milliseconds: (buffer.duration * 1000).round());
+    if (onStart != null) _timers.add(Timer(startsIn, onStart));
+    if (onEnd != null) _timers.add(Timer(endsIn, onEnd));
+    _timers.removeWhere((t) => !t.isActive);
     _nextStart += buffer.duration;
   }
 
@@ -79,6 +93,10 @@ class LiveTtsPlayer {
     final ctx = _ctx;
     _ctx = null;
     _nextStart = 0;
+    for (final t in _timers) {
+      t.cancel();
+    }
+    _timers.clear();
     _chain = Future.value();
     if (ctx != null) {
       try {

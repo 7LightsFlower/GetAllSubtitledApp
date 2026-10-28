@@ -1085,6 +1085,16 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     }
   }
 
+  /// Live sessions only have the microphone recording (live_audio.mp4,
+  /// no picture): play it with a compact audio bar, not a black video box.
+  bool get _audioOnly {
+    if (_videoUrl.contains('live_audio')) return true;
+    final c = _videoController;
+    return c != null &&
+        c.value.isInitialized &&
+        (c.value.size.width == 0 || c.value.size.height == 0);
+  }
+
   void _initializeVideoPlayer() {
     final old = _videoController;
     if (old != null) {
@@ -1972,6 +1982,49 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
     return Column(
       children: [
+        // ─── Audio-only source (live session recording) ─────────────
+        if (_audioOnly)
+          Container(
+            color: Colors.grey.shade900,
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                VideoPlayerWidget(
+                  controller: _videoController,
+                  isReady: _isVideoReady,
+                  onPlayPause: _togglePlayPause,
+                  onSeek: _seekTo,
+                  height: 56,
+                  audioOnly: true,
+                  subtitleTracks:
+                      _subtitleTracks.isNotEmpty ? _subtitleTracks : null,
+                  selectedSubtitle: _selectedSubtitle,
+                  onSubtitleChanged: _onSubtitleChanged,
+                  subtitleText: _selectedSubtitle != null &&
+                          _parsedSubtitles.isNotEmpty
+                      ? _getSubtitleAtTime(_videoController
+                              ?.value.position.inSeconds
+                              .toDouble() ??
+                          0)
+                      : null,
+                ),
+                if (_chapters.isNotEmpty && _isVideoReady)
+                  SizedBox(
+                    height: r.chapterBarHeight,
+                    child: ChapterSeekbar(
+                      chapters: _chapters,
+                      currentTime: _videoController
+                              ?.value.position.inSeconds
+                              .toDouble() ??
+                          0,
+                      onTap: _jumpToChapter,
+                    ),
+                  ),
+              ],
+            ),
+          )
+        else
         // ─── Video player ────────────────────────────────────────────
         Container(
           height: videoHeight,

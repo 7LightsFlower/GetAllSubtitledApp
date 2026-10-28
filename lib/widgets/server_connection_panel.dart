@@ -396,14 +396,16 @@ class _ServerConnectionPanelState extends State<ServerConnectionPanel> {
           shape:
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 6, 6, 8),
+            padding: const EdgeInsets.fromLTRB(10, 2, 4, 2),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _buildServerRow(),
-                const Divider(height: 8),
-                _buildConnectionRow(),
-                if (_showTokenInput) _buildTokenInput(),
+                _buildOneLine(),
+                if (_showTokenInput)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 2, bottom: 8),
+                    child: _buildTokenInput(),
+                  ),
               ],
             ),
           ),
@@ -412,209 +414,235 @@ class _ServerConnectionPanelState extends State<ServerConnectionPanel> {
     );
   }
 
-  Widget _buildServerRow() {
+  /// Server · status · Token · Connect — all in one line.
+  Widget _buildOneLine() {
     final narrow = _isNarrow(context);
-    final allServers = ServerConfigService.allServers;
-    final customSet = ServerConfigService.customServers.toSet();
+    final statusColor = _isConnected ? Colors.green : Colors.orange.shade800;
 
     return Row(
       children: [
-        const Icon(Icons.dns_outlined, size: 20, color: Colors.blueGrey),
-        const SizedBox(width: 10),
-        if (!narrow) ...[
-          const Text(
-            'Internal server',
-            style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
-          ),
-          const SizedBox(width: 12),
-        ],
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                labelForServer(internalServerUrl),
-                style: TextStyle(
-                  fontSize: narrow ? 12 : 13,
-                  fontWeight: narrow ? FontWeight.w600 : FontWeight.normal,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              Text(
-                internalServerUrl,
-                style: TextStyle(
-                  fontSize: narrow ? 9 : 10,
-                  color: Colors.grey[600],
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ],
-          ),
-        ),
-        IconButton(
-          tooltip: 'Add custom server',
-          icon: const Icon(Icons.add_circle_outline, size: 20),
-          onPressed: _showAddServerDialog,
-        ),
-        PopupMenuButton<String>(
-          tooltip: 'Switch server',
-          icon: const Icon(Icons.swap_horiz, size: 20),
-          onSelected: (value) async {
-            if (value == '__add__') {
-              await _showAddServerDialog();
-            } else {
-              await _changeServer(value);
-            }
-          },
-          itemBuilder: (context) => <PopupMenuEntry<String>>[
-            for (final url in allServers)
-              PopupMenuItem<String>(
-                value: url,
+        // ── Server (tap = switch) ──
+        Flexible(
+          child: _buildServerMenu(
+            child: Tooltip(
+              message: 'Click to switch server',
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
                 child: Row(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(
-                      url == internalServerUrl
-                          ? Icons.radio_button_checked
-                          : Icons.radio_button_unchecked,
-                      size: 18,
-                      color:
-                          url == internalServerUrl ? Colors.blue : Colors.grey,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Row(
-                            children: [
-                              Flexible(
-                                child: Text(
-                                  labelForServer(url),
-                                  style: TextStyle(
-                                    fontWeight: url == internalServerUrl
-                                        ? FontWeight.bold
-                                        : FontWeight.normal,
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                              if (customSet.contains(url)) ...[
-                                const SizedBox(width: 6),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 6, vertical: 1),
-                                  decoration: BoxDecoration(
-                                    color: Colors.teal.shade50,
-                                    borderRadius: BorderRadius.circular(8),
-                                    border:
-                                        Border.all(color: Colors.teal.shade200),
-                                  ),
-                                  child: Text(
-                                    'custom',
-                                    style: TextStyle(
-                                      fontSize: 9,
-                                      color: Colors.teal.shade800,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ],
+                    const Icon(Icons.dns_outlined,
+                        size: 18, color: Colors.blueGrey),
+                    const SizedBox(width: 6),
+                    // Full name and address, never cut off: wraps onto a
+                    // second line only if the window is too narrow.
+                    Flexible(
+                      child: Text.rich(
+                        TextSpan(children: [
+                          TextSpan(
+                            text: labelForServer(internalServerUrl),
+                            style: const TextStyle(
+                                fontSize: 13, fontWeight: FontWeight.w600),
                           ),
-                          Text(
-                            url,
-                            style: TextStyle(
-                                fontSize: 10, color: Colors.grey[600]),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
+                          if (labelForServer(internalServerUrl) !=
+                              internalServerUrl)
+                            TextSpan(
+                              text: '  $internalServerUrl',
+                              style: TextStyle(
+                                  fontSize: 12, color: Colors.grey.shade600),
+                            ),
+                        ]),
+                        softWrap: true,
                       ),
                     ),
-                    if (customSet.contains(url))
-                      IconButton(
-                        tooltip: 'Remove',
-                        icon: const Icon(Icons.close, size: 16),
-                        onPressed: () async {
-                          await ServerConfigService.removeCustomServer(url);
-                          if (!mounted) return;
-                          setState(() {});
-                        },
-                      ),
+                    const Icon(Icons.arrow_drop_down,
+                        size: 20, color: Colors.blueGrey),
                   ],
                 ),
               ),
-            const PopupMenuDivider(),
-            const PopupMenuItem<String>(
-              value: '__add__',
-              child: Row(
-                children: [
-                  Icon(Icons.add, size: 18, color: Colors.blue),
-                  SizedBox(width: 8),
-                  Text('Add server…', style: TextStyle(color: Colors.blue)),
-                ],
-              ),
             ),
-          ],
+          ),
+        ),
+        Container(
+          width: 1,
+          height: 20,
+          margin: const EdgeInsets.symmetric(horizontal: 8),
+          color: Colors.grey.shade300,
+        ),
+        // ── Connection status ──
+        Tooltip(
+          message: _isConnected
+              ? 'Connected'
+              : 'Not connected — connect or paste a token',
+          child: Icon(
+            _isConnected ? Icons.check_circle : Icons.info_outline,
+            size: 18,
+            color: _isConnected ? Colors.green : Colors.orange,
+          ),
+        ),
+        if (!narrow) ...[
+          const SizedBox(width: 6),
+          Text(
+            _isConnected ? 'Connected' : 'Not connected',
+            style: TextStyle(
+                fontSize: 13, fontWeight: FontWeight.w500, color: statusColor),
+          ),
+        ],
+        const Spacer(),
+        // ── Manual token ──
+        if (narrow)
+          IconButton(
+            tooltip: _showTokenInput ? 'Hide token' : 'Manual token',
+            visualDensity: VisualDensity.compact,
+            icon: Icon(
+              _showTokenInput ? Icons.keyboard_arrow_up : Icons.vpn_key,
+              size: 18,
+              color: Colors.blue,
+            ),
+            onPressed: _toggleTokenInput,
+          )
+        else
+          TextButton.icon(
+            onPressed: _toggleTokenInput,
+            icon: Icon(
+              _showTokenInput ? Icons.keyboard_arrow_up : Icons.vpn_key,
+              size: 16,
+            ),
+            label: Text(_showTokenInput ? 'Hide token' : 'Token'),
+            style: TextButton.styleFrom(
+              foregroundColor: Colors.blue,
+              visualDensity: VisualDensity.compact,
+            ),
+          ),
+        // ── Connect / reconnect ──
+        IconButton(
+          onPressed: _isConnecting ? null : _connectToInternal,
+          tooltip: _isConnected ? 'Reconnect' : 'Connect',
+          visualDensity: VisualDensity.compact,
+          icon: _isConnecting
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Icon(_isConnected ? Icons.link : Icons.link_off, size: 20),
         ),
       ],
     );
   }
 
-  Widget _buildConnectionRow() {
-    final narrow = _isNarrow(context);
-    return Row(
-      children: [
-        Icon(
-          _isConnected ? Icons.check_circle : Icons.info_outline,
-          size: 20,
-          color: _isConnected ? Colors.green : Colors.orange,
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Text(
-            _isConnected
-                ? 'Connected'
-                : (narrow ? 'Not connected' : 'Not connected — connect or paste a token'),
-            style: TextStyle(
-              fontWeight: FontWeight.w500,
-              color: _isConnected ? Colors.green : Colors.orange.shade800,
+  void _toggleTokenInput() => setState(() {
+        _showTokenInput = !_showTokenInput;
+        if (!_showTokenInput) {
+          _tokenStatus = '';
+          _tokenController.clear();
+          _showBookmarklet = false;
+        }
+      });
+
+  /// Server picker (all servers + "Add server…").
+  Widget _buildServerMenu({required Widget child}) {
+    final allServers = ServerConfigService.allServers;
+    final customSet = ServerConfigService.customServers.toSet();
+    return PopupMenuButton<String>(
+      tooltip: 'Switch server',
+      onSelected: (value) async {
+        if (value == '__add__') {
+          await _showAddServerDialog();
+        } else {
+          await _changeServer(value);
+        }
+      },
+      itemBuilder: (context) => <PopupMenuEntry<String>>[
+        for (final url in allServers)
+          PopupMenuItem<String>(
+            value: url,
+            child: Row(
+              children: [
+                Icon(
+                  url == internalServerUrl
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked,
+                  size: 18,
+                  color:
+                      url == internalServerUrl ? Colors.blue : Colors.grey,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              labelForServer(url),
+                              style: TextStyle(
+                                fontWeight: url == internalServerUrl
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (customSet.contains(url)) ...[
+                            const SizedBox(width: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 1),
+                              decoration: BoxDecoration(
+                                color: Colors.teal.shade50,
+                                borderRadius: BorderRadius.circular(8),
+                                border:
+                                    Border.all(color: Colors.teal.shade200),
+                              ),
+                              child: Text(
+                                'custom',
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  color: Colors.teal.shade800,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                      Text(
+                        url,
+                        style: TextStyle(
+                            fontSize: 10, color: Colors.grey[600]),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                if (customSet.contains(url))
+                  IconButton(
+                    tooltip: 'Remove',
+                    icon: const Icon(Icons.close, size: 16),
+                    onPressed: () async {
+                      await ServerConfigService.removeCustomServer(url);
+                      if (!mounted) return;
+                      setState(() {});
+                    },
+                  ),
+              ],
             ),
-            overflow: TextOverflow.ellipsis,
           ),
-        ),
-        TextButton.icon(
-          onPressed: () => setState(() {
-            _showTokenInput = !_showTokenInput;
-            if (!_showTokenInput) {
-              _tokenStatus = '';
-              _tokenController.clear();
-              _showBookmarklet = false;
-            }
-          }),
-          icon: Icon(
-            _showTokenInput ? Icons.keyboard_arrow_up : Icons.vpn_key,
-            size: 18,
+        const PopupMenuDivider(),
+        const PopupMenuItem<String>(
+          value: '__add__',
+          child: Row(
+            children: [
+              Icon(Icons.add, size: 18, color: Colors.blue),
+              SizedBox(width: 8),
+              Text('Add server…', style: TextStyle(color: Colors.blue)),
+            ],
           ),
-          label: Text(_showTokenInput
-              ? (narrow ? 'Hide' : 'Hide Token')
-              : (narrow ? 'Token' : 'Manual Token')),
-          style: TextButton.styleFrom(foregroundColor: Colors.blue),
-        ),
-        IconButton(
-          onPressed: _isConnecting ? null : _connectToInternal,
-          tooltip: _isConnected ? 'Reconnect' : 'Connect',
-          icon: _isConnecting
-              ? const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : Icon(_isConnected ? Icons.link : Icons.link_off),
         ),
       ],
+      child: child,
     );
   }
 

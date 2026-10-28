@@ -176,7 +176,7 @@ class KitLiveAdapter:
                                                 answers with /present/<id>
       audio   POST /webapi/<id>/0/append        JSON body that is itself a
                                                 JSON-encoded *string*:
-                                                "{\"b64_enc_…\":…,\"start\":<unix s>,\"seq\":n}"
+                                                "{\"b64_enc_…\":…,\"start\":<unix s>,\"end\":<unix s>}"
       log     POST /webapi/<id>/addstreamlog    no body (only when logging=1)
 
     Everything goes through the normal web login (the `_forward_auth`
@@ -279,17 +279,33 @@ class KitLiveAdapter:
                 self.AUDIO_KEY: base64.b64encode(pcm).decode("ascii"),
                 "start": round(self.t0 + start_s, 3),
                 "end": round(self.t0 + end_s, 3),
-                "seq": self.seq,
+                # No "seq" here: in the mediator "seq" means *text*, and
+                # qbmediator's Interface.process() then also runs
+                # save_text() on the audio chunk → json.dumps(bytes) error.
             }
         )
         self.seq += 1
 
-    def end(self) -> None:
-        """Tell KIT the audio is over. The event stream stays open."""
-        try:
-            self._control("END")
-        except Exception as e:  # best effort on shutdown
-            log.info("live: END failed (ignored): %s", e)
+    def end(self, attempts: int = 4) -> bool:
+        """Tell KIT the audio is over (the event stream stays open).
+        Retries with backoff; True once KIT accepted it."""
+        delay = 1.0
+        for i in range(attempts):
+            try:
+                self._control("END")
+                return True
+            except Exception as e:
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status in (400, 404, 410):
+                    # KIT no longer knows the session: nothing left to end.
+                    log.info("live: END for %s → HTTP %s (session gone)",
+                             self.session_id, status)
+                    return True
+                log.info("live: END attempt %d/%d failed: %s", i + 1, attempts, e)
+                if i + 1 < attempts:
+                    time.sleep(delay)
+                    delay *= 3
+        return False
 
     def close(self) -> None:
         """Drop the HTTP connections (also ends iter_events)."""
@@ -566,7 +582,14 @@ class _LiveSession:
                 if best is None or len(v) > len(best):
                     best_key, best = k, v
         if best is None:
-            return None
+            # Large payloads are not inline: KIT stores them in its database
+            # and the stream carries a link instead ("send_link" →
+            # "/ltapi/stream/data?name=Data/<session>/<n>", or a bare
+            # "Data/…" reference). Fetch the audio behind it now — the
+            # stored data expires.
+            best_key, best = self._fetch_linked_audio(msg)
+            if best is None:
+                return None
         try:
             raw = base64.b64decode(best.split(",", 1)[-1], validate=False)
         except (ValueError, TypeError):
@@ -608,6 +631,43 @@ class _LiveSession:
         }
         self.tts_chunks.append(chunk)
         return chunk
+
+    def _fetch_linked_audio(self, msg: dict) -> tuple[Optional[str], Optional[str]]:
+        """(field name, base64 audio) for a TTS message whose audio is a
+        database link, or (None, None)."""
+        for k, v in msg.items():
+            if not isinstance(v, str) or k.startswith("_"):
+                continue
+            if v.startswith(("/ltapi/stream/data", "/webapi/stream/data")):
+                # Same as KIT's own audio client: /ltapi → /webapi with
+                # the login cookie.
+                path = "/webapi" + v[len("/ltapi"):] if v.startswith("/ltapi") else v
+            elif v.startswith("Data/"):
+                path = "/webapi/stream/data?name=" + requests.utils.quote(v, safe="/")
+            else:
+                continue
+            url = self.adapter.server + path
+            try:
+                r = self.adapter._http.get(url, timeout=(5, 15))
+                r.raise_for_status()
+                body = r.json()
+            except Exception as e:
+                if not getattr(self, "_link_err_logged", False):
+                    self._link_err_logged = True
+                    log.warning("live: %s TTS audio link %s failed: %s",
+                                self.id[:8], url, e)
+                return None, None
+            if isinstance(body, dict):  # be lenient about the wrapper
+                body = next((x for x in body.values()
+                             if isinstance(x, str) and len(x) > 100), None)
+            if not isinstance(body, str) or not body:
+                return None, None
+            if not getattr(self, "_link_ok_logged", False):
+                self._link_ok_logged = True
+                log.info("live: %s TTS audio arrives as links — fetching "
+                         "them (%s)", self.id[:8], path.split("?")[0])
+            return k, body
+        return None, None
 
     def _resolve_lane(self, sender: str, msg: dict) -> Optional[str]:
         if not sender or sender.startswith(
@@ -781,7 +841,14 @@ def _close(sess: _LiveSession) -> None:
     if not sess.closed:
         sess.closed = True
         sess.closed_at = time.monotonic()
-        sess.adapter.end()
+        if sess.adapter.end():
+            _ledger_remove(sess.adapter.session_id)
+        else:
+            # Stays in the ledger; the sweeper retries every few minutes.
+            log.warning(
+                "live: END for KIT session %s failed — will retry",
+                sess.adapter.session_id,
+            )
         # Hard stop for the event stream if KIT never ends it, and make
         # sure the output gets built even if no browser is listening.
         def _hard_stop():
@@ -793,6 +860,129 @@ def _close(sess: _LiveSession) -> None:
             sess.id[:8],
             sess.samples_sent / SAMPLE_RATE,
         )
+
+
+# ─── Open-session ledger ──────────────────────────────────────────────
+# Every KIT session this relay opens is written to a small JSON file and
+# removed only after KIT accepted the END. Whatever is still listed after
+# a crash, restart or failed END gets its END from the sweeper (at
+# startup and then every SWEEP_INTERVAL_S), so no session stays open on
+# KIT. The file holds the login token needed for that END; it lives next
+# to the saved sessions (lib/state, the backend's private volume).
+SWEEP_INTERVAL_S = 30
+# A running session refreshes its "alive" stamp every sweep. Only entries
+# whose stamp is older than this are treated as orphaned — so a second
+# process (e.g. Flask's debug reloader) never ENDs another one's session.
+LEDGER_ORPHAN_S = IDLE_TIMEOUT_S + 60
+LEDGER_RETRY_S = 300          # retry a failed END every 5 minutes …
+LEDGER_GIVE_UP_S = 3 * 86400  # … for at most 3 days
+_ledger_path: Optional[str] = None
+_ledger_lock = threading.Lock()
+_sweeper_started = False
+
+
+def _ledger_load() -> dict:
+    if not _ledger_path:
+        return {}
+    try:
+        with open(_ledger_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _ledger_save(data: dict) -> None:
+    if not _ledger_path:
+        return
+    os.makedirs(os.path.dirname(_ledger_path), exist_ok=True)
+    tmp = _ledger_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    os.replace(tmp, _ledger_path)
+
+
+def _ledger_add(kit_session: str, server: str, token: str) -> None:
+    with _ledger_lock:
+        data = _ledger_load()
+        data[kit_session] = {
+            "server": server, "token": token,
+            "opened": time.time(), "alive": time.time(), "last_try": 0.0,
+        }
+        _ledger_save(data)
+
+
+def _ledger_remove(kit_session: str) -> None:
+    with _ledger_lock:
+        data = _ledger_load()
+        if data.pop(kit_session, None) is not None:
+            _ledger_save(data)
+
+
+def _send_end(kit_session: str, server: str, token: str) -> bool:
+    adapter = KitLiveAdapter(server, token)
+    adapter.session_id = kit_session
+    adapter.stream_id = adapter.STREAM_ID
+    try:
+        return adapter.end(attempts=2)
+    finally:
+        adapter.close()
+
+
+def _sweep_ledger() -> None:
+    """END every listed KIT session that no running relay session owns."""
+    with _registry_lock:
+        active = {
+            s.adapter.session_id for s in _sessions.values() if not s.closed
+        }
+    now = time.time()
+    with _ledger_lock:
+        data = _ledger_load()
+        mine = [k for k in data if k in active]
+        for k in mine:
+            data[k]["alive"] = now
+        if mine:
+            _ledger_save(data)
+    for kit_session, e in list(data.items()):
+        if kit_session in active:
+            continue
+        if now - float(e.get("alive") or 0) < LEDGER_ORPHAN_S:
+            continue  # may belong to another process that is still running
+        if now - float(e.get("last_try") or 0) < LEDGER_RETRY_S:
+            continue
+        ok = _send_end(kit_session, e.get("server", ""), e.get("token", ""))
+        if ok:
+            log.info("live: sent missing END to KIT session %s", kit_session)
+            _ledger_remove(kit_session)
+        elif now - float(e.get("opened") or now) > LEDGER_GIVE_UP_S:
+            log.warning("live: giving up END for KIT session %s", kit_session)
+            _ledger_remove(kit_session)
+        else:
+            with _ledger_lock:
+                cur = _ledger_load()
+                if kit_session in cur:
+                    cur[kit_session]["last_try"] = now
+                    _ledger_save(cur)
+
+
+def _start_sweeper() -> None:
+    """Background thread: drop idle sessions (tab closed without Stop)
+    and send END for anything left in the ledger."""
+    global _sweeper_started
+    if _sweeper_started:
+        return
+    _sweeper_started = True
+
+    def loop():
+        while True:
+            try:
+                _reap_idle()
+                _sweep_ledger()
+            except Exception as e:  # never let the sweeper die
+                log.warning("live: sweeper error: %s", e)
+            time.sleep(SWEEP_INTERVAL_S)
+
+    threading.Thread(target=loop, name="live-sweeper", daemon=True).start()
 
 
 def _reap_idle() -> None:
@@ -952,6 +1142,9 @@ def _summary(rec: dict) -> dict:
         "preview": text[:PREVIEW_CHARS],
         "output_session_id": rec.get("output_session_id") or "",
         "folder": rec.get("folder") or "",
+        # Free name chosen by the user, shown next to the structured
+        # `name` (live_<date>-<time>). Empty = not set.
+        "title": rec.get("title") or "",
     }
 
 
@@ -989,8 +1182,12 @@ def create_live_blueprint(
     _on_finished = on_finished
     bp = Blueprint("live_relay", __name__, url_prefix="/api/live")
     store = _SavedStore(storage_dir)
-    global _store_ref
+    global _store_ref, _ledger_path
     _store_ref = store
+    _ledger_path = os.path.join(storage_dir, "_open_kit_sessions.json")
+    # Sessions left open by a crash/restart get their END from the
+    # sweeper once their "alive" stamp is stale (a few minutes).
+    _start_sweeper()
 
     def _caller_email():
         """(email, error_response). Saved sessions belong to the email
@@ -1052,8 +1249,9 @@ def create_live_blueprint(
             )[:200],
         }
         previous = store.load(email, sid)
-        if previous and previous.get("folder"):
-            record["folder"] = previous["folder"]
+        for keep in ("folder", "title"):  # set from the list, keep on re-save
+            if previous and previous.get(keep):
+                record[keep] = previous[keep]
         try:
             store.save(email, record)
         except OSError as e:
@@ -1071,6 +1269,25 @@ def create_live_blueprint(
         if rec is None:
             return jsonify({"error": "Not found"}), 404
         return jsonify(rec), 200
+
+    @bp.route("/saved/<sid>/title", methods=["POST"])
+    def saved_title(sid):
+        """Give a live session a chosen name: {"title": "…"} ("" clears)."""
+        email, err = _caller_email()
+        if err:
+            return err
+        rec = store.load(email, sid) if _SAVED_ID_RE.match(sid) else None
+        if rec is None:
+            return jsonify({"error": "Not found"}), 404
+        title = re.sub(
+            r"\s+", " ", str((request.get_json(silent=True) or {}).get("title") or "")
+        ).strip()[:200]
+        if title:
+            rec["title"] = title
+        else:
+            rec.pop("title", None)
+        store.save(email, rec)
+        return jsonify({"success": True, "title": rec.get("title") or ""}), 200
 
     @bp.route("/saved/<sid>/folder", methods=["POST"])
     def saved_move(sid):
@@ -1228,6 +1445,7 @@ def create_live_blueprint(
         sess = _LiveSession(adapter, token, language, mt, payload)
         with _registry_lock:
             _sessions[sess.id] = sess
+        _ledger_add(adapter.session_id, server, token)
 
         def _silence_check():
             # Audio is flowing but KIT has sent nothing back: say so, with
@@ -1306,16 +1524,22 @@ def create_live_blueprint(
                     while sess.pending_events:
                         yield f"data: {json.dumps(sess.pending_events.pop(0))}\n\n"
                     if str(msg.get("sender") or "").startswith("tts"):
-                        # Spoken translation: always kept for the WAVs; sent
-                        # to the browser only for the language it listens to.
+                        # Spoken translation: kept for the WAVs and sent to
+                        # the browser as it arrives (every language: the live
+                        # screen lists the parts). `listen` marks the language
+                        # the browser plays aloud.
                         chunk = sess.record_tts(msg)
-                        if chunk and sess.tts_listen and chunk["lane"] == sess.tts_listen:
+                        if chunk:
                             out = {
                                 "_tts": True,
                                 "_lane": chunk["lane"],
+                                "listen": bool(sess.tts_listen)
+                                and chunk["lane"] == sess.tts_listen,
                                 "sender": msg.get("sender"),
                                 "format": chunk["key"],
                                 "rate": chunk["rate"],
+                                "start": chunk["start"],
+                                "end": chunk["end"],
                                 "audio": chunk["b64"],
                             }
                             yield f"data: {json.dumps(out)}\n\n"
@@ -1323,6 +1547,12 @@ def create_live_blueprint(
                     if lane is not None:
                         msg["_lane"] = lane
                     sess.record(msg, lane)
+                    # Session-relative times (same clock as the TTS parts),
+                    # so the browser can find the text a TTS part speaks.
+                    if "start" in msg:
+                        msg["_start"] = sess._rebase(msg.get("start"))
+                    if "end" in msg:
+                        msg["_end"] = sess._rebase(msg.get("end"))
                     yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
                     if (
                         sess.closed
@@ -1368,9 +1598,22 @@ def create_live_blueprint(
         sess = _get(live_id)
         if sess is None:
             return ("", 204)  # already gone — stopping is idempotent
-        if _bearer() != sess.token:
+        token = _bearer()
+        if not token:
+            # navigator.sendBeacon (tab closing) cannot set headers; it
+            # sends the token as a text/plain body instead.
+            try:
+                token = str(
+                    (json.loads(request.get_data(as_text=True) or "{}") or {})
+                    .get("token") or ""
+                ).strip()
+            except (ValueError, AttributeError):
+                token = ""
+        if token != sess.token:
             return jsonify({"error": "Forbidden"}), 403
-        _close(sess)
+        # END (with retries) off the request thread: a closing tab does
+        # not wait for the answer.
+        threading.Thread(target=_close, args=(sess,), daemon=True).start()
         return ("", 204)
 
     return bp

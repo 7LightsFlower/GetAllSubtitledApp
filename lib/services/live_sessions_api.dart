@@ -49,6 +49,7 @@ class LiveSessionSummary {
     required this.preview,
     this.outputSessionId = '',
     this.folder,
+    this.title = '',
   });
 
   final String id;
@@ -69,6 +70,13 @@ class LiveSessionSummary {
   /// list can move a card immediately.
   String? folder;
 
+  /// Name chosen by the user (empty = none). [name] stays the structured
+  /// live_<date>-<time> name.
+  String title;
+
+  /// What the list shows first.
+  String get displayName => title.isNotEmpty ? title : name;
+
   factory LiveSessionSummary.fromJson(Map<String, dynamic> j) =>
       LiveSessionSummary(
         id: j['id']?.toString() ?? '',
@@ -85,6 +93,7 @@ class LiveSessionSummary {
         folder: (j['folder']?.toString() ?? '').isEmpty
             ? null
             : j['folder'].toString(),
+        title: j['title']?.toString() ?? '',
       );
 }
 
@@ -169,6 +178,18 @@ class LiveSessionsApi {
     _check(r);
   }
 
+  /// Sets the chosen name ('' removes it). Returns the stored title.
+  static Future<String> rename(String id, String title) async {
+    final r = await http.post(
+      Uri.parse('$_base/$id/title'),
+      headers: await _headers(json: true),
+      body: jsonEncode({'title': title}),
+    );
+    _check(r);
+    return (jsonDecode(r.body) as Map<String, dynamic>)['title']?.toString() ??
+        '';
+  }
+
   /// Moves a session into [folder] (null = unsorted). The folder must
   /// exist in /api/folders, or it won't show up in the folder bar.
   static Future<void> moveToFolder(String id, String? folder) async {
@@ -229,6 +250,30 @@ Duration _seconds(Object? v) =>
 
 List<String> _strings(Object? v) =>
     v is List ? v.map((e) => e.toString()).toList() : <String>[];
+
+/// Joins recognised segments into running text: one space between them,
+/// none after CJK / Thai text (those scripts don't separate words).
+String joinFluent(Iterable<String> parts) {
+  final out = StringBuffer();
+  for (final raw in parts) {
+    final p = raw.trim();
+    if (p.isEmpty) continue;
+    if (out.isNotEmpty) {
+      final prev = out.toString();
+      final last = prev.codeUnitAt(prev.length - 1);
+      final first = p.codeUnitAt(0);
+      if (!(_noSpaceScript(last) && _noSpaceScript(first))) out.write(' ');
+    }
+    out.write(p);
+  }
+  return out.toString();
+}
+
+bool _noSpaceScript(int c) =>
+    (c >= 0x3000 && c <= 0x9FFF) || // CJK punctuation, kana, ideographs
+    (c >= 0xF900 && c <= 0xFAFF) ||
+    (c >= 0xFF00 && c <= 0xFFEF) || // full-width forms
+    (c >= 0x0E00 && c <= 0x0E7F); // Thai
 
 String formatDuration(Duration d) {
   final h = d.inHours;

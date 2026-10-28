@@ -13,6 +13,13 @@ class VideoPlayerWidget extends StatefulWidget {
   final String? selectedSubtitle;
   final Function(String?)? onSubtitleChanged;
 
+  /// Audio-only source (e.g. a live session's microphone recording):
+  /// show one compact player bar instead of an empty black video pane.
+  final bool audioOnly;
+
+  /// Current subtitle line, shown under the bar in [audioOnly] mode.
+  final String? subtitleText;
+
   const VideoPlayerWidget({
     super.key,
     required this.controller,
@@ -23,6 +30,8 @@ class VideoPlayerWidget extends StatefulWidget {
     this.subtitleTracks,
     this.selectedSubtitle,
     this.onSubtitleChanged,
+    this.audioOnly = false,
+    this.subtitleText,
   });
 
   @override
@@ -48,6 +57,10 @@ class _VideoPlayerWidgetState extends State<VideoPlayerWidget> {
 
     final hasSubtitles =
         widget.subtitleTracks != null && widget.subtitleTracks!.isNotEmpty;
+
+    if (widget.audioOnly) {
+      return _buildAudioBar(controller, position, duration, hasSubtitles);
+    }
 
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
@@ -126,6 +139,88 @@ class _VideoPlayerWidgetState extends State<VideoPlayerWidget> {
             ],
           ),
         ),
+      ],
+    );
+  }
+
+  Widget _buildAudioBar(VideoPlayerController controller, Duration position,
+      Duration duration, bool hasSubtitles) {
+    final narrow = MediaQuery.sizeOf(context).width < 600;
+    final sub = (widget.subtitleText ?? '').trim();
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          children: [
+            // The <video> element still does the playing; it just isn't
+            // shown (an invisible 1×1 view keeps it attached on the web).
+            SizedBox(
+              width: 1,
+              height: 1,
+              child: Opacity(opacity: 0, child: VideoPlayer(controller)),
+            ),
+            IconButton(
+              iconSize: 36,
+              tooltip: controller.value.isPlaying ? 'Pause' : 'Play',
+              icon: Icon(
+                controller.value.isPlaying
+                    ? Icons.pause_circle_filled
+                    : Icons.play_circle_filled,
+                color: Colors.white,
+              ),
+              onPressed: widget.onPlayPause,
+            ),
+            if (!narrow) ...[
+              const Icon(Icons.graphic_eq, color: Colors.white70, size: 18),
+              const SizedBox(width: 6),
+              const Text('Original audio',
+                  style: TextStyle(color: Colors.white70, fontSize: 12)),
+              const SizedBox(width: 12),
+            ],
+            Text(_formatDuration(position),
+                style: const TextStyle(color: Colors.white, fontSize: 12)),
+            Expanded(
+              child: Slider(
+                value: (_isDragging
+                        ? _currentPosition
+                        : position.inSeconds.toDouble())
+                    .clamp(0.0, duration.inSeconds.toDouble()),
+                min: 0,
+                max: duration.inSeconds.toDouble() <= 0
+                    ? 1
+                    : duration.inSeconds.toDouble(),
+                onChanged: (value) => setState(() {
+                  _isDragging = true;
+                  _currentPosition = value;
+                }),
+                onChangeEnd: (value) {
+                  _isDragging = false;
+                  widget.onSeek(value);
+                },
+                activeColor: Colors.blue,
+                inactiveColor: Colors.grey,
+              ),
+            ),
+            Text(_formatDuration(duration),
+                style: const TextStyle(color: Colors.white, fontSize: 12)),
+            if (hasSubtitles) ...[
+              const SizedBox(width: 8),
+              _buildSubtitleSelector(),
+            ],
+          ],
+        ),
+        if (sub.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(
+              sub,
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                  color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500),
+            ),
+          ),
       ],
     );
   }

@@ -2,6 +2,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 
 import 'package:asr_live_translator/constants.dart';
@@ -74,6 +75,10 @@ class _JobProgressPanelState extends State<JobProgressPanel> {
           const [];
 
       final wasDone = _done;
+      // Follow new lines only while the user is at the bottom, so
+      // scrolling up / selecting text isn't yanked away every 2 s.
+      final atBottom = !_scroll.hasClients ||
+          _scroll.position.pixels >= _scroll.position.maxScrollExtent - 24;
       setState(() {
         _error = null;
         _loading = false;
@@ -86,7 +91,7 @@ class _JobProgressPanelState extends State<JobProgressPanel> {
 
       // Auto-scroll to the newest event.
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scroll.hasClients) {
+        if (atBottom && _scroll.hasClients) {
           _scroll.jumpTo(_scroll.position.maxScrollExtent);
         }
       });
@@ -101,6 +106,31 @@ class _JobProgressPanelState extends State<JobProgressPanel> {
         _loading = false;
       });
     }
+  }
+
+  /// The whole log as plain text (one line per event).
+  String _logAsText() {
+    final b = StringBuffer()
+      ..writeln('Session: ${widget.sessionId}')
+      ..writeln('Stage: ${_stageLabel(_stage)} · '
+          '${(_progress * 100).toStringAsFixed(0)}%')
+      ..writeln();
+    for (final ev in _events) {
+      final t = (ev['time'] as String?) ?? '';
+      final lvl = (ev['level'] as String?) ?? 'info';
+      final msg = (ev['message'] as String?) ?? '';
+      b.writeln('$t ${lvl == 'info' ? '' : '[${lvl.toUpperCase()}] '}$msg');
+    }
+    return b.toString();
+  }
+
+  Future<void> _copyLog() async {
+    await Clipboard.setData(ClipboardData(text: _logAsText()));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('Live log copied (${_events.length} lines)'),
+      duration: const Duration(seconds: 2),
+    ));
   }
 
   Color _levelColour(String level) {
@@ -246,11 +276,26 @@ class _JobProgressPanelState extends State<JobProgressPanel> {
               const SizedBox(height: 12),
               const Divider(height: 1),
               const SizedBox(height: 8),
-              const Text(
-                'Live log',
-                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+              Row(
+                children: [
+                  const Text(
+                    'Live log',
+                    style:
+                        TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                  ),
+                  const Spacer(),
+                  TextButton.icon(
+                    onPressed: _copyLog,
+                    icon: const Icon(Icons.copy, size: 16),
+                    label: const Text('Copy log'),
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      textStyle: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 6),
+              const SizedBox(height: 2),
               Container(
                 constraints: const BoxConstraints(maxHeight: 260),
                 decoration: BoxDecoration(
@@ -258,7 +303,8 @@ class _JobProgressPanelState extends State<JobProgressPanel> {
                   borderRadius: BorderRadius.circular(6),
                   border: Border.all(color: Colors.grey.shade200),
                 ),
-                child: ListView.builder(
+                child: SelectionArea(
+                 child: ListView.builder(
                   controller: _scroll,
                   shrinkWrap: true,
                   itemCount: _events.length,
@@ -304,6 +350,7 @@ class _JobProgressPanelState extends State<JobProgressPanel> {
                       ),
                     );
                   },
+                 ),
                 ),
               ),
             ],

@@ -49,16 +49,61 @@ enum _LiveState { idle, starting, recording, finishing, finished }
 
 enum _SaveStatus { none, saving, saved, failed }
 
+/// One small piece of spoken translation (TTS) as KIT sent it.
+class _TtsPart {
+  _TtsPart({
+    required this.index,
+    required this.b64,
+    required this.format,
+    required this.rate,
+    required this.start,
+    required this.end,
+  });
+  final int index; // 1-based per language
+  final String b64;
+  final String? format; // field name, e.g. b64_enc_pcm_s16le
+  final int? rate;
+  final double? start; // seconds from session start
+  final double? end;
+
+  late final Uint8List bytes = base64Decode(b64);
+  bool get isRiff =>
+      bytes.length > 4 &&
+      bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46;
+  bool get isPcm {
+    final f = (format ?? '').toLowerCase();
+    return !isRiff && (f.contains('pcm') || f.contains('s16'));
+  }
+
+  int get sampleRate => rate ?? 16000;
+
+  /// Playing time: from the PCM length when known, else KIT's timing.
+  double get seconds {
+    if (isPcm) return bytes.length / 2 / sampleRate;
+    final s = start, e = end;
+    return (s != null && e != null && e > s) ? e - s : 0;
+  }
+}
+
 /// One output panel: the original transcript or one translation.
 class _Lane {
   _Lane(this.key, this.title);
   final String key; // 'asr' or a language code
   final String title;
   final List<String> finals = <String>[];
+  // Session-relative time span of each final (null when unknown).
+  final List<double?> starts = <double?>[];
+  final List<double?> ends = <double?>[];
+
+  void addFinal(String text, [double? start, double? end]) {
+    finals.add(text);
+    starts.add(start);
+    ends.add(end);
+  }
   String pending = ''; // current unstable hypothesis
   final ScrollController scroll = ScrollController();
 
-  String get fullText => finals.join('\n');
+  String get fullText => joinFluent(finals);
   bool get isEmpty => finals.isEmpty && pending.isEmpty;
 }
 
@@ -187,6 +232,95 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
   // Live spoken translation (TTS): which language is heard, and the player.
   String? _ttsLane;
   final LiveTtsPlayer _tts = LiveTtsPlayer();
+
+  // Every TTS part as it arrives, per language (listed in the live screen,
+  // each playable / downloadable right away).
+  final Map<String, List<_TtsPart>> _ttsParts = <String, List<_TtsPart>>{};
+  final LiveTtsPlayer _partPlayer = LiveTtsPlayer();
+  String? _playingPart; // "<lane>#<index>"
+
+  // Text spoken by the TTS part playing now: lane + time span.
+  String? _hlLane;
+  double? _hlStart, _hlEnd;
+  bool _hlPinned = false; // set from the parts list: don't auto-scroll away
+
+  void _highlight(String lane, double? start, double? end,
+      {bool pinned = false, bool show = false}) {
+    if (!mounted) return;
+    setState(() {
+      _hlLane = lane;
+      _hlStart = start;
+      _hlEnd = end;
+      _hlPinned = pinned;
+      if (show && _lanes.containsKey(lane)) _selectedLane = lane;
+    });
+    _scrollToHighlight();
+  }
+
+  void _clearHighlight(String lane, double? start) {
+    if (!mounted || _hlLane != lane || _hlStart != start) return;
+    setState(() {
+      _hlLane = null;
+      _hlStart = _hlEnd = null;
+      _hlPinned = false;
+    });
+  }
+
+  /// Indices of the finals that overlap the highlighted time span.
+  Set<int> _highlightedFinals(_Lane lane) {
+    final s = _hlStart, e = _hlEnd;
+    if (lane.key != _hlLane || s == null) return const {};
+    final end = (e == null || e < s) ? s : e;
+    const tol = 0.15;
+    final hit = <int>{};
+    for (var i = 0; i < lane.finals.length; i++) {
+      final fs = lane.starts[i], fe = lane.ends[i];
+      if (fs == null) continue;
+      final fEnd = fe ?? fs;
+      if (fs < end - tol && fEnd > s + tol) hit.add(i);
+    }
+    if (hit.isEmpty) {
+      // No overlap (e.g. very short part): take the final nearest in time.
+      var best = -1;
+      var bestD = double.infinity;
+      for (var i = 0; i < lane.finals.length; i++) {
+        final fs = lane.starts[i];
+        if (fs == null) continue;
+        final d = (fs - s).abs();
+        if (d < bestD) {
+          bestD = d;
+          best = i;
+        }
+      }
+      if (best >= 0 && bestD < 10) hit.add(best);
+    }
+    return hit;
+  }
+
+  void _scrollToHighlight() {
+    final lane = _lanes[_hlLane];
+    if (lane == null) return;
+    final hit = _highlightedFinals(lane);
+    if (hit.isEmpty) return;
+    final first = hit.reduce(math.min);
+    // Position of the highlight in the running text, as a fraction.
+    var before = 0, total = 0;
+    for (var i = 0; i < lane.finals.length; i++) {
+      final n = lane.finals[i].length + 1;
+      if (i < first) before += n;
+      total += n;
+    }
+    final frac = total == 0 ? 0.0 : before / total;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final sc = lane.scroll;
+      if (!sc.hasClients) return;
+      final max = sc.position.maxScrollExtent;
+      final view = sc.position.viewportDimension;
+      final target = (frac * (max + view) - view * 0.3).clamp(0.0, max);
+      sc.animateTo(target,
+          duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
+    });
+  }
   String _selectedLane = 'asr';
 
   bool get _isActive =>
@@ -205,7 +339,33 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
     _sessionNameController = TextEditingController(text: _defaultSessionName());
     ServerConnection.tokenChanged.addListener(_checkConnection);
     ServerConnection.serverChanged.addListener(_checkConnection);
+    // Tab closed / reloaded / navigated away while recording: Flutter's
+    // dispose() never runs then, so tell the backend with a beacon (the
+    // only request a closing page is guaranteed to get out).
+    web.window.addEventListener('pagehide', _pageHideJs);
     _init();
+  }
+
+  late final JSFunction _pageHideJs =
+      ((web.Event _) => _beaconStop()).toJS;
+
+  void _beaconStop() {
+    final id = _liveId;
+    if (id == null ||
+        !(_state == _LiveState.recording ||
+            _state == _LiveState.starting ||
+            _state == _LiveState.finishing)) {
+      return;
+    }
+    try {
+      // text/plain body: no CORS preflight, which beacons can't do.
+      web.window.navigator.sendBeacon(
+        '$flaskServerUrl/api/live/$id/stop',
+        jsonEncode({'token': _token}).toJS,
+      );
+    } catch (e) {
+      debugPrint('live stop beacon failed: $e');
+    }
   }
 
   Future<void> _init() async {
@@ -233,6 +393,8 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
 
   @override
   void dispose() {
+    web.window.removeEventListener('pagehide', _pageHideJs);
+    _partPlayer.stop();
     ServerConnection.tokenChanged.removeListener(_checkConnection);
     ServerConnection.serverChanged.removeListener(_checkConnection);
     // Leaving the screen ends the session. Nothing is kept.
@@ -654,7 +816,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
     setState(() {
       for (final l in _lanes.values) {
         if (l.pending.isNotEmpty) {
-          l.finals.add(l.pending);
+          l.addFinal(l.pending);
           l.pending = '';
         }
       }
@@ -684,8 +846,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
           SavedLane(
             key: l.key,
             title: l.title,
-            text: [...l.finals, if (l.pending.isNotEmpty) l.pending]
-                .join('\n'),
+            text: joinFluent([...l.finals, l.pending]),
           ),
     ];
     if (lanes.isEmpty) return;
@@ -759,6 +920,217 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
     WakelockPlus.disable().catchError((_) {});
   }
 
+  // ─── TTS parts ───────────────────────────────────────────────────
+  Future<void> _playPart(String lane, _TtsPart p) async {
+    final id = '$lane#${p.index}';
+    await _partPlayer.stop();
+    if (_playingPart == id) {
+      setState(() => _playingPart = null); // second tap = stop
+      _clearHighlight(lane, p.start);
+      return;
+    }
+    await _partPlayer.unlock();
+    // Show the translation this part speaks, highlighted.
+    _highlight(lane, p.start, p.end, pinned: true, show: true);
+    _partPlayer.enqueue(
+      p.b64,
+      format: p.format,
+      rate: p.rate,
+      onEnd: () {
+        if (!mounted || _playingPart != id) return;
+        setState(() => _playingPart = null);
+        _clearHighlight(lane, p.start);
+      },
+    );
+    setState(() => _playingPart = id);
+  }
+
+  /// WAV file for PCM parts (16-bit mono); other formats as they came.
+  static Uint8List _wavFromPcm(List<Uint8List> pcm, int rate) {
+    final dataLen = pcm.fold<int>(0, (n, b) => n + b.length);
+    final out = BytesBuilder(copy: false);
+    final h = ByteData(44);
+    void str(int o, String v) {
+      for (var i = 0; i < 4; i++) {
+        h.setUint8(o + i, v.codeUnitAt(i));
+      }
+    }
+
+    str(0, 'RIFF');
+    h.setUint32(4, 36 + dataLen, Endian.little);
+    str(8, 'WAVE');
+    str(12, 'fmt ');
+    h.setUint32(16, 16, Endian.little);
+    h.setUint16(20, 1, Endian.little); // PCM
+    h.setUint16(22, 1, Endian.little); // mono
+    h.setUint32(24, rate, Endian.little);
+    h.setUint32(28, rate * 2, Endian.little);
+    h.setUint16(32, 2, Endian.little);
+    h.setUint16(34, 16, Endian.little);
+    str(36, 'data');
+    h.setUint32(40, dataLen, Endian.little);
+    out.add(h.buffer.asUint8List());
+    for (final b in pcm) {
+      out.add(b);
+    }
+    return out.toBytes();
+  }
+
+  static String _extFor(Uint8List b) {
+    if (b.length > 4 && b[0] == 0x4F && b[1] == 0x67 && b[2] == 0x67) return 'ogg';
+    if (b.length > 3 && b[0] == 0x49 && b[1] == 0x44 && b[2] == 0x33) return 'mp3';
+    if (b.length > 2 && b[0] == 0xFF && (b[1] & 0xE0) == 0xE0) return 'mp3';
+    if (b.length > 4 && b[0] == 0x1A && b[1] == 0x45) return 'webm';
+    return 'wav';
+  }
+
+  void _saveBytes(Uint8List bytes, String fileName, String mime) {
+    final blob = web.Blob(
+      <JSAny>[bytes.toJS].toJS,
+      web.BlobPropertyBag(type: mime),
+    );
+    final url = web.URL.createObjectURL(blob);
+    (web.HTMLAnchorElement()
+          ..href = url
+          ..download = fileName)
+        .click();
+    web.URL.revokeObjectURL(url);
+  }
+
+  String get _fileBase {
+    final n = _sessionNameController.text.trim();
+    return n.isEmpty ? _defaultSessionName() : n;
+  }
+
+  void _downloadPart(String lane, _TtsPart p) {
+    final nr = p.index.toString().padLeft(3, '0');
+    if (p.isPcm) {
+      _saveBytes(_wavFromPcm([p.bytes], p.sampleRate),
+          '${_fileBase}_tts_${lane}_$nr.wav', 'audio/wav');
+    } else {
+      final ext = _extFor(p.bytes);
+      _saveBytes(p.bytes, '${_fileBase}_tts_${lane}_$nr.$ext', 'audio/$ext');
+    }
+  }
+
+  /// All parts of one language back to back in one WAV (PCM parts).
+  void _downloadAllParts(String lane) {
+    final parts = _ttsParts[lane] ?? const <_TtsPart>[];
+    final pcm = parts.where((p) => p.isPcm).toList();
+    if (pcm.isEmpty) {
+      for (final p in parts) {
+        _downloadPart(lane, p);
+      }
+      return;
+    }
+    _saveBytes(
+      _wavFromPcm([for (final p in pcm) p.bytes], pcm.first.sampleRate),
+      '${_fileBase}_tts_${lane}_all.wav',
+      'audio/wav',
+    );
+  }
+
+  static String _partTime(double? s) {
+    if (s == null) return '–';
+    final t = s < 0 ? 0.0 : s;
+    final m = t ~/ 60;
+    final sec = t - m * 60;
+    return '${m.toString().padLeft(2, '0')}:${sec.toStringAsFixed(1).padLeft(4, '0')}';
+  }
+
+  Widget _buildTtsParts(BuildContext c) {
+    final langs = _ttsParts.keys.toList()
+      ..sort((a, b) => _laneTitle(a).compareTo(_laneTitle(b)));
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(children: [
+              Icon(Icons.graphic_eq, size: 18, color: Colors.grey.shade700),
+              const SizedBox(width: 6),
+              Text('Spoken translation parts',
+                  style: TextStyle(
+                      fontWeight: FontWeight.w600, fontSize: _bodySize(c))),
+            ]),
+            for (final lane in langs) _buildTtsLaneParts(lane),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTtsLaneParts(String lane) {
+    final parts = _ttsParts[lane]!;
+    final total = parts.fold<double>(0, (n, p) => n + p.seconds);
+    return ExpansionTile(
+      key: PageStorageKey('tts-parts-$lane'),
+      tilePadding: const EdgeInsets.symmetric(horizontal: 4),
+      childrenPadding: const EdgeInsets.only(bottom: 6),
+      dense: true,
+      title: Text(_laneTitle(lane)),
+      subtitle: Text(
+          '${parts.length} part${parts.length == 1 ? '' : 's'} · '
+          '${total.toStringAsFixed(1)} s',
+          style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        IconButton(
+          tooltip: 'Download all parts as one WAV',
+          icon: const Icon(Icons.download, size: 20),
+          onPressed: () => _downloadAllParts(lane),
+        ),
+        const Icon(Icons.expand_more),
+      ]),
+      children: [
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 260),
+          child: ListView.builder(
+            shrinkWrap: true,
+            // Newest first, so new parts appear at the top as they come.
+            itemCount: parts.length,
+            itemBuilder: (_, i) {
+              final p = parts[parts.length - 1 - i];
+              final playing = _playingPart == '$lane#${p.index}';
+              return ListTile(
+                dense: true,
+                visualDensity: VisualDensity.compact,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                leading: IconButton(
+                  tooltip: playing ? 'Stop' : 'Play',
+                  icon: Icon(playing ? Icons.stop_circle : Icons.play_circle,
+                      color: Colors.blue.shade700),
+                  onPressed: () => _playPart(lane, p),
+                ),
+                // Tap the row = find its text (highlight for a few seconds).
+                onTap: () {
+                  _highlight(lane, p.start, p.end, pinned: true, show: true);
+                  Future<void>.delayed(const Duration(seconds: 8), () {
+                    if (_playingPart != '$lane#${p.index}') {
+                      _clearHighlight(lane, p.start);
+                    }
+                  });
+                },
+                title: Text(
+                  '#${p.index}   ${_partTime(p.start)} – ${_partTime(p.end)}',
+                  style: const TextStyle(
+                      fontFeatures: [FontFeature.tabularFigures()]),
+                ),
+                subtitle: Text('${p.seconds.toStringAsFixed(1)} s'),
+                trailing: IconButton(
+                  tooltip: 'Download this part',
+                  icon: const Icon(Icons.file_download_outlined, size: 20),
+                  onPressed: () => _downloadPart(lane, p),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
   void _newSession() {
     final old = _lanes.values.map((l) => l.scroll).toList();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -766,8 +1138,14 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
         s.dispose();
       }
     });
+    _partPlayer.stop();
     setState(() {
       _lanes.clear();
+      _ttsParts.clear();
+      _playingPart = null;
+      _hlLane = null;
+      _hlStart = _hlEnd = null;
+      _hlPinned = false;
       _error = null;
       _state = _LiveState.idle;
       _stopwatch.reset();
@@ -861,14 +1239,41 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
       return;
     }
 
-    // Spoken translation for the language being listened to.
+    // Spoken translation: every part is listed; the language being
+    // listened to is also played aloud.
     if (msg['_tts'] == true) {
       final audio = msg['audio']?.toString();
-      if (audio != null && audio.isNotEmpty && msg['_lane'] == _ttsLane) {
+      if (audio == null || audio.isEmpty) return;
+      final lane = (msg['_lane'] ?? 'tts').toString().toLowerCase();
+      final format = msg['format']?.toString();
+      final rate = (msg['rate'] as num?)?.toInt();
+      setState(() {
+        final list = _ttsParts.putIfAbsent(lane, () => <_TtsPart>[]);
+        list.add(_TtsPart(
+          index: list.length + 1,
+          b64: audio,
+          format: format,
+          rate: rate,
+          start: (msg['start'] as num?)?.toDouble(),
+          end: (msg['end'] as num?)?.toDouble(),
+        ));
+      });
+      final listen = msg.containsKey('listen')
+          ? msg['listen'] == true
+          : lane == _ttsLane; // older relay: only the heard language came
+      if (listen && lane == _ttsLane) {
+        final st = (msg['start'] as num?)?.toDouble();
+        final en = (msg['end'] as num?)?.toDouble();
         _tts.enqueue(
           audio,
-          format: msg['format']?.toString(),
-          rate: (msg['rate'] as num?)?.toInt(),
+          format: format,
+          rate: rate,
+          onStart: () {
+            if (!_hlPinned) _highlight(lane, st, en);
+          },
+          onEnd: () {
+            if (!_hlPinned) _clearHighlight(lane, st);
+          },
         );
       }
       return;
@@ -902,11 +1307,15 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
       if (unstable) {
         lane.pending = text;
       } else {
-        lane.finals.add(text);
+        lane.addFinal(
+          text,
+          (msg['_start'] as num?)?.toDouble(),
+          (msg['_end'] as num?)?.toDouble(),
+        );
         lane.pending = '';
       }
     });
-    _scrollToEnd(lane);
+    if (!(_hlPinned && _hlLane == laneKey)) _scrollToEnd(lane);
   }
 
   /// Switch the spoken translation heard live (null = off). Called from a
@@ -1011,6 +1420,8 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
       final dst = _lanes.putIfAbsent(to, () => _Lane(to, _laneTitle(to)));
       // The temporary panel's lines came first.
       dst.finals.insertAll(0, src.finals);
+      dst.starts.insertAll(0, src.starts);
+      dst.ends.insertAll(0, src.ends);
       if (dst.pending.isEmpty) dst.pending = src.pending;
       if (_selectedLane == from) _selectedLane = to;
     });
@@ -1174,7 +1585,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
           _teardown(notifyServer: true);
           for (final l in _lanes.values) {
             if (l.pending.isNotEmpty) {
-              l.finals.add(l.pending);
+              l.addFinal(l.pending);
               l.pending = '';
             }
           }
@@ -1212,6 +1623,10 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
                         _state == _LiveState.finishing)) ...[
                   const SizedBox(height: 8),
                   _buildTtsSelector(context),
+                ],
+                if (_ttsParts.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  _buildTtsParts(context),
                 ],
                 if (_error != null) ...[
                   const SizedBox(height: 8),
@@ -1873,6 +2288,40 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
     );
   }
 
+  /// Running text; the part a TTS chunk is speaking is highlighted.
+  List<InlineSpan> _finalSpans(_Lane lane) {
+    final hit = _highlightedFinals(lane);
+    if (hit.isEmpty) return [TextSpan(text: lane.fullText)];
+    final spans = <InlineSpan>[];
+    final buf = <String>[];
+    bool? bufHi;
+    void flush() {
+      if (buf.isEmpty) return;
+      spans.add(TextSpan(
+        text: joinFluent(buf),
+        style: bufHi == true
+            ? TextStyle(
+                backgroundColor: Colors.amber.shade200,
+                color: Colors.black,
+              )
+            : null,
+      ));
+      buf.clear();
+    }
+
+    for (var i = 0; i < lane.finals.length; i++) {
+      final hi = hit.contains(i);
+      if (bufHi != null && hi != bufHi) {
+        flush();
+        spans.add(const TextSpan(text: ' '));
+      }
+      bufHi = hi;
+      buf.add(lane.finals[i]);
+    }
+    flush();
+    return spans;
+  }
+
   Widget _buildLanePanel(BuildContext c, _Lane lane) {
     final hasText = lane.finals.isNotEmpty;
     final textSize = _isNarrow(c) ? 15.0 : 17.0;
@@ -1924,24 +2373,25 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
                       controller: lane.scroll,
                       padding: const EdgeInsets.all(12),
                       children: [
-                        for (final t in lane.finals)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 8),
-                            child: Text(
-                              t,
-                              style: TextStyle(fontSize: textSize, height: 1.4),
-                            ),
+                        // Running text: finished segments flow on in one
+                        // paragraph, the still-changing part follows in grey.
+                        Text.rich(
+                          TextSpan(
+                            style: TextStyle(fontSize: textSize, height: 1.4),
+                            children: [
+                              ..._finalSpans(lane),
+                              if (lane.pending.isNotEmpty)
+                                TextSpan(
+                                  text: (lane.finals.isEmpty ? '' : ' ') +
+                                      lane.pending.trim(),
+                                  style: TextStyle(
+                                    color: Colors.grey.shade600,
+                                    fontStyle: FontStyle.italic,
+                                  ),
+                                ),
+                            ],
                           ),
-                        if (lane.pending.isNotEmpty)
-                          Text(
-                            lane.pending,
-                            style: TextStyle(
-                              fontSize: textSize,
-                              height: 1.4,
-                              color: Colors.grey.shade600,
-                              fontStyle: FontStyle.italic,
-                            ),
-                          ),
+                        ),
                       ],
                     ),
                   ),

@@ -10,6 +10,7 @@ import 'package:asr_live_translator/screens/session_detail_screen.dart';
 import 'package:asr_live_translator/screens/live_sessions_screen.dart';
 import 'package:asr_live_translator/services/ui_mode.dart';
 import 'package:asr_live_translator/widgets/server_connection_panel.dart';
+import 'package:asr_live_translator/widgets/view_switcher.dart';
 import 'package:asr_live_translator/theme/responsive.dart';
 import 'package:asr_live_translator/widgets/job_progress_panel.dart';
 import 'package:flutter/foundation.dart';
@@ -168,6 +169,7 @@ class _WorkingScreenState extends State<WorkingScreen>
     _registerDropZone();
     _updateWorkingScreenUrl();
     _fetchProjects();
+    _loadTab();
     // Re-run once the token is known, in case the first call raced
     // ahead of _checkConnection().
     Future.delayed(const Duration(seconds: 1), () {
@@ -278,6 +280,7 @@ class _WorkingScreenState extends State<WorkingScreen>
       _showSnackBar('$skipped non-video file(s) skipped.', isError: true);
     }
 
+    if (_showLive) await _setTab(false); // uploads belong to the video list
     _dropBusy = true;
     try {
       // One after another, each with the usual upload dialog.
@@ -367,6 +370,54 @@ class _WorkingScreenState extends State<WorkingScreen>
   List<String> _folders = [];
   String? _folderFilter; // null = all videos, _unsortedFilter, or a name
   String? _dropHover;    // folder chip currently under a dragged card
+
+  // ─── Videos / Live sessions switcher ─────────────────────────
+  static const String _tabPref = 'working_tab';
+  bool _showLive = false;
+  int _liveReload = 0;
+
+  Future<void> _loadTab() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final live = prefs.getString(_tabPref) == 'live';
+      if (mounted && live != _showLive) setState(() => _showLive = live);
+    } catch (_) {}
+  }
+
+  Future<void> _setTab(bool live) async {
+    if (live == _showLive) return;
+    setState(() => _showLive = live);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_tabPref, live ? 'live' : 'videos');
+    } catch (_) {}
+    if (!live) _fetchProjects(); // pick up anything new
+  }
+
+  Widget _buildTabSwitcher(Responsive r) {
+    return ViewSwitcher(
+      options: const [
+        ViewSwitcherOption(
+          icon: Icons.video_library_outlined,
+          label: 'Video list',
+          shortLabel: 'Videos',
+        ),
+        ViewSwitcherOption(
+          icon: Icons.mic_none,
+          label: 'Live transcripts',
+          shortLabel: 'Live',
+        ),
+      ],
+      selected: _showLive ? 1 : 0,
+      onChanged: (i) => _setTab(i == 1),
+    );
+  }
+
+  /// Same page padding as the Live transcripts list, so the switcher,
+  /// the big action button and the search field sit at the same place
+  /// in both views.
+  double _pagePad(BuildContext c) =>
+      MediaQuery.sizeOf(c).width < 600 ? 12 : 24;
 
   Future<void> _fetchFolders() async {
     try {
@@ -1811,19 +1862,6 @@ class _WorkingScreenState extends State<WorkingScreen>
     );
   }
 
-  // ─── Live ASR (microphone) ────────────────────────────────────
-  /// Opens the Live Sessions list (finished live sessions + "New live
-  /// session", which uses the browser microphone).
-  Future<void> _startLiveAsr() async {
-    if (!mounted) return;
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const LiveSessionsScreen()),
-    );
-    if (!mounted) return;
-    await _updateWorkingScreenUrl();
-  }
-
   // ─── Logout ───────────────────────────────────────────────────
   Future<void> _logoutPublic() async {
     if (!mounted) return;
@@ -1868,7 +1906,9 @@ class _WorkingScreenState extends State<WorkingScreen>
           const UiModeToggle(),
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: _fetchProjects,
+            onPressed: _showLive
+                ? () => setState(() => _liveReload++)
+                : _fetchProjects,
             tooltip: 'Refresh list',
           ),
           IconButton(
@@ -1878,7 +1918,13 @@ class _WorkingScreenState extends State<WorkingScreen>
           ),
         ],
       ),
-      body: _withDropZone(CustomScrollView(
+      body: _withDropZone(_showLive
+          ? LiveSessionsScreen(
+              embedded: true,
+              top: _buildTabSwitcher(r),
+              reloadToken: _liveReload,
+            )
+          : CustomScrollView(
               // Connection panel, header, storage bar and grid all live
               // in one scroll view. On a tall window everything fits and
               // no scrollbar appears; on a short window the top parts
@@ -1889,8 +1935,18 @@ class _WorkingScreenState extends State<WorkingScreen>
                 SliverToBoxAdapter(
                   child: Padding(
                     padding: EdgeInsets.fromLTRB(
-                        r.spaceL, r.spaceL, r.spaceL, 0),
+                        _pagePad(context), _pagePad(context),
+                        _pagePad(context), 0),
                     child: const ServerConnectionPanel(),
+                  ),
+                ),
+                // ─── Videos / Live transcripts ────────────────────
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(
+                        _pagePad(context), _pagePad(context),
+                        _pagePad(context), 0),
+                    child: _buildTabSwitcher(r),
                   ),
                 ),
                 if (_isLoading)
@@ -1902,7 +1958,9 @@ class _WorkingScreenState extends State<WorkingScreen>
                 // ─── Header: search / sort / upload ───────────────
                 SliverToBoxAdapter(
                   child: Padding(
-                    padding: EdgeInsets.all(r.spaceL),
+                    padding: EdgeInsets.fromLTRB(
+                        _pagePad(context), _pagePad(context),
+                        _pagePad(context), 8),
                     child: _buildHeaderRow(r),
                   ),
                 ),
@@ -1911,7 +1969,7 @@ class _WorkingScreenState extends State<WorkingScreen>
                 SliverToBoxAdapter(
                   child: Padding(
                     padding: EdgeInsets.fromLTRB(
-                        r.spaceL, 0, r.spaceL, r.spaceS),
+                        _pagePad(context), 0, _pagePad(context), 12),
                     child: _buildFolderBar(r),
                   ),
                 ),
@@ -1982,17 +2040,13 @@ class _WorkingScreenState extends State<WorkingScreen>
   /// Search field, sort dropdown and upload button. Wraps to two lines
   /// on compact viewports so nothing gets crushed.
   Widget _buildHeaderRow(Responsive r) {
+    // Same look as the search field of the Live transcripts list.
     final searchField = TextField(
-      style: TextStyle(fontSize: r.fontBody),
-      decoration: InputDecoration(
-        hintText: 'Search by name or file...',
-        prefixIcon: const Icon(Icons.search),
-        border: const OutlineInputBorder(),
+      decoration: const InputDecoration(
+        hintText: 'Search videos by name or file…',
+        prefixIcon: Icon(Icons.search),
+        border: OutlineInputBorder(),
         isDense: true,
-        contentPadding: EdgeInsets.symmetric(
-          horizontal: r.spaceM,
-          vertical: r.spaceM,
-        ),
       ),
       onChanged: (value) {
         setState(() => _searchQuery = value);
@@ -2012,14 +2066,6 @@ class _WorkingScreenState extends State<WorkingScreen>
       onChanged: (value) {
         if (value != null) setState(() => _sortMode = value);
       },
-    );
-
-    final buttonStyle = ElevatedButton.styleFrom(
-      padding: EdgeInsets.symmetric(
-        horizontal: r.spaceM,
-        vertical: r.spaceM,
-      ),
-      textStyle: TextStyle(fontSize: r.fontBody),
     );
 
     // One "Video Upload" button; every import path is a sub-option.
@@ -2043,7 +2089,8 @@ class _WorkingScreenState extends State<WorkingScreen>
             child: const Text('From text links'),
           ),
       ],
-      builder: (context, controller, _) => ElevatedButton.icon(
+      // Same size and style as "New live session" in the live list.
+      builder: (context, controller, _) => FilledButton.icon(
         onPressed: () =>
             controller.isOpen ? controller.close() : controller.open(),
         icon: const Icon(Icons.upload),
@@ -2053,64 +2100,44 @@ class _WorkingScreenState extends State<WorkingScreen>
             const Text('Video Upload'),
             Icon(
               controller.isOpen ? Icons.arrow_drop_up : Icons.arrow_drop_down,
-              size: 20,
+              size: 22,
             ),
           ],
         ),
-        style: buttonStyle,
+        style: FilledButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+          textStyle:
+              const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+        ),
       ),
     );
 
-    // Entry point for live microphone ASR + translation.
-    final liveButton = Tooltip(
-      message: 'Live ASR & translation (microphone)',
-      child: ElevatedButton.icon(
-        onPressed: _startLiveAsr,
-        icon: const Icon(Icons.mic),
-        label: const Text('Live'),
-        style: buttonStyle,
-      ),
-    );
-
-    final actionButtons = Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        uploadButton,
-        SizedBox(width: r.spaceS),
-        liveButton,
-      ],
-    );
-
-    // Compact: search on its own line, sort+upload on a second line.
-    if (r.isCompact) {
+    // Same layout as the Live transcripts list: big button first, then
+    // search (phones: stacked, full width).
+    if (MediaQuery.sizeOf(context).width < 600) {
       return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          uploadButton,
+          const SizedBox(height: 12),
           searchField,
-          SizedBox(height: r.spaceS),
-          Row(
-            children: [
-              if (UiMode.isExpert)
-                Expanded(child: sortDropdown)
-              else
-                const Spacer(),
-              SizedBox(width: r.spaceS),
-              actionButtons,
-            ],
-          ),
+          if (UiMode.isExpert) ...[
+            const SizedBox(height: 6),
+            Align(alignment: Alignment.centerLeft, child: sortDropdown),
+          ],
         ],
       );
     }
 
-    // Wide: one row.
     return Row(
       children: [
+        uploadButton,
+        const SizedBox(width: 16),
         Expanded(child: searchField),
-        SizedBox(width: r.spaceS),
         if (UiMode.isExpert) ...[
+          const SizedBox(width: 12),
           sortDropdown,
-          SizedBox(width: r.spaceS),
         ],
-        actionButtons,
       ],
     );
   }

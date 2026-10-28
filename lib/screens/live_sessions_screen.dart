@@ -26,7 +26,22 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 class LiveSessionsScreen extends StatefulWidget {
-  const LiveSessionsScreen({super.key});
+  const LiveSessionsScreen({
+    super.key,
+    this.embedded = false,
+    this.top,
+    this.reloadToken = 0,
+  });
+
+  /// Shown inside another page (the working screen's "Live sessions"
+  /// tab): no Scaffold / AppBar of its own.
+  final bool embedded;
+
+  /// Extra widget under the server panel (e.g. the Videos / Live switcher).
+  final Widget? top;
+
+  /// Change it to make the list reload (the host page's Refresh button).
+  final int reloadToken;
 
   @override
   State<LiveSessionsScreen> createState() => _LiveSessionsScreenState();
@@ -57,6 +72,12 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
     ServerConnection.tokenChanged.addListener(_load);
     ServerConnection.serverChanged.addListener(_load);
     _init();
+  }
+
+  @override
+  void didUpdateWidget(LiveSessionsScreen old) {
+    super.didUpdateWidget(old);
+    if (old.reloadToken != widget.reloadToken && !_loading) _load();
   }
 
   @override
@@ -138,12 +159,74 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
     if (deleted == true && mounted) _load();
   }
 
+  /// Give the session a chosen name (shown above live_<date>-<time>).
+  Future<void> _rename(LiveSessionSummary s) async {
+    final controller = TextEditingController(text: s.title);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Name this session'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: controller,
+              autofocus: true,
+              maxLength: 200,
+              decoration: const InputDecoration(
+                labelText: 'Session name',
+                hintText: 'e.g. Lecture International Law, week 3',
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+            ),
+            Text(
+              'Recorded as: ${s.name}',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+            ),
+          ],
+        ),
+        actions: [
+          if (s.title.isNotEmpty)
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, ''),
+              child: const Text('Remove name'),
+            ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    // Controller left to the GC (disposing races the closing animation).
+    if (result == null || result == s.title) return;
+    final before = s.title;
+    setState(() => s.title = result); // immediate
+    try {
+      final stored = await LiveSessionsApi.rename(s.id, result);
+      if (mounted) setState(() => s.title = stored);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => s.title = before);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Rename failed: $e'),
+        backgroundColor: Colors.red,
+      ));
+    }
+  }
+
   Future<void> _delete(LiveSessionSummary s) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Delete live session?'),
-        content: Text('"${s.name}" and all its translations will be removed. '
+        content: Text('"${s.displayName}" and all its translations will be removed. '
             'This cannot be undone.'),
         actions: [
           TextButton(
@@ -164,7 +247,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
       if (!mounted) return;
       setState(() => _sessions = _sessions.where((x) => x.id != s.id).toList());
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Deleted "${s.name}"')),
+        SnackBar(content: Text('Deleted "${s.displayName}"')),
       );
     } catch (e) {
       if (!mounted) return;
@@ -361,8 +444,8 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
     try {
       await LiveSessionsApi.moveToFolder(s.id, folder);
       _snack(folder == null
-          ? '"${s.name}" moved to Unsorted'
-          : '"${s.name}" moved to "$folder"');
+          ? '"${s.displayName}" moved to Unsorted'
+          : '"${s.displayName}" moved to "$folder"');
     } catch (e) {
       if (mounted) setState(() => s.folder = before);
       _snack('Could not move session: $e', error: true);
@@ -374,7 +457,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
     final choice = await showDialog<String>(
       context: context,
       builder: (ctx) => SimpleDialog(
-        title: Text('Move "${s.name}" to'),
+        title: Text('Move "${s.displayName}" to'),
         children: [
           for (final f in _folders)
             SimpleDialogOption(
@@ -535,8 +618,30 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
         : inFolder
             .where((s) =>
                 s.name.toLowerCase().contains(q) ||
+                s.title.toLowerCase().contains(q) ||
                 s.preview.toLowerCase().contains(q))
             .toList();
+
+    final body = RefreshIndicator(
+        onRefresh: _load,
+        child: CustomScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          slivers: [
+            // ─── Server + connection (top of every page) ───
+            SliverPadding(
+              padding: EdgeInsets.fromLTRB(pad, pad, pad, 0),
+              sliver: const SliverToBoxAdapter(child: ServerConnectionPanel()),
+            ),
+            if (widget.top != null)
+              SliverPadding(
+                padding: EdgeInsets.fromLTRB(pad, pad, pad, 0),
+                sliver: SliverToBoxAdapter(child: widget.top),
+              ),
+            ..._listSlivers(pad, q, visible),
+          ],
+        ),
+      );
+    if (widget.embedded) return body;
 
     return Scaffold(
       appBar: AppBar(
@@ -552,16 +657,13 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
           ),
         ],
       ),
-      body: RefreshIndicator(
-        onRefresh: _load,
-        child: CustomScrollView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          slivers: [
-            // ─── Server + connection (top of every page) ───
-            SliverPadding(
-              padding: EdgeInsets.fromLTRB(pad, pad, pad, 0),
-              sliver: const SliverToBoxAdapter(child: ServerConnectionPanel()),
-            ),
+      body: body,
+    );
+  }
+
+  List<Widget> _listSlivers(
+      double pad, String q, List<LiveSessionSummary> visible) {
+    return [
             SliverPadding(
               padding: EdgeInsets.fromLTRB(pad, pad, pad, 8),
               sliver: SliverToBoxAdapter(child: _buildHeader(context)),
@@ -630,10 +732,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
                   itemBuilder: (_, i) => _buildSessionCard(visible[i]),
                 ),
               ),
-          ],
-        ),
-      ),
-    );
+    ];
   }
 
   Widget _buildHeader(BuildContext c) {
@@ -713,7 +812,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
             const SizedBox(width: 8),
             ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 260),
-              child: Text(s.name,
+              child: Text(s.displayName,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(color: Colors.white)),
             ),
@@ -753,12 +852,37 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      s.name,
-                      style: const TextStyle(
-                          fontWeight: FontWeight.w600, fontSize: 15),
-                      overflow: TextOverflow.ellipsis,
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            s.displayName,
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w600, fontSize: 15),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: s.title.isEmpty
+                              ? 'Give this session a name'
+                              : 'Rename',
+                          icon: Icon(Icons.edit_outlined,
+                              size: 16, color: Colors.grey.shade600),
+                          visualDensity: VisualDensity.compact,
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(
+                              minWidth: 28, minHeight: 28),
+                          onPressed: () => _rename(s),
+                        ),
+                      ],
                     ),
+                    if (s.title.isNotEmpty)
+                      Text(
+                        s.name,
+                        style: TextStyle(
+                            fontSize: 12, color: Colors.grey.shade600),
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     const SizedBox(height: 2),
                     Wrap(
                       spacing: 12,
@@ -814,13 +938,24 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
     );
   }
 
+  /// Icon + text; long text (e.g. many languages) wraps onto further
+  /// lines instead of running past the card's edge.
   Widget _meta(IconData icon, String text) => Row(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 13, color: Colors.grey.shade600),
+          Padding(
+            padding: const EdgeInsets.only(top: 1),
+            child: Icon(icon, size: 13, color: Colors.grey.shade600),
+          ),
           const SizedBox(width: 3),
-          Text(text,
-              style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+          Flexible(
+            child: Text(
+              text,
+              softWrap: true,
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+            ),
+          ),
         ],
       );
 

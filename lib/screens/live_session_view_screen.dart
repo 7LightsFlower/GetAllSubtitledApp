@@ -98,7 +98,7 @@ class _LiveSessionViewScreenState extends State<LiveSessionViewScreen>
   }
 
   void _copy(SavedLane lane) {
-    Clipboard.setData(ClipboardData(text: lane.text));
+    Clipboard.setData(ClipboardData(text: joinFluent(lane.text.split('\n'))));
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Copied: ${lane.title}')),
     );
@@ -106,7 +106,7 @@ class _LiveSessionViewScreenState extends State<LiveSessionViewScreen>
 
   void _download(SavedLane lane) {
     final blob = web.Blob(
-      <JSAny>[lane.text.toJS].toJS,
+      <JSAny>[joinFluent(lane.text.split('\n')).toJS].toJS,
       web.BlobPropertyBag(type: 'text/plain;charset=utf-8'),
     );
     final url = web.URL.createObjectURL(blob);
@@ -127,7 +127,7 @@ class _LiveSessionViewScreenState extends State<LiveSessionViewScreen>
     for (final l in rec.lanes) {
       buf
         ..writeln('══ ${l.title} ══')
-        ..writeln(l.text)
+        ..writeln(joinFluent(l.text.split('\n')))
         ..writeln();
     }
     final blob = web.Blob(
@@ -323,8 +323,10 @@ class _LiveSessionViewScreenState extends State<LiveSessionViewScreen>
   }
 
   Widget _buildLanePanel(SavedLane lane) {
-    final paragraphs =
-        lane.text.split('\n').where((p) => p.trim().isNotEmpty).toList();
+    // Older sessions were saved one segment per line: show them as
+    // running text as well.
+    final fluent = joinFluent(lane.text.split('\n'));
+    final paragraphs = fluent.isEmpty ? const <String>[] : [fluent];
     final textSize = _isNarrow(context) ? 15.0 : 17.0;
 
     return Card(
