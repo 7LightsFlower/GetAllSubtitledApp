@@ -1,9 +1,6 @@
-"""Flask backend for the ASR live translator.
+"""Flask backend for GetAllSubtitledApp (ASR + translation via KIT).
 
-Split out of a single backend.py into focused modules. The Flask app
-lives in :mod:`backend.app`.
+The app lives in backend.app (`app` / `application`); run it with
+`python run_backend.py` or `gunicorn backend.app:application`.
+Modules follow the order of the former single lib/backend.py.
 """
-
-from .app import create_app
-
-__all__ = ["create_app"]

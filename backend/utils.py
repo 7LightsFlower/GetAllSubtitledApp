@@ -1,27 +1,88 @@
-"""Small helpers: tokens, session-id extraction, files, time."""
+"""Small helpers: HTML parsing, KIT cookies, session ids, names, paths.
 
-from __future__ import annotations
+Split mechanically from the former lib/backend.py — code unchanged.
+"""
 
 import datetime
 import json
 import logging
 import os
 import re
-from urllib.parse import quote, urlsplit, urlunsplit
-
+from urllib.parse import quote
+import requests
 from flask import request
 
-from .config import (
-    SESSION_FOLDER,
-    LANGUAGE_NAMES,
-    _LANG_CODE_RE,
-)
-from .state import _state, sessions
+from .flask_app import BeautifulSoup, has_bs4
+from .servers import INTERNAL_SERVER_URL
+from .config import SESSION_FOLDER, _state, internal_session, sessions
 
 
-# ─── Time helpers ──────────────────────────────────────────────────────
-def utc_now_iso() -> str:
-    """Return the current UTC time as an ISO-8601 string."""
+def parse_html_with_bs4(html_content):
+    """Parse HTML content using BeautifulSoup if available."""
+    if has_bs4 and html_content:
+        try:
+            soup = BeautifulSoup(html_content, "html.parser")
+            return soup
+        except (TypeError, ValueError) as e:
+            logging.warning("Failed to parse HTML with BeautifulSoup: %s", e)
+    return None
+
+
+# Dex session cookie for the internal server. When set, TTS and other
+# media fetches send this cookie instead of the bearer token — which is
+# what a browser does when it plays audio from the archive page. The
+# bearer token continues to be used for /upload_lecture and
+# /archive_messages/, where it is required.
+#
+# Extract the cookie from a signed-in browser:
+#   DevTools → Application → Cookies → https://lt2srv.iar.kit.edu
+#   copy the value of `_forward_auth`.
+#
+# When empty, the backend falls back to the bearer token in the cookie
+# slot, which is what the rest of the code already does.
+_kit_session_cookie: str = os.environ.get("KIT_SESSION_COOKIE", "").strip()
+
+
+def _media_cookie(token: str) -> str:
+    """Return the cookie value to use for a media fetch.
+
+    Prefers the Dex session cookie when one is configured; otherwise
+    falls back to the bearer token, matching legacy behaviour.
+    """
+    return _kit_session_cookie or token
+
+
+def _media_cookie_is_dex() -> bool:
+    """True when the configured media cookie is a Dex session cookie."""
+    return bool(_kit_session_cookie)
+
+
+def ensure_authenticated(token: str) -> bool:
+    """Check if the current session has a valid cookie."""
+    if token == _state["token"] and internal_session.cookies:
+        try:
+            resp = internal_session.get(
+                INTERNAL_SERVER_URL, allow_redirects=False, timeout=5
+            )
+            if resp.status_code == 200 and "dex" not in resp.url:
+                return True
+        except requests.exceptions.RequestException:
+            pass
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        resp = internal_session.get(
+            INTERNAL_SERVER_URL, headers=headers, allow_redirects=False, timeout=10
+        )
+        if resp.status_code == 200 and "dex" not in resp.url:
+            _state["token"] = token
+            return True
+        return False
+    except requests.exceptions.RequestException:
+        return False
+
+
+def utc_now_iso():
+    """Return current UTC time in ISO 8601 with milliseconds and 'Z'."""
     return (
         datetime.datetime.now(datetime.UTC)
         .isoformat(timespec="milliseconds")
@@ -30,7 +91,13 @@ def utc_now_iso() -> str:
 
 
 def file_mtime_iso(path: str) -> str:
-    """Return the file modification time as an ISO-8601 UTC string."""
+    """File mtime as an ISO 8601 string with a 'Z' suffix (UTC).
+
+    Explicitly tagged as UTC so the client can convert to the
+    browser's local timezone for display. Without the suffix,
+    `DateTime.parse` in Dart treats the value as local time and the
+    displayed time is off by the viewer's offset from UTC.
+    """
     return (
         datetime.datetime.fromtimestamp(
             os.path.getmtime(path), tz=datetime.timezone.utc
@@ -40,8 +107,16 @@ def file_mtime_iso(path: str) -> str:
     )
 
 
-# ─── Request helpers ───────────────────────────────────────────────────
 def _public_base_url() -> str:
+    """Base URL the browser should use, honouring the proxy chain.
+
+    nginx fronts this container over plain HTTP and sets
+    ``X-Forwarded-Proto: $scheme`` (= "http") unconditionally, so that
+    header carries no information here. What *is* reliable is the host:
+    if the browser reached us through a real hostname, the outer proxy
+    terminated TLS, so the URL we hand back must be https. If the host
+    is localhost / 127.0.0.1 we're in local development and http is right.
+    """
     fwd_host = request.headers.get("X-Forwarded-Host")
     if fwd_host:
         bare = fwd_host.split(":", 1)[0]
@@ -50,82 +125,13 @@ def _public_base_url() -> str:
     return request.host_url.rstrip("/")
 
 
-def thumbnail_absolute_url(video: dict) -> str | None:
-    """Return an absolute URL for a local thumbnail, preserving other URLs."""
-    thumb = video.get("thumbnail_url")
-    if not thumb or not thumb.startswith("/thumbnails/"):
-        return thumb
-    filename = thumb[len("/thumbnails/") :]
-    return f"{_public_base_url()}/thumbnails/{quote(filename, safe='')}"
-
-
-def short_sid(session_id: str | None, keep: int = 8) -> str:
-    """Return a compact, user-friendly preview of a session identifier."""
-    if not session_id:
-        return "<none>"
-    return session_id[:keep] + "…"
-
-
-# ─── Token helpers ─────────────────────────────────────────────────────
-def email_from_token(token: str) -> str:
-    """Extract the email address from a token containing user metadata."""
-    if not token:
-        return ""
-    parts = token.split("|")
-    if len(parts) >= 3:
-        email = parts[-1].strip()
-        if "@" in email:
-            return email
-    return ""
-
-
-def log_token_email(token: str, where: str) -> None:
-    """Log the email encoded in a token, without exposing the token itself."""
-    if not token:
-        logging.info("%s: token is empty", where)
-        return
-    parts = token.split("|")
-    if len(parts) >= 3:
-        logging.info(
-            "%s: token email = %r (token length %d)",
-            where,
-            parts[-1].strip(),
-            len(token),
-        )
-    else:
-        logging.info("%s: token has %d fields, cannot extract email", where, len(parts))
-
-
-def user_home_path(token: str) -> str:
-    """Return the home directory encoded in a token."""
-    if not token:
-        raise ValueError("Cannot derive the upload path: no token was supplied.")
-    parts = token.split("|")
-    if len(parts) < 3:
-        raise ValueError(
-            f"Cannot derive the upload path: token has {len(parts)} "
-            f"pipe-separated fields, need at least 3."
-        )
-    email = parts[-1].strip()
-    if "@" not in email:
-        raise ValueError(
-            f"Cannot derive the upload path: last token field "
-            f"{email!r} does not contain '@'."
-        )
-    return f"/home/{email}"
-
-
-def effective_token(session_id: str, fallback: str = "") -> str:
-    """Return the token that owns this session."""
-    stored = (sessions.get(session_id) or {}).get("token")
-    return stored or fallback or (_state.get("token") or "")
-
-
-# ─── Session id extraction ─────────────────────────────────────────────
 _SESSION_ID_PATTERNS = [
+    # <a href="/archivesession/XYZ">…</a>   (and /session/)
     re.compile(r"/archivesession/([A-Za-z0-9_\-=]+)"),
     re.compile(r"/session/([A-Za-z0-9_\-=]+)"),
+    # <meta http-equiv="refresh" content="0; url=/archivesession/XYZ">
     re.compile(r'content=["\'][^"\']*url=([^"\']+)["\']', re.IGNORECASE),
+    # window.location = "/archivesession/XYZ"  (or .href = …)
     re.compile(
         r"""
         (?:window\.location(?:\.href)?|location\.assign\(|location\.replace\()
@@ -134,19 +140,23 @@ _SESSION_ID_PATTERNS = [
         """,
         re.VERBOSE,
     ),
+    # <form action="/something">  → we'll resolve this to a session id later
     re.compile(r'<form[^>]*action=["\']([^"\']+)["\']', re.IGNORECASE),
+    # data-session-id="XYZ", data-session="XYZ", data-id="XYZ"
     re.compile(
         r'data-(?:session[-_]?id|session|id)=["\']([^"\']+)["\']',
         re.IGNORECASE,
     ),
+    # Bare "session_id":"XYZ" inside <script>…</script>
     re.compile(r'["\']session(?:_?id)?["\']\s*:\s*["\']([^"\']+)["\']'),
 ]
 
+# Query-string form:  /archivesession?id=XYZ  or  ?session=XYZ
 _QS_PARAM_RE = re.compile(r'[?&](?:session(?:_?id)?|id)=([^&"\'\s<>]+)', re.IGNORECASE)
 
 
-def session_id_from_any_url(url: str) -> str | None:
-    """Extract a session identifier from a URL."""
+def _session_id_from_any_url(url: str) -> str | None:
+    """Pull a session id out of any URL, path or query string."""
     if not url:
         return None
     for marker in ("/archivesession/", "/session/"):
@@ -155,15 +165,27 @@ def session_id_from_any_url(url: str) -> str | None:
             if sid:
                 return sid
     m = _QS_PARAM_RE.search(url)
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    return None
 
 
-def extract_session_id(resp) -> str | None:
-    """Extract a session identifier from a response URL, payload, or body."""
-    sid = session_id_from_any_url(resp.url or "")
+def _extract_session_id(resp: requests.Response) -> str | None:
+    """Find the session id the internal server assigned to an upload.
+
+    Tries, in order:
+      1. the final redirect URL,
+      2. JSON body fields (top level, then under "data"),
+      3. any URL or link in the JSON that contains /archivesession/,
+      4. several HTML patterns (see _SESSION_ID_PATTERNS),
+      5. a session id in a <script>…</script> JSON blob.
+    """
+    # 1. Redirect URL
+    sid = _session_id_from_any_url(resp.url or "")
     if sid:
         return sid
 
+    # 2./3. JSON body
     try:
         payload = resp.json()
     except (ValueError, TypeError):
@@ -181,71 +203,196 @@ def extract_session_id(resp) -> str | None:
             "archive_session_id",
             "archiveSessionId",
         ):
-            value = d.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+            v = d.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
         for key in ("session_url", "url", "link"):
-            value = d.get(key)
-            if isinstance(value, str):
-                found = session_id_from_any_url(value)
+            v = d.get(key)
+            if isinstance(v, str):
+                found = _session_id_from_any_url(v)
                 if found:
                     return found
         return None
 
-    def _from_payload(value) -> str | None:
-        if not isinstance(value, dict):
-            return None
-        sid = _from_dict(value)
+    if isinstance(payload, dict):
+        sid = _from_dict(payload)
         if sid:
             return sid
-        nested = value.get("data")
-        return _from_dict(nested) if isinstance(nested, dict) else None
+        nested = payload.get("data")
+        if isinstance(nested, dict):
+            sid = _from_dict(nested)
+            if sid:
+                return sid
 
-    sid = _from_payload(payload)
+    # 4. HTML body patterns
+    body = resp.text or ""
+    for pattern in _SESSION_ID_PATTERNS:
+        m = pattern.search(body)
+        if not m:
+            continue
+        candidate = m.group(1).strip()
+        # The pattern might have captured a URL rather than a bare id.
+        resolved = _session_id_from_any_url(candidate)
+        if resolved:
+            return resolved
+        # Or it might already be a bare id (data-attr / JS-object cases).
+        # Reject obviously non-id-looking matches (paths, long strings).
+        if candidate and len(candidate) <= 200 and " " not in candidate:
+            return candidate
+
+    # ── 5. Inline <script> JSON blob ─────────────────────────────
+    # KIT sometimes embeds the session as a JS object literal rather
+    # than as a data-attribute or a plain <a href>. Look for the
+    # first `<script>` that assigns a JSON object to a variable and
+    # try to pull a session id out of it.
+    m = re.search(
+        r"<script[^>]*>\s*(?:var|const|let)\s+\w+\s*=\s*({[^<]+})",
+        body,
+    )
+    if m:
+        try:
+            blob = json.loads(m.group(1))
+            sid = _from_dict(blob)
+            if sid:
+                return sid
+            # Some KIT pages nest the session one level deeper.
+            nested = blob.get("data") if isinstance(blob, dict) else None
+            if isinstance(nested, dict):
+                sid = _from_dict(nested)
+                if sid:
+                    return sid
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    sid = _session_id_from_any_url(body)
     if sid:
+        logging.info("_extract_session_id: matched bare URL in body")
         return sid
 
-    body = resp.text or ""
-    sid = session_id_from_any_url(body)
-    if not sid:
-        for pattern in _SESSION_ID_PATTERNS:
-            match = pattern.search(body)
-            if not match:
-                continue
-            candidate = match.group(1).strip()
-            sid = session_id_from_any_url(candidate)
-            if not sid and candidate and len(candidate) <= 200 and " " not in candidate:
-                sid = candidate
-            if sid:
-                break
+    logging.warning(
+        "_extract_session_id: no match. status=%s final_url=%s "
+        "content_type=%r body_len=%d",
+        resp.status_code,
+        resp.url,
+        resp.headers.get("Content-Type", "<none>"),
+        len(body),
+    )
+    return None
 
-    if not sid:
-        match = re.search(
-            r"<script[^>]*>\s*(?:var|const|let)\s+\w+\s*=\s*({[^<]+})",
-            body,
+
+def _thumbnail_absolute_url(video: dict) -> str | None:
+    """Build a browser-usable, percent-encoded thumbnail URL.
+
+    Stored `thumbnail_url` values are relative ("/thumbnails/x.jpg")
+    and may contain spaces / non-ASCII characters from the original
+    video title. Concatenating them onto the base URL verbatim
+    produces an invalid URL that Image.network silently rejects.
+    """
+    thumb = video.get("thumbnail_url")
+    if not thumb or not thumb.startswith("/thumbnails/"):
+        return thumb
+    filename = thumb[len("/thumbnails/") :]
+    return f"{_public_base_url()}/thumbnails/{quote(filename, safe='')}"
+
+
+def _short_sid(session_id: str | None, keep: int = 8) -> str:
+    """First N chars of a session id, for logs.
+
+    Session ids here are base64-encoded paths and can be 120+ chars.
+    Logging them in full drowns out everything else. The full id is
+    still used for filesystem paths and HTTP responses.
+    """
+    if not session_id:
+        return "<none>"
+    return session_id[:keep] + "…"
+
+
+def _log_token_email(token: str, where: str) -> None:
+    """Log the email field of a bearer token, for forensics only.
+
+    Never rewrites the token. Never caches the result. Purely a
+    diagnostic so the backend log shows, at upload time, exactly
+    which spelling KIT will see.
+    """
+    if not token:
+        logging.info("%s: token is empty", where)
+        return
+    parts = token.split("|")
+    if len(parts) >= 3:
+        logging.info(
+            "%s: token email = %r (token length %d)",
+            where,
+            parts[-1].strip(),
+            len(token),
         )
-        if match:
-            try:
-                blob = json.loads(match.group(1))
-                sid = _from_payload(blob)
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-    if not sid:
-        logging.warning(
-            "extract_session_id: no match. status=%s final_url=%s "
-            "content_type=%r body_len=%d",
-            resp.status_code,
-            resp.url,
-            resp.headers.get("Content-Type", "<none>"),
-            len(body),
+    else:
+        logging.info(
+            "%s: token has %d fields, cannot extract email",
+            where,
+            len(parts),
         )
-    return sid
 
 
-# ─── On-disk path naming ───────────────────────────────────────────────
-def safe_local_name(name: str) -> str:
-    """Return a filesystem-safe name derived from the provided name."""
+def _email_from_token(token: str) -> str:
+    """Extract the email from a KIT bearer token of the form
+    ``<opaque>|<expiry>|<email>``.
+
+    Returns an empty string when the token is missing or malformed,
+    so the caller can store whatever it has without special-casing.
+    """
+    if not token:
+        return ""
+    parts = token.split("|")
+    if len(parts) >= 3:
+        email = parts[-1].strip()
+        if "@" in email:
+            return email
+    return ""
+
+# ─── Subfolder inside the user's KIT home where every session lives ────
+# Every session uploaded through this backend is placed under
+# /home/<email>/GetAllSubtitledApp/<session_name>. Set the env var to
+# "" to fall back to /home/<email> (the old behaviour).
+KIT_SUBFOLDER = os.environ.get("KIT_SUBFOLDER", "GetAllSubtitledApp").strip().strip("/")
+
+def _user_home_path(token: str) -> str:
+    """Build the LTKIT upload path from the authenticated user.
+
+    Returns ``/home/<email>`` or ``/home/<email>/<KIT_SUBFOLDER>``.
+    The email is copied verbatim out of the bearer token — no domain
+    normalisation, no case-folding, no trimming beyond outer whitespace.
+    """
+    if not token:
+        raise ValueError("Cannot derive the upload path: no token was supplied.")
+
+    parts = token.split("|")
+    if len(parts) < 3:
+        raise ValueError(
+            f"Cannot derive the upload path: token has {len(parts)} "
+            f"pipe-separated fields, need at least 3 "
+            f"('<opaque>|<expiry>|<email>')."
+        )
+
+    email = parts[-1].strip()
+    if "@" not in email:
+        raise ValueError(
+            f"Cannot derive the upload path: last token field "
+            f"{email!r} does not contain '@'."
+        )
+
+    base = f"/home/{email}"
+    if KIT_SUBFOLDER:
+        return f"{base}/{KIT_SUBFOLDER}"
+    return base
+
+
+def _safe_local_name(name: str) -> str:
+    """Turn a session name into a filesystem-safe folder name.
+
+    Handles the characters that are illegal on Windows or awkward on
+    POSIX (``/ \\ : * ? " < > |``), strips trailing dots/spaces, and
+    caps the length so we stay well clear of PATH_MAX.
+    """
     if not name:
         return ""
     safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
@@ -255,9 +402,13 @@ def safe_local_name(name: str) -> str:
     return safe
 
 
-def unique_local_name(name: str) -> str:
-    """Return a filesystem-safe name that does not collide with existing sessions."""
-    base = safe_local_name(name) or "session"
+def _unique_local_name(name: str) -> str:
+    """Pick a filesystem-safe folder name for a new session.
+
+    If two sessions would otherwise share a name (the same lecture
+    uploaded twice, say), the second one gets a ``_2`` suffix.
+    """
+    base = _safe_local_name(name) or "session"
     taken = {s.get("local_name") for s in sessions.values() if s.get("local_name")}
     if base not in taken:
         return base
@@ -267,8 +418,13 @@ def unique_local_name(name: str) -> str:
     return f"{base}_{counter}"
 
 
-def session_dir(session_id: str) -> str:
-    """Return the directory for a session, using its local name when available."""
+def _session_dir(session_id: str) -> str:
+    """On-disk directory holding a session's downloaded files.
+
+    Prefers the human-readable ``local_name`` recorded on the session
+    dict; falls back to the raw session id for sessions saved before
+    ``local_name`` existed (i.e. any pre-existing state file).
+    """
     sess = sessions.get(session_id) or {}
     local_name = sess.get("local_name")
     if local_name:
@@ -276,17 +432,38 @@ def session_dir(session_id: str) -> str:
     return os.path.join(SESSION_FOLDER, session_id)
 
 
-# ─── Lazy field initialisers ───────────────────────────────────────────
-def ensure_greenscreen_fields(project: dict) -> dict:
-    """Ensure a project has the default greenscreen fields when missing."""
+def _effective_token(session_id: str, fallback: str = "") -> str:
+    """Return the token that owns this session.
+
+    KIT sessions are user-scoped: only the bearer that created a
+    session can read it back. We record that token on the session
+    record at upload time and reuse it for every subsequent KIT
+    call, regardless of which user is currently logged in to the
+    web UI.
+    """
+    stored = (sessions.get(session_id) or {}).get("token")
+    return stored or fallback or (_state.get("token") or "")
+
+
+def _ensure_greenscreen_fields(project: dict) -> dict:
+    """Make sure every project carries the green-screen bookkeeping fields.
+
+    Old state files predate these fields; rather than migrating the
+    pickle, we add them lazily on read. Idempotent.
+    """
     project.setdefault("greenscreen_file_name", None)
     project.setdefault("greenscreen_status", "pending")
     project.setdefault("greenscreen_progress", 0)
     return project
 
 
-def ensure_source_field(project: dict) -> dict:
-    """Ensure a project has a source value when one is missing."""
+def _ensure_source_field(project: dict) -> dict:
+    """Make sure every project carries a `source` string.
+
+    Old state files predate this field. We seed a sensible default
+    instead of re-probing, because /videos must stay fast and the
+    user can always edit the value from the card. Idempotent.
+    """
     if not project.get("source"):
         fname = (project.get("file_name") or "").lower()
         if "youtube" in fname:
@@ -296,203 +473,29 @@ def ensure_source_field(project: dict) -> dict:
     return project
 
 
-def ensure_codec_field(project: dict) -> dict:
-    """Ensure a project has an empty codec value when one is missing."""
+def _ensure_codec_field(project: dict) -> dict:
+    """Make sure every project carries a `codec` string.
+
+    Old state files predate this field. We do NOT re-probe here —
+    that would stall /videos for every project whose codec is
+    missing. An empty string means "unknown", and the UI handles
+    that case explicitly. Idempotent.
+    """
     project.setdefault("codec", "")
     return project
 
 
-def ensure_job_history(project: dict) -> dict:
-    """Ensure a project has an empty job history list."""
+def _ensure_job_history(project: dict) -> dict:
+    """Make sure every project carries a `job_history` list.
+
+    Old state files predate this field; add lazily on read. The list
+    is stored newest-first and capped client- and server-side at
+    MAX_JOB_HISTORY_ENTRIES. Idempotent.
+    """
     project.setdefault("job_history", [])
     return project
 
 
-# ─── Language helpers ──────────────────────────────────────────────────
-def extract_simple_language_name(language: str) -> str:
-    """Extract a readable language name from a provider-specific label."""
-    if not language:
-        return "Unknown"
-
-    match = re.search(r"\(([^)]+)\)", language)
-    if match:
-        candidate = match.group(1).strip()
-        if candidate.lower().startswith("language "):
-            candidate = candidate.split(" ", 1)[1].strip()
-        name = LANGUAGE_NAMES.get(candidate.lower())
-        if name:
-            return name
-
-    clean = language
-    stripped = False
-    for prefix in (
-        "Translation (Language ",
-        "Transcript (Original ASR - ",
-        "Transcript (Structured - ",
-        "Transcript (",
-    ):
-        if prefix in clean:
-            clean = clean.replace(prefix, "")
-            stripped = True
-    clean = clean.rstrip(")").strip() if stripped else clean.strip()
-
-    if _LANG_CODE_RE.match(clean):
-        return LANGUAGE_NAMES.get(clean.lower(), clean)
-    if clean.lower().startswith("language "):
-        clean = clean.split(" ", 1)[1].strip()
-        if _LANG_CODE_RE.match(clean):
-            return LANGUAGE_NAMES.get(clean.lower(), clean)
-    return clean or "Unknown"
-
-
-_ISO2_TO_ISO3 = {
-    "en": "eng",
-    "de": "deu",
-    "fr": "fra",
-    "es": "spa",
-    "it": "ita",
-    "pt": "por",
-    "nl": "nld",
-    "ru": "rus",
-    "ja": "jpn",
-    "ko": "kor",
-    "zh": "zho",
-    "ar": "ara",
-    "hi": "hin",
-    "pl": "pol",
-    "tr": "tur",
-    "uk": "ukr",
-    "vi": "vie",
-    "th": "tha",
-    "id": "ind",
-    "ms": "msa",
-    "fa": "fas",
-}
-
-
-def get_language_code(language_name: str) -> str | None:
-    """Return the ISO language code represented by a language name or label."""
-    if not language_name:
-        return None
-
-    name_to_code = {name.lower(): code for code, name in LANGUAGE_NAMES.items()}
-    raw = language_name.strip()
-    candidates = [raw]
-
-    match = re.search(r"\(([^)]+)\)", raw)
-    if match:
-        candidate = match.group(1).strip()
-        if candidate.lower().startswith("language "):
-            candidate = candidate.split(" ", 1)[1].strip()
-        candidates.append(candidate)
-
-    code_match = re.search(r"[\s:\-_]([a-z]{2})\b", raw, re.IGNORECASE)
-    if code_match:
-        candidates.append(code_match.group(1).lower())
-
-    for candidate in candidates:
-        normalized = candidate.lower()
-        if _LANG_CODE_RE.match(candidate):
-            return normalized
-        if normalized in name_to_code:
-            return name_to_code[normalized]
-
-    lower_raw = raw.lower()
-    for name, code in name_to_code.items():
-        if name in lower_raw:
-            return code
-
-    return None
-
-
-def get_language_code_iso3(language_name: str) -> str | None:
-    """Convert a language name to its ISO 3 language code."""
-    iso2 = get_language_code(language_name)
-    return _ISO2_TO_ISO3.get(iso2) if iso2 else None
-
-
-def safe_float(value, default: float = 0.0) -> float:
-    """Convert a value to float, returning the fallback for invalid input."""
-    if value is None:
-        return default
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except (ValueError, TypeError):
-            return default
-    return default
-
-
-def format_vtt_timestamp(seconds: float) -> str:
-    """Format a seconds value as a WebVTT timestamp."""
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    millis = int((seconds % 1) * 1000)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
-
-
-def is_meaningful_file(path: str) -> bool:
-    """Return whether a path points to a sufficiently large supported file."""
-    name = os.path.basename(path).lower()
-    try:
-        size = os.path.getsize(path)
-    except OSError:
-        return False
-    if name.endswith((".vtt", ".txt", ".json")):
-        return size > 20
-    return size > 1000
-
-
-def looks_like_wav(path: str) -> bool:
-    """Return whether a path points to a WAV file."""
-    try:
-        with open(path, "rb") as f:
-            header = f.read(12)
-    except OSError:
-        return False
-    return len(header) >= 12 and header[0:4] == b"RIFF" and header[8:12] == b"WAVE"
-
-
-def sanitize_session_name_for_kit(name: str) -> str:
-    """Normalize a session name for use in the kit."""
-    if not name:
-        return name
-    for src, dst in {
-        "\u2022": "-",
-        "\u2013": "-", 
-        "\u2014": "-",
-        "\u2018": "'",
-        "\u2019": "'",
-        "\u201c": '"',
-        "\u201d": '"',
-        "\u00a0": " ",
-    }.items():
-        name = name.replace(src, dst)
-    return re.sub(r"\s+", " ", name).strip()
-
-
-def norm_session_name(s: str) -> str:
-    """Normalize typographic characters and whitespace in a session name."""
-    for src, dst in {
-        "\u2018": "'",
-        "\u2019": "'",
-        "\u201c": '"',
-        "\u201d": '"',
-        "\u2013": "-",
-        "\u2014": "-",
-        "\u2022": "-",
-        "\u00a0": " ",
-    }.items():
-        s = s.replace(src, dst)
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def curl_safe_url(url: str) -> str:
-    """Return a URL whose path and query are safe for curl."""
-    parts = urlsplit(url)
-    path = quote(parts.path, safe="/%=")
-    query = quote(parts.query, safe="=&%")
-    return urlunsplit((parts.scheme, parts.netloc, path, query, parts.fragment))
+# Cap on how many job-history entries we keep per video. Matches the
+# client-side cap so the two never drift.
+MAX_JOB_HISTORY_ENTRIES = 20

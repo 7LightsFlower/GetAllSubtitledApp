@@ -1,298 +1,121 @@
-"""Flask application factory and entry point."""
+"""Start-up: default user, state initialisation; exposes `app`/`application`.
 
-from __future__ import annotations
+Split mechanically from the former lib/backend.py — code unchanged.
+"""
 
+import importlib
 import logging
-import os
-import shutil
 
-from flask import Flask, g, request
-from flask_cors import CORS
-
-from . import config
-from .logging_setup import install as install_panel_log_handler
-from .progress import _log_target
-from .routes import register_all
+from .config import jobs, sessions, users, videos
 from .state import (
-    _state,
-    jobs,
+    clean_missing_videos,
+    cleanup_orphaned_data,
     load_state,
-    save_state,
-    sessions,
-    videos,
-    users,
+    rebuild_videos_from_disk,
+    regenerate_missing_thumbnails,
 )
-from .utils import session_dir
-from .video import get_video_metadata
 
-# Session-scoped endpoints: bind the request's log records to this
-# session's JobProgressPanel entry.
-_SESSION_SCOPED_ENDPOINTS = {
-    "get_session_output",
-    "session_refresh",
-    "session_resync",
-    "job_progress",
-    "session_transcript_save_vtt",
-    "download_session_zip",
-    "session_messages_json",
-    "session_tts",
-    "extract_video_subtitles",
-    "update_video_subtitles",
-    "session_languages",
-    "session_transcript_json",
-    "session_file",
-    "session_export",
-    "session_export_txt",
-    "session_export_docx",
-    "session_export_rtf",
-    "session_export_structured_json",
-    "session_export_all_languages",
+
+# Importing every module registers all routes on the shared Flask app
+# (they use @app.route), in the same order as the former backend.py.
+# importlib, not `from . import …`: module names must never shadow the
+# shared stores imported above (e.g. `videos`, `jobs`).
+_MODULES = [
+    importlib.import_module(".flask_app", __package__),
+    importlib.import_module(".servers", __package__),
+    importlib.import_module(".live", __package__),
+    importlib.import_module(".config", __package__),
+    importlib.import_module(".state", __package__),
+    importlib.import_module(".utils", __package__),
+    importlib.import_module(".progress", __package__),
+    importlib.import_module(".job_routes", __package__),
+    importlib.import_module(".video", __package__),
+    importlib.import_module(".downloads", __package__),
+    importlib.import_module(".tts", __package__),
+    importlib.import_module(".transcripts", __package__),
+    importlib.import_module(".exports", __package__),
+    importlib.import_module(".routes_exports", __package__),
+    importlib.import_module(".routes_tts", __package__),
+    importlib.import_module(".routes_sessions", __package__),
+    importlib.import_module(".kit_messages", __package__),
+    importlib.import_module(".session_worker", __package__),
+    importlib.import_module(".media", __package__),
+    importlib.import_module(".settings", __package__),
+    importlib.import_module(".auth", __package__),
+    importlib.import_module(".video_routes", __package__),
+    importlib.import_module(".session_output", __package__),
+    importlib.import_module(".youtube", __package__),
+    importlib.import_module(".session_sync", __package__),
+    importlib.import_module(".youtube_upload", __package__),
+    importlib.import_module(".uploader", __package__),
+    importlib.import_module(".misc_routes", __package__),
+]
+from .flask_app import app  # noqa: E402
+
+# Each module binds the names it uses from modules loaded after it.
+for _module in _MODULES:
+    getattr(_module, "_link_late_names", lambda: None)()
+
+
+users["testuser@example.com"] = {
+    "name": "Test User",
+    "password": "YourSecurePassword123",
 }
 
 
-def create_app() -> Flask:
-    """Create and configure the Flask application."""
-    logging.basicConfig(level=logging.INFO)
-    logging.getLogger("urllib3").setLevel(logging.INFO)
-
-    app = Flask(__name__)
-    app.config["MAX_CONTENT_LENGTH"] = config.MAX_CONTENT_LENGTH
-    app.config["DEBUG"] = True
-
-    CORS(
-        app,
-        origins=config.CORS_ORIGINS,
-        supports_credentials=True,
-        methods=config.CORS_METHODS,
-        allow_headers=config.CORS_ALLOW_HEADERS,
-        expose_headers=config.CORS_EXPOSE_HEADERS,
-    )
-
-    install_panel_log_handler()
-    register_all(app)
-    _register_before_after(app)
-
-    _initialise_state_once()
-    _seed_default_user()
-    return app
-
-
-# ─── request hooks ─────────────────────────────────────────────────────
-def _register_before_after(app: Flask) -> None:
-    @app.after_request
-    def add_no_cache_for_api(response):
-        if request.path.startswith(
-            (
-                "/job_progress/",
-                "/job-progress/",
-                "/session_output/",
-                "/session-output/",
-                "/session_file/",
-                "/session-file/",
-                "/session_languages/",
-                "/session-languages/",
-                "/session_transcript_json/",
-                "/session-transcript-json/",
-                "/session_tts/",
-                "/session-tts/",
-                "/video-job-settings/",     
-                "/video-job-history/",       
-                "/job-settings-presets",
-                "/api/",
-            )
-        ):
-            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-            response.headers["Pragma"] = "no-cache"
-            response.headers["Expires"] = "0"
-        return response
-
-    @app.before_request
-    def _route_logs_to_session_panel():
-        endpoint = request.endpoint or ""
-        if endpoint not in _SESSION_SCOPED_ENDPOINTS:
-            return
-        session_id = (request.view_args or {}).get("session_id")
-        if not session_id:
-            return
-        setattr(g, "_panel_log_token", _log_target.set(("job", session_id)))
-
-    @app.before_request
-    def _capture_auth_token():
-        auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
-            token = auth[7:].strip()
-            if token:
-                _state["token"] = token
-                return
-        cookie = request.cookies.get("_forward_auth", "")
-        if cookie:
-            _state["token"] = cookie
-
-    @app.teardown_request
-    def _unroute_logs_from_session_panel(_exc):
-        if getattr(g, "panel_log_reset", False):
-            return
-        token = getattr(g, "_panel_log_token", None)
-        if token is None:
-            return
-        g.panel_log_reset = True
-        try:
-            _log_target.reset(token)
-        except (ValueError, LookupError, RuntimeError):
-            pass
-
-
-# ─── startup ───────────────────────────────────────────────────────────
-def _seed_default_user() -> None:
-    users.setdefault(
-        "testuser@example.com",
-        {"name": "Test User", "password": "YourSecurePassword123"},
-    )
-
-
-def rebuild_videos_from_disk() -> None:
-    """Add `videos` entries for MP4s on disk that aren't tracked yet."""
-    # pylint: disable=import-outside-toplevel
-    from .utils import file_mtime_iso
-
-    if not os.path.isdir(config.UPLOAD_FOLDER):
-        return
-    known = {v.get("file_name") for v in videos if v.get("file_name")}
-    added = 0
-    for filename in sorted(os.listdir(config.UPLOAD_FOLDER)):
-        if not filename.lower().endswith(".mp4"):
-            continue
-        if "__greenscreen" in filename or "_converted" in filename:
-            continue
-        if filename in known:
-            continue
-        file_path = os.path.join(config.UPLOAD_FOLDER, filename)
-        if not os.path.isfile(file_path):
-            continue
-        try:
-            size = os.path.getsize(file_path)
-            uploaded = file_mtime_iso(file_path)
-        except OSError:
-            continue
-        if size < 1000:
-            continue
-
-        stem = os.path.splitext(filename)[0]
-        thumb_name = f"{stem}_thumb.jpg"
-        thumb_path = os.path.join(config.UPLOAD_FOLDER, thumb_name)
-        thumbnail_url = (
-            f"/thumbnails/{thumb_name}" if os.path.exists(thumb_path) else None
-        )
-
-        try:
-            duration, fps, codec = get_video_metadata(file_path)
-        except (OSError, ValueError, TypeError):
-            duration, fps, codec = 0.0, 0.0, ""
-
-        source = (
-            "Imported (YouTube)" if "youtube" in filename.lower() else "Desktop Upload"
-        )
-        videos.append(
-            {
-                "key": __import__("uuid").uuid4().hex,
-                "name": stem,
-                "file_name": filename,
-                "uploaded": uploaded,
-                "last_opened": None,
-                "duration": duration,
-                "fps": fps,
-                "codec": codec,
-                "file_size": size,
-                "segment_count": 0,
-                "languages": ["en"],
-                "thumbnail_url": thumbnail_url,
-                "segmentation_done": False,
-                "segmentation_progress": 0,
-                "_recovered": True,
-                "source": source,
-            }
-        )
-        added += 1
-    if added:
-        save_state()
-
-
+# ─────────────────────────────────────────────────────────────────────
+# Startup initialisation
+#
+# Gunicorn imports this module and runs the top-level code, but it never
+# runs the `if __name__ == "__main__":` block below (that only fires when
+# the file is executed directly). Without this call, `load_state()` is
+# skipped under gunicorn and the process starts with empty `videos`,
+# `sessions`, etc. — even though server_state.pkl on the volume is full.
+#
+# Must run *after* every route and helper is defined, and *after* the
+# module-level `users[...]` seeding above.
+# ─────────────────────────────────────────────────────────────────────
 def _initialise_state_once() -> None:
+    """Load persisted state and reconcile with disk. Idempotent."""
     state = _initialise_state_once.__dict__
     if state.get("_done", False):
         return
     state["_done"] = True
 
     try:
-        load_state()
+        loaded = load_state()
+        logging.info(
+            "startup: load_state() -> %s (users=%d videos=%d jobs=%d sessions=%d)",
+            loaded,
+            len(users),
+            len(videos),
+            len(jobs),
+            len(sessions),
+        )
     except (OSError, ValueError, TypeError, KeyError, RuntimeError):
-        logging.exception("startup: load_state failed")
+        logging.exception("startup: load_state() failed; continuing with empty state")
 
+    # Reconciliation: safe to run every startup. Adding missing entries,
+    # pruning deleted files, regenerating thumbnails.
     try:
         rebuild_videos_from_disk()
     except (OSError, ValueError, TypeError, KeyError, RuntimeError):
-        logging.exception("startup: rebuild_videos_from_disk failed")
+        logging.exception("startup: rebuild_videos_from_disk() failed")
 
     try:
-        _clean_missing_videos()
-        _cleanup_orphaned_data()
+        clean_missing_videos()
+        cleanup_orphaned_data()
     except (OSError, ValueError, TypeError, KeyError, RuntimeError, AttributeError):
         logging.exception("startup: cleanup failed")
 
-
-def _clean_missing_videos() -> None:
-
-    if not videos:
-        return
-    valid = []
-    for video in videos:
-        fn = video.get("file_name")
-        if not fn:
-            continue
-        if os.path.exists(os.path.join(config.UPLOAD_FOLDER, fn)):
-            valid.append(video)
-        else:
-            thumb = f"{os.path.splitext(fn)[0]}_thumb.jpg"
-            tp = os.path.join(config.UPLOAD_FOLDER, thumb)
-            if os.path.exists(tp):
-                try:
-                    os.remove(tp)
-                except OSError:
-                    pass
-    if len(valid) != len(videos):
-        videos[:] = valid
-        save_state()
+    try:
+        regenerate_missing_thumbnails()
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, AttributeError):
+        logging.exception("startup: thumbnail regeneration failed")
 
 
-def _cleanup_orphaned_data() -> None:
-    valid_keys = {v.get("key") for v in videos if v.get("key")}
-
-    for sid in [
-        s
-        for s, m in sessions.items()
-        if m.get("video_key") and m["video_key"] not in valid_keys
-    ]:
-        d = session_dir(sid)
-        if os.path.exists(d):
-            try:
-                shutil.rmtree(d)
-            except OSError:
-                pass
-        sessions.pop(sid, None)
-    for jid in [
-        j
-        for j, m in jobs.items()
-        if m.get("video_key") and m["video_key"] not in valid_keys
-    ]:
-        jobs.pop(jid, None)
-    save_state()
+_initialise_state_once()
 
 
-# ─── module-level app object (for gunicorn) ────────────────────────────
-application = create_app()
-
-
-if __name__ == "__main__":
-    logging.info("Starting merged server on 0.0.0.0:5000")
-    logging.info("State file: %s", config.STATE_FILE)
-    application.run(host="0.0.0.0", port=5000, debug=True)
+# WSGI entry points: `gunicorn backend.app:application` (or `:app`).
+application = app

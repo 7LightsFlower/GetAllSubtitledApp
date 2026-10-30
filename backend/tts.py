@@ -1,6 +1,7 @@
-"""Download and serve per-language TTS WAV files."""
+"""Downloading TTS tracks (WAV) from the KIT archive.
 
-from __future__ import annotations
+Split mechanically from the former lib/backend.py — code unchanged.
+"""
 
 import html as _html_mod
 import json
@@ -8,22 +9,45 @@ import logging
 import os
 import re
 import time
-import urllib.parse
+import urllib
 
-from .config import INTERNAL_SERVER_URL, MIN_WAV_BYTES
-from .http import curl_download
+from .servers import INTERNAL_SERVER_URL
+from .utils import _effective_token, _session_dir, _short_sid
 from .progress import _job_add_file, _job_log
-from .utils import (
-    effective_token,
-    extract_simple_language_name,
-    looks_like_wav,
-    session_dir,
-    short_sid,
-)
+from .downloads import curl_download
+
+
+# Minimum plausible size for a real KIT TTS WAV. The HTML error page
+# KIT returns for a TTS track that is not yet available (or that we
+# are not authorized to fetch) is ~1.3 KB and starts with "<!DOCTYPE".
+# A real TTS WAV is tens of MB. 50 KB sits comfortably between.
+# _MIN_WAV_BYTES and _looks_like_wav are defined near the TTS
+# download helpers, above — they are used by /session-tts and
+# _session_files_look_incomplete too.
+_MIN_WAV_BYTES = 50_000
+
+
+def _looks_like_wav(path: str) -> bool:
+    """True iff the file starts with the RIFF/WAVE magic bytes.
+
+    KIT returns a 200 with an HTML status page when a TTS track is
+    not (yet) available. The page is ~1.3 KB and starts with
+    '<!DOCTYPE html>'. Saving that as a .wav poisons the session:
+    the browser then fails to decode it and audioplayers raises
+    WebAudioError Code 4. This check is the gate that stops it.
+    """
+    try:
+        with open(path, "rb") as f:
+            header = f.read(12)
+    except OSError:
+        return False
+    if len(header) < 12:
+        return False
+    return header[0:4] == b"RIFF" and header[8:12] == b"WAVE"
 
 
 def _tts_urls_from_html(
-    _session_id: str, session_dir_path: str, server_url: str
+    _session_id: str, session_dir: str, server_url: str
 ) -> dict[str, str]:
     """Parse index.html for TTS <source> URLs.
 
@@ -35,7 +59,7 @@ def _tts_urls_from_html(
     tags, so whatever it emits is — by definition — the correct URL.
     Scraping is strictly more reliable than guessing the path shape.
     """
-    index_path = os.path.join(session_dir_path, "index.html")
+    index_path = os.path.join(session_dir, "index.html")
     if not os.path.exists(index_path):
         return {}
 
@@ -49,6 +73,7 @@ def _tts_urls_from_html(
     urls: dict[str, str] = {}
 
     # Match <source src="…" type="audio/…">, in either attribute order.
+    # Capture both the src and the filename's trailing "/<Label>" part.
     pattern = re.compile(
         r'<source\s+[^>]*?src=["\']([^"\']+)["\'][^>]*?'
         r'type=["\']audio/[^"\']*["\']'
@@ -63,6 +88,7 @@ def _tts_urls_from_html(
             continue
         src = _html_mod.unescape(src)
 
+        # Absolute URL for the browser / curl.
         if src.startswith("/"):
             absolute = f"{server_url}{src}"
         elif src.startswith("http"):
@@ -70,8 +96,11 @@ def _tts_urls_from_html(
         else:
             absolute = f"{server_url}/{src.lstrip('/')}"
 
+        # Label = last path segment, percent-decoded, with any trailing
+        # ".wav" stripped so it matches what the UI calls it.
         tail = src.rstrip("/").rsplit("/", 1)[-1]
         label = _html_mod.unescape(tail)
+        # KIT sometimes percent-encodes the whole label, sometimes not.
         label = urllib.parse.unquote(label)
         if label.lower().endswith(".wav"):
             label = label[:-4]
@@ -84,21 +113,32 @@ def _tts_urls_from_html(
 
 
 def download_tts_files(
-    session_id,
-    token,
-    server_url=None,
-    languages=None,
-    *,
-    retries=4,
-    delay=20,
-) -> list[str]:
-    """Download TTS WAV files for the requested languages."""
-    # pylint: disable=too-many-arguments,too-many-locals,too-many-branches,too-many-statements
-    sdir = session_dir(session_id)
+    session_id, token, server_url=None, languages=None, *, retries=4, delay=20
+):
+    """Download per-language TTS WAVs into the session folder.
+
+    Two things about KIT's TTS endpoint, both learned from its own
+    archive page (see the <source> tags in any session's index.html):
+
+      1. The URL is <server>/archivemediafile/<sid>/<Label> Audio.wav.
+         The space between the label and "Audio" is a *literal space*,
+         not %20. KIT's page emits it unescaped; the browser tolerates
+         it, so we should too.
+
+      2. No credentials of any kind go with the request. Not a header,
+         not a cookie. The base64 session id in the path *is* the
+         credential — it decodes to /home/<email>/<session name> and
+         is unguessable.
+
+    The previous version sent a bearer token as a _forward_auth cookie
+    and percent-encoded the space. KIT rejected both with HTTP 200 +
+    an HTML login page.
+    """
+    session_dir = _session_dir(session_id)
     server_url = (server_url or INTERNAL_SERVER_URL).rstrip("/")
 
-    # ── Ask KIT's own archive page which URLs are real ──────────
-    scraped = _tts_urls_from_html(session_id, sdir, server_url)
+    # ── NEW: ask KIT's own archive page which URLs are real ─────
+    scraped = _tts_urls_from_html(session_id, session_dir, server_url)
     if scraped:
         logging.info(
             "download_tts_files: index.html advertises %d TTS track(s): %s",
@@ -109,11 +149,12 @@ def download_tts_files(
         logging.info(
             "download_tts_files: index.html has no TTS <source> tags "
             "for %s — will fall back to guessed URLs",
-            short_sid(session_id),
+            _short_sid(session_id),
         )
 
+    # ---- which languages do we want? -------------------------------
     if languages is None:
-        json_path = os.path.join(sdir, "transcripts.json")
+        json_path = os.path.join(session_dir, "transcripts.json")
         if not os.path.exists(json_path):
             return []
         try:
@@ -123,14 +164,14 @@ def download_tts_files(
             return []
         languages = [t.get("language", "") for t in transcripts]
 
-    wanted: list[tuple[str, str]] = []
-    seen: set[str] = set()
+    wanted = []
+    seen = set()
     for lang in languages:
         if not lang:
             continue
         if lang == "Transcript" or "Original ASR" in lang:
             continue
-        simple = extract_simple_language_name(lang)
+        simple = _extract_simple_language_name(lang)
         if not simple or simple == "Unknown":
             continue
         label = f"{simple} Audio"
@@ -140,33 +181,47 @@ def download_tts_files(
         wanted.append((simple, label))
 
     if not wanted:
+        logging.info(
+            "download_tts_files: no TTS-eligible languages for %s",
+            _short_sid(session_id),
+        )
         return []
 
+    logging.info(
+        "download_tts_files: want TTS for %d language(s) on %s: %s",
+        len(wanted),
+        _short_sid(session_id),
+        [w[1] for w in wanted],
+    )
+
     referer = f"{server_url}/archivesession/{session_id}"
-    downloaded: list[str] = []
+    downloaded = []
     remaining = list(wanted)
 
     for attempt in range(1, retries + 1):
         still_missing = []
+
         for simple, label in remaining:
             local_name = f"tts_{simple}.wav"
-            local_path = os.path.join(sdir, local_name)
+            local_path = os.path.join(session_dir, local_name)
 
+            # Already on disk and valid → count it, skip the fetch.
             if (
                 os.path.exists(local_path)
-                and os.path.getsize(local_path) > MIN_WAV_BYTES
-                and looks_like_wav(local_path)
+                and os.path.getsize(local_path) > _MIN_WAV_BYTES
+                and _looks_like_wav(local_path)
             ):
                 if local_name not in downloaded:
                     downloaded.append(local_name)
                 continue
+
             if os.path.exists(local_path):
                 try:
                     os.remove(local_path)
                 except OSError:
                     pass
 
-            # ── Prefer the URL KIT's own page uses ────────────────
+             # ── Prefer the URL KIT's own page uses ────────────────
             kit_url = scraped.get(label)
             if kit_url:
                 logging.info(
@@ -195,15 +250,12 @@ def download_tts_files(
                 retries,
             )
 
-            # Resolve a token on first need. `effective_token` prefers
-            # the token recorded on the session, then the caller's, then
-            # the last one we saw on any request.
             if not token:
-                token = effective_token(session_id, fallback="")
+                token = _effective_token(session_id, fallback="")
             if not token:
                 logging.warning(
                     "download_tts_files: no token for %s — skipping TTS",
-                    short_sid(session_id),
+                    _short_sid(session_id),
                 )
                 return []
 
@@ -216,7 +268,7 @@ def download_tts_files(
                 referer=referer,
             )
 
-            if ok and looks_like_wav(local_path):
+            if ok and _looks_like_wav(local_path):
                 size = os.path.getsize(local_path)
                 logging.info(
                     "download_tts_files: wrote %s (%d bytes)",
@@ -243,7 +295,7 @@ def download_tts_files(
                 "download_tts_files: %d track(s) still missing on %s "
                 "— retrying in %ds (attempt %d/%d): %s",
                 len(still_missing),
-                short_sid(session_id),
+                _short_sid(session_id),
                 delay,
                 attempt,
                 retries,
@@ -254,9 +306,17 @@ def download_tts_files(
     if remaining:
         logging.warning(
             "download_tts_files: gave up on %s after %d attempt(s): %s",
-            short_sid(session_id),
+            _short_sid(session_id),
             retries,
             [t[1] for t in remaining],
         )
 
     return downloaded
+
+
+# ── Names from modules further down the chain ─────────────────────────
+# They are only used inside functions. backend.app calls this once all
+# modules are loaded, so the circular references resolve cleanly.
+def _link_late_names():
+    global _extract_simple_language_name
+    from .routes_sessions import _extract_simple_language_name

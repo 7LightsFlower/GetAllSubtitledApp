@@ -1,52 +1,381 @@
-"""Download a completed KIT session into its local folder."""
+"""curl downloads and fetching a session's files from the KIT archive.
 
-from __future__ import annotations
+Split mechanically from the former lib/backend.py — code unchanged.
+"""
 
 import json
 import logging
 import os
 import re
+import subprocess
 import threading
-
 import requests
 
-from .config import (
-    INTERNAL_SERVER_URL,
-    MIN_MESSAGES_BYTES as _MIN_MESSAGES_BYTES,
-    MIN_WAV_BYTES,
-    MT_COVERAGE_MIN_FRACTION as _MT_COVERAGE_MIN_FRACTION,
-    MT_COVERAGE_SLACK_SECONDS as _MT_COVERAGE_SLACK_SECONDS,
-)
-from .http import curl_download, internal_cookies, internal_headers
-from .progress import (
-    _is_cancelled,
-    _job_add_file,
-    _job_log,
-)
-from .state import sessions
-from .transcripts import (
-    extract_transcripts_from_messages,
-    generate_vtt_files_from_transcripts,
-    save_transcripts_to_files,
-)
-from .tts import download_tts_files
-from .utils import (
-    effective_token,
-    is_meaningful_file,
-    looks_like_wav,
-    session_dir,
-    short_sid,
-)
+from .flask_app import _curl_safe_url
+from .servers import INTERNAL_SERVER_URL
+from .config import sessions
+from .utils import _effective_token, _session_dir, _short_sid
+from .progress import _JobCancelled, _is_cancelled, _job_add_file, _job_log
 
+
+def curl_download(
+    url,
+    output_path,
+    token,
+    *,
+    cookie_only=False,
+    media=False,
+    referer=None,
+    anonymous=False,
+):
+    """Download a file using curl.
+
+    media=True      → send the headers an <audio> element would send.
+    cookie_only=True → send only the `_forward_auth` cookie, no
+                       Authorization / X-Forward-Auth headers.
+    anonymous=True  → send no auth of any kind. Correct for
+                       /archivemediafile/<sid>/<Language> Audio.wav,
+                       which KIT serves purely on the strength of the
+                       base64 session id in the path.
+    """
+    url = _curl_safe_url(url)
+    try:
+        auth_headers = []
+        if not anonymous and not cookie_only:
+            auth_headers = [
+                "-H",
+                f"X-Forward-Auth: {token}",
+                "-H",
+                f"Authorization: Bearer {token}",
+            ]
+
+        media_headers = []
+        if media:
+            media_headers = [
+                "-H",
+                "Accept: audio/webm,audio/ogg,audio/*;q=0.9,*/*;q=0.5",
+                "-H",
+                "Accept-Encoding: identity;q=1, *;q=0",
+                "-H",
+                "Range: bytes=0-",
+            ]
+            if referer:
+                media_headers += ["-H", f"Referer: {referer}"]
+
+        cmd = [
+            "curl",
+            "-s",
+            "-L",
+            "--insecure",
+            "--connect-timeout",
+            "30",
+            "--max-time",
+            "3600",
+            *auth_headers,
+            *media_headers,
+            "-H",
+            "User-Agent: Mozilla/5.0 (compatible; LT-Uploader/1.0)",
+        ]
+
+        # Only send the _forward_auth cookie when we were asked to use
+        # one. anonymous=True is what we want for TTS.
+        if not anonymous:
+            cmd += ["--cookie", f"_forward_auth={token}"]
+
+        cmd += [
+            "-w",
+            "%{http_code}",
+            "-o",
+            output_path,
+            url,
+        ]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=3660, check=False
+        )
+        status_str = (result.stdout or "").strip()
+        try:
+            status = int(status_str)
+        except ValueError:
+            status = 0
+
+        if not status_str:
+            logging.warning(
+                "curl_download: curl produced no status for %s — rc=%s stderr=%r",
+                url,
+                result.returncode,
+                (result.stderr or "")[:300],
+            )
+
+        if (
+            status in (200, 206)
+            and os.path.exists(output_path)
+            and os.path.getsize(output_path) > 1000
+        ):
+            if not output_path.endswith(".html"):
+                try:
+                    with open(output_path, "rb") as f:
+                        head = f.read(32)
+                    stripped = head.lstrip().lower()
+                    if (
+                        stripped.startswith(b"<!doctype html")
+                        or stripped.startswith(b"<html")
+                        or stripped.startswith(b"<!doctype")
+                    ):
+                        logging.info(
+                            "curl_download: %s → 200 but body is HTML; "
+                            "treating as failure",
+                            url,
+                        )
+                        os.remove(output_path)
+                        return False
+                except OSError:
+                    pass
+            return True
+
+        if status not in (200, 206):
+            logging.info("curl_download: %s → HTTP %s (discarding)", url, status)
+        else:
+            logging.info(
+                "curl_download: %s → %s but body too small or HTML", url, status
+            )
+
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return False
+    except subprocess.TimeoutExpired as e:
+        logging.warning("Curl timeout for %s: %s", url, str(e))
+        return False
+    except OSError as e:
+        logging.warning("Curl error for %s: %s", url, str(e))
+        return False
+
+
+def curl_download_with_headers(url, output_path, token):
+    """Download a file using curl with an Accept: application/json header.
+
+    Retained for parity with curl_download; currently unused. Rejects
+    non-2xx responses the same way curl_download does.
+    """
+    try:
+        cmd = [
+            "curl",
+            "-s",
+            "-L",
+            "--insecure",
+            "-H",
+            f"X-Forward-Auth: {token}",
+            "-H",
+            f"Authorization: Bearer {token}",
+            "-H",
+            "Accept: application/json",
+            "-H",
+            "User-Agent: Mozilla/5.0 (compatible; LT-Uploader/1.0)",
+            "--cookie",
+            f"_forward_auth={token}",
+            "-w",
+            "%{http_code}",
+            "-o",
+            output_path,
+            url,
+        ]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=300, check=False
+        )
+        try:
+            status = int((result.stdout or "").strip())
+        except ValueError:
+            status = 0
+
+        if (
+            status == 200
+            and os.path.exists(output_path)
+            and os.path.getsize(output_path) > 1000
+        ):
+            # KIT returns 200 with an HTML error page for files it does
+            # not have. Refuse to treat that as a successful download,
+            # otherwise the HTML is written into a .wav / .vtt / .mp4
+            # slot and the browser chokes on it. index.html is
+            # intentionally HTML, so skip the check for that filename.
+            if not output_path.endswith(".html"):
+                try:
+                    with open(output_path, "rb") as f:
+                        head = f.read(32)
+                    stripped = head.lstrip().lower()
+                    if (
+                        stripped.startswith(b"<!doctype html")
+                        or stripped.startswith(b"<html")
+                        or stripped.startswith(b"<!doctype")
+                    ):
+                        logging.info(
+                            "curl_download: %s → 200 but body is HTML; "
+                            "treating as failure",
+                            url,
+                        )
+                        os.remove(output_path)
+                        return False
+                except OSError:
+                    pass
+            return True
+        if status != 200:
+            logging.info(
+                "curl_download_with_headers: %s → HTTP %s (discarding)",
+                url,
+                status,
+            )
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return False
+    except subprocess.TimeoutExpired as e:
+        logging.warning("Curl timeout for %s: %s", url, str(e))
+        return False
+    except OSError as e:
+        logging.warning("Curl error for %s: %s", url, str(e))
+        return False
+
+
+def extract_text_from_file(file_path):
+    """Extract transcript text from a file."""
+    if not os.path.exists(file_path):
+        return None
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        content = f.read()
+    try:
+        data = json.loads(content)
+        text = extract_text_from_json(data)
+        if text:
+            return text
+    except json.JSONDecodeError:
+        pass
+    if file_path.endswith((".vtt", ".srt")):
+        text = extract_text_from_subtitle(content)
+        if text:
+            return text
+    if content and len(content) > 10:
+        return content
+    return None
+
+
+def extract_text_from_json(data):
+    """Extract text from JSON data."""
+    if isinstance(data, dict):
+        for key in ["text", "content", "transcript", "seq"]:
+            if key in data and data[key] and isinstance(data[key], str):
+                return data[key]
+        if "messages" in data and isinstance(data["messages"], list):
+            texts = []
+            for msg in data["messages"]:
+                if isinstance(msg, dict):
+                    text = extract_text_from_json(msg)
+                    if text:
+                        texts.append(text)
+            if texts:
+                return "\n".join(texts)
+        if "data" in data and isinstance(data["data"], list):
+            texts = []
+            for item in data["data"]:
+                text = extract_text_from_json(item)
+                if text:
+                    texts.append(text)
+            if texts:
+                return "\n".join(texts)
+        for key, value in data.items():
+            if isinstance(value, (dict, list)):
+                text = extract_text_from_json(value)
+                if text:
+                    return text
+    elif isinstance(data, list):
+        texts = []
+        for item in data:
+            text = extract_text_from_json(item)
+            if text:
+                texts.append(text)
+        if texts:
+            return "\n".join(texts)
+    return None
+
+
+def extract_text_from_subtitle(content):
+    """Extract text from VTT or SRT subtitle file."""
+    lines = content.split("\n")
+    text_lines = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if "-->" in line:
+            continue
+        if line.isdigit():
+            continue
+        if line.startswith("WEBVTT"):
+            continue
+        if line.startswith("Kind:"):
+            continue
+        if line.startswith("Language:"):
+            continue
+        text_lines.append(line)
+    return " ".join(text_lines) if text_lines else None
+
+
+def get_actual_file_url(session_id, filename, server_url, html_content=None):
+    """
+    Determine the correct URL for a file based on its type.
+
+    `server_url` is the base URL of the internal server that owns the
+    session (e.g. "https://lt2srv.iar.kit.edu"). Every returned
+    URL is built against it, so a session that lives on a non-default
+    server is downloaded from the right host.
+    """
+    server_url = (server_url or INTERNAL_SERVER_URL).rstrip("/")
+
+    if html_content:
+        if filename == "video.mp4":
+            match = re.search(r'<source src="([^"]+)"', html_content)
+            if match:
+                url = match.group(1)
+                if url.startswith("/"):
+                    url = f"{server_url}{url}"
+                return url
+        if filename.startswith("subtitles_") and filename.endswith(".vtt"):
+            label = filename.replace("subtitles_", "").replace(".vtt", "")
+            match = re.search(
+                rf'<track label="{label}" kind="subtitles" src="([^"]+)"',
+                html_content,
+            )
+            if match:
+                url = match.group(1)
+                if url.startswith("/"):
+                    url = f"{server_url}{url}"
+                return url
+        if filename.endswith(".wav"):
+            match = re.search(r'<source src="([^"]+)"[^>]*type="audio/', html_content)
+            if match:
+                url = match.group(1)
+                if url.startswith("/"):
+                    url = f"{server_url}{url}"
+                return url
+
+    if filename == "messages.json":
+        return f"{server_url}/archivemediafile/{session_id}/messages.json"
+    if filename.endswith(".vtt"):
+        label = filename.replace(".vtt", "")
+        return f"{server_url}/archivemedia/{session_id}/vtt/{label}"
+    if filename == "video.mp4":
+        return f"{server_url}/archivemediafile/{session_id}/video.mp4"
+    if filename.endswith(".wav"):
+        encoded_name = filename.replace(" ", "%20")
+        return f"{server_url}/archivemediafile/{session_id}/{encoded_name}"
+    encoded_name = filename.replace(" ", "%20")
+    return f"{server_url}/archivesession/{session_id}/{encoded_name}"
+
+
+# pylint: disable=too-many-locals,too-many-branches,too-many-statements
 _session_download_locks: dict[str, threading.Lock] = {}
 _session_download_locks_guard = threading.Lock()
 
 
-class JobCancelled(Exception):
-    """Raised when a session is cancelled mid-download."""
-
-
 def _get_session_download_lock(session_id: str) -> threading.Lock:
+    """One lock per session so /session_output and the BG worker
+    never write the same files at the same time."""
     with _session_download_locks_guard:
         lock = _session_download_locks.get(session_id)
         if lock is None:
@@ -55,192 +384,61 @@ def _get_session_download_lock(session_id: str) -> threading.Lock:
         return lock
 
 
-def get_actual_file_url(session_id, filename, server_url, html_content=None) -> str:
-    """Resolve a downloaded filename to the URL used by the server."""
-    server_url = (server_url or INTERNAL_SERVER_URL).rstrip("/")
-    url = None
-
-    if html_content:
-        patterns = []
-        if filename == "video.mp4":
-            patterns.append(r'<source src="([^"]+)"')
-        elif filename.startswith("subtitles_") and filename.endswith(".vtt"):
-            label = filename.replace("subtitles_", "").replace(".vtt", "")
-            patterns.append(
-                rf'<track label="{label}" kind="subtitles" src="([^"]+)"'
-            )
-        elif filename.endswith(".wav"):
-            patterns.append(r'<source src="([^"]+)"[^>]*type="audio/')
-
-        for pattern in patterns:
-            match = re.search(pattern, html_content)
-            if match:
-                url = match.group(1)
-                break
-
-    if url is None:
-        if filename == "messages.json":
-            url = f"/archivemediafile/{session_id}/messages.json"
-        elif filename.endswith(".vtt"):
-            label = filename.replace(".vtt", "")
-            url = f"/archivemedia/{session_id}/vtt/{label}"
-        elif filename == "video.mp4":
-            url = f"/archivemediafile/{session_id}/video.mp4"
-        elif filename.endswith(".wav"):
-            encoded = filename.replace(" ", "%20")
-            url = f"/archivemediafile/{session_id}/{encoded}"
-        else:
-            encoded = filename.replace(" ", "%20")
-            url = f"/archivesession/{session_id}/{encoded}"
-
-    return f"{server_url}{url}" if url.startswith("/") else url
-
-
-def _session_files_look_incomplete(session_dir_path: str) -> bool:
-    messages = os.path.join(session_dir_path, "messages.json")
-    transcripts = os.path.join(session_dir_path, "transcripts.json")
-
-    if not os.path.exists(transcripts):
-        return True
-    if not os.path.exists(messages) or os.path.getsize(messages) < 5000:
-        return True
-
-    try:
-        with open(transcripts, "r", encoding="utf-8") as f:
-            ts = json.load(f)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return True
-
-    languages_with_text = [
-        t
-        for t in ts
-        if any(seg.get("text", "").strip() for seg in t.get("segments", []))
-    ]
-    vtt_files = [
-        f
-        for f in os.listdir(session_dir_path)
-        if f.startswith("subtitles_")
-        and f.endswith(".vtt")
-        and os.path.getsize(os.path.join(session_dir_path, f)) > 20
-    ]
-    if len(vtt_files) < len(languages_with_text):
-        return True
-    if not _local_transcripts_cover_full_span(session_dir_path):
-        return True
-
-    vtt_langs = {
-        f[len("subtitles_") : -len(".vtt")]
-        for f in vtt_files
-        if f != "subtitles_Transcript.vtt"
-    }
-    tts_langs = {
-        f[len("tts_") : -len(".wav")]
-        for f in os.listdir(session_dir_path)
-        if f.startswith("tts_")
-        and f.endswith(".wav")
-        and os.path.getsize(os.path.join(session_dir_path, f)) > MIN_WAV_BYTES
-        and looks_like_wav(os.path.join(session_dir_path, f))
-    }
-    if vtt_langs - tts_langs:
-        return True
-    return False
-
-
-def _local_transcripts_cover_full_span(session_dir_path: str) -> bool:
-    messages_path = os.path.join(session_dir_path, "messages.json")
-    if not os.path.exists(messages_path):
-        return False
-    try:
-        with open(messages_path, "rb") as f:
-            raw = f.read()
-    except OSError:
-        return False
-    if not raw or len(raw) < _MIN_MESSAGES_BYTES:
-        return False
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return False
-    if not isinstance(data, list):
-        return False
-
-    asr_max_end = 0.0
-    mt_tracks: dict[str, float] = {}
-    for item in data:
-        if not (isinstance(item, list) and len(item) >= 2):
-            continue
-        try:
-            m = json.loads(item[1]) if isinstance(item[1], str) else item[1]
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if not isinstance(m, dict) or not m.get("seq", "").strip():
-            continue
-        try:
-            end = float(m.get("end", 0) or 0)
-        except (ValueError, TypeError):
-            end = 0.0
-        sender = m.get("sender", "")
-        if sender.startswith("asr:"):
-            asr_max_end = max(asr_max_end, end)
-        elif sender.startswith(("mt:", "translation:")):
-            mt_tracks[sender] = max(mt_tracks.get(sender, 0.0), end)
-
-    if not mt_tracks or asr_max_end <= 0:
-        return False
-    for mt_end in mt_tracks.values():
-        if (
-            mt_end >= asr_max_end - _MT_COVERAGE_SLACK_SECONDS
-            or (mt_end / asr_max_end) >= _MT_COVERAGE_MIN_FRACTION
-        ):
-            continue
-        return False
-    return True
-
-
-def download_session_files(session_id, token, server_url=None) -> bool:
-    """Download the session files, skipping work already in progress or complete."""
+def download_session_files(session_id, token, server_url=None):
+    """Download the media files and transcripts associated with a session."""
     if not server_url:
         server_url = sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL
     server_url = server_url.rstrip("/")
-    effective = effective_token(session_id, fallback=token)
+
+    effective_token = _effective_token(session_id, fallback=token)
 
     lock = _get_session_download_lock(session_id)
     if not lock.acquire(blocking=False):
         lock.acquire()
         lock.release()
         logging.info(
-            "download_session_files: %s already being downloaded, skipping",
-            short_sid(session_id),
+            "download_session_files: %s already downloaded by another "
+            "thread, skipping",
+            _short_sid(session_id),
         )
         return True
+
     try:
-        sdir = session_dir(session_id)
-        if not _session_files_look_incomplete(sdir):
+        session_dir = _session_dir(session_id)
+        if not _session_files_look_incomplete(session_dir):
             logging.info(
-                "download_session_files: %s already complete, skipping",
-                short_sid(session_id),
+                "download_session_files: %s is already complete, skipping",
+                _short_sid(session_id),
             )
             return True
-        return _download_locked(session_id, effective, server_url)
+        return _download_session_files_locked(session_id, effective_token, server_url)
     finally:
         lock.release()
 
 
-def _download_locked(session_id, token, server_url) -> bool:
-    sdir = session_dir(session_id)
-    os.makedirs(sdir, exist_ok=True)
+def _download_session_files_locked(session_id, token, server_url):
+    """Download the media files and transcripts associated with a session."""
+    session_dir = _session_dir(session_id)
+    os.makedirs(session_dir, exist_ok=True)
+
     server_url = (server_url or INTERNAL_SERVER_URL).rstrip("/")
 
     if _is_cancelled(session_id):
-        raise JobCancelled(f"Session {short_sid(session_id)} cancelled before download")
+        raise _JobCancelled(
+            f"Session {_short_sid(session_id)} cancelled before download"
+        )
 
+    logging.info("=" * 60)
+    logging.info("Downloading session %s from %s", session_id, server_url)
     _job_log(
         session_id, "Downloading session files…", stage="downloading", progress=0.35
     )
 
-    html_path = os.path.join(sdir, "index.html")
+    html_path = os.path.join(session_dir, "index.html")
     html_url = f"{server_url}/archivesession/{session_id}"
+
     if curl_download(html_url, html_path, token):
+        logging.info("Downloaded index.html")
         _job_add_file(session_id, "index.html", os.path.getsize(html_path))
     else:
         _job_log(session_id, "Failed to download index.html", level="warning")
@@ -253,129 +451,185 @@ def _download_locked(session_id, token, server_url) -> bool:
     except (OSError, UnicodeDecodeError):
         pass
 
+    # Video
     if _is_cancelled(session_id):
-        raise JobCancelled(
-            f"Session {short_sid(session_id)} cancelled before video download"
+        raise _JobCancelled(
+            f"Session {_short_sid(session_id)} cancelled before video download"
         )
-
     video_url = get_actual_file_url(session_id, "video.mp4", server_url, html_content)
-    video_path = os.path.join(sdir, "video.mp4")
+    video_path = os.path.join(session_dir, "video.mp4")
     if curl_download(video_url, video_path, token):
+        logging.info("Downloaded video.mp4")
         _job_log(
             session_id,
-            f"Downloaded video.mp4 ({os.path.getsize(video_path)} bytes)",
+            f"Downloaded video.mp4 " f"({os.path.getsize(video_path)} bytes)",
             progress=0.5,
         )
         _job_add_file(session_id, "video.mp4", os.path.getsize(video_path))
     else:
         _job_log(session_id, "Failed to download video.mp4", level="warning")
 
+    # Subtitles
     if _is_cancelled(session_id):
-        raise JobCancelled(
-            f"Session {short_sid(session_id)} cancelled before subtitle download"
+        raise _JobCancelled(
+            f"Session {_short_sid(session_id)} cancelled before subtitle download"
         )
-
     try:
         track_matches = re.findall(
-            r'<track label="([^"]+)" kind="subtitles" src="([^"]+)"', html_content
+            r'<track label="([^"]+)" kind="subtitles" src="([^"]+)"',
+            html_content,
         )
         for label, src in track_matches:
             if src.startswith("/"):
                 src = f"{server_url}{src}"
             file_name = f"subtitles_{label}.vtt"
-            file_path = os.path.join(sdir, file_name)
+            file_path = os.path.join(session_dir, file_name)
             if curl_download(src, file_path, token):
+                logging.info("Downloaded %s", file_name)
                 _job_log(
                     session_id,
-                    f"Downloaded {file_name} ({os.path.getsize(file_path)} bytes)",
+                    f"Downloaded {file_name} " f"({os.path.getsize(file_path)} bytes)",
                 )
                 _job_add_file(session_id, file_name, os.path.getsize(file_path))
     except (OSError, re.error) as e:
         logging.warning("Could not download subtitles: %s", e)
 
+    # Audio (if present)
     if _is_cancelled(session_id):
-        raise JobCancelled(
-            f"Session {short_sid(session_id)} cancelled before audio download"
+        raise _JobCancelled(
+            f"Session {_short_sid(session_id)} cancelled before audio download"
         )
-
     try:
         audio_match = re.search(r'<source src="([^"]+)"[^>]*type="audio/', html_content)
         if audio_match:
             audio_url = audio_match.group(1)
             if audio_url.startswith("/"):
                 audio_url = f"{server_url}{audio_url}"
-            audio_path = os.path.join(sdir, "audio.wav")
+            audio_path = os.path.join(session_dir, "audio.wav")
             if curl_download(audio_url, audio_path, token):
+                logging.info("Downloaded audio.wav")
                 _job_add_file(session_id, "audio.wav", os.path.getsize(audio_path))
     except (OSError, re.error) as e:
         logging.warning("Could not download audio: %s", e)
 
+    # messages.json
+    # messages.json — fetched from KIT's live /archive_messages/
+    # endpoint, not from the static archive file (which is not
+    # populated on lt2srv.iar.kit.edu for public sessions).
     if _is_cancelled(session_id):
-        raise JobCancelled(
-            f"Session {short_sid(session_id)} cancelled before messages.json"
+        raise _JobCancelled(
+            f"Session {_short_sid(session_id)} cancelled before messages.json download"
         )
-
-    messages_path = os.path.join(sdir, "messages.json")
+    messages_path = os.path.join(session_dir, "messages.json")
     messages = _fetch_all_archive_messages(session_id, token, server_url)
     if messages:
         with open(messages_path, "w", encoding="utf-8") as f:
             json.dump(messages, f, ensure_ascii=False)
         size = os.path.getsize(messages_path)
+        logging.info(
+            "Downloaded %d messages via /archive_messages (%d bytes)",
+            len(messages),
+            size,
+        )
         _job_log(
             session_id,
-            f"Downloaded {len(messages)} messages ({size} bytes)",
+            f"Downloaded {len(messages)} messages " f"({size} bytes)",
             progress=0.85,
         )
         _job_add_file(session_id, "messages.json", size)
+    else:
+        logging.warning(
+            "No messages returned by /archive_messages for session %s",
+            _short_sid(session_id),
+        )
 
+    # Transcripts
     _job_log(session_id, "Extracting transcripts…", stage="extracting", progress=0.9)
     transcripts = extract_transcripts_from_messages(messages_path)
     if transcripts:
-        save_transcripts_to_files(sdir, transcripts)
+        save_transcripts_to_files(session_dir, transcripts)
+        logging.info("Extracted %d transcripts from messages.json", len(transcripts))
         _job_add_file(
             session_id,
             "transcripts.json",
-            os.path.getsize(os.path.join(sdir, "transcripts.json")),
+            os.path.getsize(os.path.join(session_dir, "transcripts.json")),
         )
         _job_add_file(
             session_id,
             "transcript.txt",
-            os.path.getsize(os.path.join(sdir, "transcript.txt")),
+            os.path.getsize(os.path.join(session_dir, "transcript.txt")),
         )
-        for vtt_name in generate_vtt_files_from_transcripts(sdir):
-            vtt_path = os.path.join(sdir, vtt_name)
+
+        # ── NEW: generate VTTs from the transcripts we just wrote ──
+        for vtt_name in generate_vtt_files_from_transcripts(session_dir):
+            vtt_path = os.path.join(session_dir, vtt_name)
             _job_add_file(session_id, vtt_name, os.path.getsize(vtt_path))
             _job_log(session_id, f"Generated {vtt_name}")
+
     else:
         _job_log(session_id, "No transcripts extracted", level="warning")
 
+    # ── Pull TTS WAVs alongside the VTTs, so playback no longer
+    #    depends on a live KIT token. ─────────────────────────────
     if _is_cancelled(session_id):
-        raise JobCancelled(
-            f"Session {short_sid(session_id)} cancelled before TTS download"
+        raise _JobCancelled(
+            f"Session {_short_sid(session_id)} cancelled before TTS download"
         )
-
     _job_log(
-        session_id, "Downloading TTS audio tracks…", stage="downloading", progress=0.95
+        session_id,
+        "Downloading TTS audio tracks…",
+        stage="downloading",
+        progress=0.95,
     )
     try:
         tts_files = download_tts_files(session_id, token, server_url)
         if tts_files:
+            logging.info(
+                "Downloaded %d TTS file(s) for %s: %s",
+                len(tts_files),
+                _short_sid(session_id),
+                tts_files,
+            )
             _job_log(
-                session_id, f"Downloaded {len(tts_files)} TTS track(s)", progress=0.97
+                session_id,
+                f"Downloaded {len(tts_files)} TTS track(s)",
+                progress=0.97,
             )
         else:
-            _job_log(
-                session_id, "No TTS tracks available for this session", level="warning"
+            logging.info(
+                "No TTS files downloaded for %s "
+                "(languages may not have TTS available)",
+                _short_sid(session_id),
             )
-    except (OSError, ValueError, TypeError) as e:
-        _job_log(session_id, f"TTS download failed: {e}", level="warning")
+            _job_log(
+                session_id,
+                "No TTS tracks available for this session",
+                level="warning",
+            )
+    except (OSError, ValueError, TypeError, requests.exceptions.RequestException) as e:
+        logging.warning("TTS download failed for %s: %s", _short_sid(session_id), e)
+        _job_log(
+            session_id,
+            f"TTS download failed: {e}",
+            level="warning",
+        )
 
     files = [
         f
-        for f in os.listdir(sdir)
-        if os.path.isfile(os.path.join(sdir, f))
-        and is_meaningful_file(os.path.join(sdir, f))
+        for f in os.listdir(session_dir)
+        if os.path.isfile(os.path.join(session_dir, f))
+        and _is_meaningful_file(os.path.join(session_dir, f))
     ]
+
+    logging.info("=" * 60)
+    logging.info(
+        "Session %s: Downloaded %s files total", _short_sid(session_id), len(files)
+    )
+    for f in files:
+        size = os.path.getsize(os.path.join(session_dir, f))
+        logging.info("  - %s (%d bytes)", f, size)
+    logging.info("=" * 60)
+
     _job_log(
         session_id,
         f"Session ready: {len(files)} files downloaded",
@@ -385,68 +639,20 @@ def _download_locked(session_id, token, server_url) -> bool:
     return len(files) > 0
 
 
-# ─── /archive_messages/ pagination ─────────────────────────────────────
-def _fetch_archive_messages_page(session_id, token, server_url, page, limit=1000):
-    if not server_url:
-        server_url = INTERNAL_SERVER_URL
-    server_url = server_url.rstrip("/")
-    url = f"{server_url}/archive_messages/{session_id}"
-    try:
-        r = requests.get(
-            url,
-            params={"page": page, "limit": limit},
-            headers=internal_headers(token),
-            cookies=internal_cookies(token),
-            verify=False,
-            timeout=60,
-            allow_redirects=True,
-        )
-        if r.status_code != 200:
-            return None
-        return r.json()
-    except requests.RequestException:
-        return None
-
-
-def _fetch_all_archive_messages(
-    session_id, token, server_url, limit=1000, max_pages=50
-) -> list:
-    all_messages: list = []
-    page = 1
-    total = None
-    while page <= max_pages:
-        payload = _fetch_archive_messages_page(
-            session_id, token, server_url, page, limit
-        )
-        if payload is None:
-            break
-        if total is None:
-            try:
-                total = int(payload.get("total", 0))
-            except (TypeError, ValueError):
-                total = 0
-        chunk = payload.get("data") or []
-        all_messages.extend(chunk)
-        if not chunk or len(chunk) < limit:
-            break
-        if total is not None and page * limit >= total:
-            break
-        page += 1
-    return all_messages
-
-
-def _fetch_latest_archive_page(session_id, token, server_url, limit=1000) -> list:
-    probe = _fetch_archive_messages_page(session_id, token, server_url, page=1, limit=1)
-    if probe is None:
-        return []
-    try:
-        total = int(probe.get("total", 0))
-    except (TypeError, ValueError):
-        total = 0
-    if total <= 0:
-        return []
-    last_page = max(1, (total + limit - 1) // limit)
-    payload = _fetch_archive_messages_page(
-        session_id, token, server_url, page=last_page, limit=limit
+# ── Names from modules further down the chain ─────────────────────────
+# They are only used inside functions. backend.app calls this once all
+# modules are loaded, so the circular references resolve cleanly.
+def _link_late_names():
+    global _fetch_all_archive_messages, _is_meaningful_file
+    global _session_files_look_incomplete, download_tts_files
+    global extract_transcripts_from_messages
+    global generate_vtt_files_from_transcripts, save_transcripts_to_files
+    from .tts import download_tts_files
+    from .transcripts import (
+        extract_transcripts_from_messages,
+        generate_vtt_files_from_transcripts,
+        save_transcripts_to_files,
     )
-    return (payload or {}).get("data") or []
+    from .kit_messages import _fetch_all_archive_messages
+    from .video_routes import _is_meaningful_file
+    from .session_sync import _session_files_look_incomplete

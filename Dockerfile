@@ -67,9 +67,11 @@ RUN rm -rf /app/web
 # the named volumes in docker-compose.yaml have a valid mountpoint even
 # on a completely fresh volume, and their ownership matches the process
 # that will write into them.
-RUN mkdir -p /app/lib/sessions /app/lib/uploads /app/lib/state
+RUN mkdir -p /app/lib/sessions /app/lib/uploads /app/lib/state /app/lib/settings
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "8", "lib.backend:app"]
+# The backend is the package backend/ (split from the former lib/backend.py).
+# Data stays under /app/lib (uploads, sessions, state, settings) — see backend/paths.py.
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "8", "backend.app:application"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 3: Nginx serving the built frontend, proxying API requests to Flask

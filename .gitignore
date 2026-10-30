@@ -60,3 +60,10 @@ sessions/
 backend/settings/
 backend/settings/*.tmp
 lib/settings/
+
+backend/uploads/
+backend/sessions/
+backend/state/
+backend/settings/
+__pycache__/
+lib/settings/

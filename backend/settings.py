@@ -1,25 +1,30 @@
-"""Job-settings persistence: per-video, defaults, named presets."""
+"""Per-video job settings and presets.
 
-from __future__ import annotations
+Split mechanically from the former lib/backend.py — code unchanged.
+"""
 
 import json
 import logging
 import os
 import re
+import uuid
+from flask import jsonify, request
 
-from flask import Blueprint, jsonify, request
+from .paths import DATA_DIR
+from .flask_app import app
+from .config import users
+from .state import save_state
 
-bp = Blueprint("settings", __name__)
 
-# Settings are stored as plain JSON files under <backend>/settings/.
-# They survive a restart and are visible to anyone who shells into
-# the container. Three kinds:
+# ─── JOB SETTINGS PERSISTENCE ──────────────────────────────────────────
+# Settings are stored as plain JSON files under <backend>/settings/ so
+# they survive a server restart and are visible to anyone who shells
+# into the container. Two kinds:
 #
-#   video_<key>.json   — auto-saved settings for one video
-#   defaults.json      — global fallback when a video has no file
-#   presets.json       — user-named presets, shared across videos
-_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_SETTINGS_DIR = os.path.join(_BACKEND_DIR, "settings")
+#   video_<key>.json        — auto-saved settings for one video
+#   _presets.json           — user-named presets, shared across videos
+#   _defaults.json          — global fallback when a video has no file
+_SETTINGS_DIR = os.path.join(DATA_DIR, "settings")
 os.makedirs(_SETTINGS_DIR, exist_ok=True)
 
 
@@ -49,7 +54,7 @@ def _write_settings_file(path: str, data: dict) -> None:
     os.replace(tmp, path)
 
 
-@bp.route(
+@app.route(
     "/video-job-settings/<video_key>",
     methods=["GET", "PUT", "DELETE", "OPTIONS"],
 )
@@ -100,7 +105,7 @@ def video_job_settings(video_key):
         return jsonify({"error": f"Could not save settings: {e}"}), 500
 
 
-@bp.route("/job-settings-defaults", methods=["GET", "PUT", "OPTIONS"])
+@app.route("/job-settings-defaults", methods=["GET", "PUT", "OPTIONS"])
 def job_settings_defaults():
     """Global default job settings, consulted when a video has none."""
     if request.method == "OPTIONS":
@@ -121,7 +126,7 @@ def job_settings_defaults():
         return jsonify({"error": str(e)}), 500
 
 
-@bp.route(
+@app.route(
     "/job-settings-presets",
     methods=["GET", "POST", "DELETE", "OPTIONS"],
 )
@@ -167,5 +172,30 @@ def job_settings_presets():
         _write_settings_file(path, {"presets": presets})
     except OSError as e:
         return jsonify({"error": str(e)}), 500
-    logging.info("job-settings-presets: saved %r (%d keys)", name, len(settings))
+    logging.info(
+        "job-settings-presets: saved %r (%d keys)", name, len(settings)
+    )
     return jsonify({"success": True, "name": name}), 200
+
+
+# ─── AUTH ENDPOINTS ─────────────────────────────────────────────────────
+
+
+@app.route("/register", methods=["POST"])
+def register():
+    """Register a new user with email and password."""
+    email = request.form.get("email")
+    password = request.form.get("password")
+    name = request.form.get("name", "")
+    if not email or not password:
+        return jsonify({"message": "Email and password required"}), 400
+    if email in users:
+        return jsonify({"message": "User already exists"}), 400
+    users[email] = {"name": name, "password": password}
+    save_state()
+    return (
+        jsonify(
+            {"token": str(uuid.uuid4()), "message": "User registered successfully"}
+        ),
+        201,
+    )
