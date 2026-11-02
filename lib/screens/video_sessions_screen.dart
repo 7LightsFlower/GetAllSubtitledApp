@@ -1,4 +1,5 @@
-// video_sessions_screen.dart  (formerly working_screen.dart; app route /working)
+// video_sessions_screen.dart  (formerly working_screen.dart)
+// Browser address: /video-sessions/<email> (old /working/… still works)
 import 'dart:async';
 
 import 'dart:js_interop';
@@ -968,12 +969,12 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
     try {
       final email = await _currentUserEmail();
       final path = email.isNotEmpty
-          ? '/working/${Uri.encodeComponent(email)}'
-          : '/working';
+          ? '/video-sessions/${Uri.encodeComponent(email)}'
+          : '/video-sessions';
       if (web.window.location.pathname != path) {
         web.window.history.replaceState(
           null,
-          'Working Screen',
+          'Video Sessions',
           path,
         );
       }
@@ -987,7 +988,7 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
   /// Asks `/whoami` rather than parsing the token locally, so a change
   /// in the KIT token format doesn't silently produce a wrong URL.
   /// Returns an empty string on any failure; callers fall back to a
-  /// generic `/working` path.
+  /// generic `/video-sessions` path.
   Future<String> _currentUserEmail() async {
     try {
       final token = await InternalAuthService.getToken();

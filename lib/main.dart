@@ -55,13 +55,17 @@ class MyApp extends StatelessWidget {
           );
         }
 
-        // ── /working  and  /working/<email> ───────────────────────
-        // `/working` alone is the anonymous fallback; the email
+        // ── /video-sessions  and  /video-sessions/<email> ─────────
+        // `/video-sessions` alone is the anonymous fallback; the email
         // segment is informational, so both build the same screen.
         // Listing this before the static switch is what lets a
-        // refresh on `/working/testuser%40example.com` land back
-        // on the working screen instead of falling through.
-        if (name == '/working' || name.startsWith('/working/')) {
+        // refresh on `/video-sessions/testuser%40example.com` land
+        // back on the screen instead of falling through.
+        // The old `/working…` addresses still work (bookmarks).
+        if (name == '/video-sessions' ||
+            name.startsWith('/video-sessions/') ||
+            name == '/working' ||
+            name.startsWith('/working/')) {
           return MaterialPageRoute(
             settings: settings,
             builder: (_) => const VideoSessionsScreen(),
@@ -117,6 +121,7 @@ class MyApp extends StatelessWidget {
               settings: settings,
               builder: (_) => const ForgotPasswordScreen(),
             );
+          case '/video-sessions':
           case '/working':
             return MaterialPageRoute(
               settings: settings,

@@ -81,7 +81,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
         await prefs.setString('auth_token', token);
 
         if (mounted) {
-          Navigator.pushReplacementNamed(context, '/working');
+          Navigator.pushReplacementNamed(context, '/video-sessions');
         }
       } else {
         // Try to parse error message from server

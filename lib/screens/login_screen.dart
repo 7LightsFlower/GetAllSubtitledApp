@@ -56,7 +56,7 @@ class _LoginScreenState extends State<LoginScreen> {
         }
 
         if (mounted) {
-          Navigator.pushReplacementNamed(context, '/working');
+          Navigator.pushReplacementNamed(context, '/video-sessions');
         }
       } else {
         String errorMsg = 'Login failed (HTTP ${response.statusCode})';
