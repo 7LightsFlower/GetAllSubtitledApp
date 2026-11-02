@@ -10,7 +10,9 @@ import 'package:asr_live_translator/screens/session_detail_screen.dart';
 import 'package:asr_live_translator/screens/live_sessions_screen.dart';
 import 'package:asr_live_translator/services/ui_mode.dart';
 import 'package:asr_live_translator/widgets/server_connection_panel.dart';
-import 'package:asr_live_translator/widgets/view_switcher.dart';
+import 'package:asr_live_translator/widgets/home_hub.dart';
+import 'package:asr_live_translator/screens/live_asr_screen.dart';
+import 'package:asr_live_translator/services/live_sessions_api.dart';
 import 'package:asr_live_translator/theme/responsive.dart';
 import 'package:asr_live_translator/widgets/job_progress_panel.dart';
 import 'package:flutter/foundation.dart';
@@ -141,6 +143,9 @@ class ImportVideoStatus {
 }
 
 // ─── Main screen ────────────────────────────────────────────────
+/// What the working screen shows: the overview, or one of the two lists.
+enum _HomeView { hub, videos, live }
+
 class WorkingScreen extends StatefulWidget {
   const WorkingScreen({super.key});
 
@@ -169,7 +174,9 @@ class _WorkingScreenState extends State<WorkingScreen>
     _registerDropZone();
     _updateWorkingScreenUrl();
     _fetchProjects();
-    _loadTab();
+    _loadLiveCount();
+    ServerConnection.tokenChanged.addListener(_loadLiveCount);
+    ServerConnection.serverChanged.addListener(_loadLiveCount);
     // Re-run once the token is known, in case the first call raced
     // ahead of _checkConnection().
     Future.delayed(const Duration(seconds: 1), () {
@@ -180,6 +187,8 @@ class _WorkingScreenState extends State<WorkingScreen>
   @override
   void dispose() {
     _unregisterDropZone();
+    ServerConnection.tokenChanged.removeListener(_loadLiveCount);
+    ServerConnection.serverChanged.removeListener(_loadLiveCount);
     super.dispose();
   }
 
@@ -280,7 +289,7 @@ class _WorkingScreenState extends State<WorkingScreen>
       _showSnackBar('$skipped non-video file(s) skipped.', isError: true);
     }
 
-    if (_showLive) await _setTab(false); // uploads belong to the video list
+    if (_view != _HomeView.videos) _openView(_HomeView.videos); // uploads go to the video list
     _dropBusy = true;
     try {
       // One after another, each with the usual upload dialog.
@@ -371,45 +380,101 @@ class _WorkingScreenState extends State<WorkingScreen>
   String? _folderFilter; // null = all videos, _unsortedFilter, or a name
   String? _dropHover;    // folder chip currently under a dragged card
 
-  // ─── Videos / Live sessions switcher ─────────────────────────
-  static const String _tabPref = 'working_tab';
-  bool _showLive = false;
+  // ─── Start page: overview → Video list / Live sessions ─────────
+  _HomeView _view = _HomeView.hub;
   int _liveReload = 0;
+  int? _liveCount; // null = unknown (loading / not connected)
 
-  Future<void> _loadTab() async {
+  Future<void> _loadLiveCount() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final live = prefs.getString(_tabPref) == 'live';
-      if (mounted && live != _showLive) setState(() => _showLive = live);
-    } catch (_) {}
+      final list = await LiveSessionsApi.list();
+      if (mounted) setState(() => _liveCount = list.length);
+    } catch (_) {
+      if (mounted) setState(() => _liveCount = null);
+    }
   }
 
-  Future<void> _setTab(bool live) async {
-    if (live == _showLive) return;
-    setState(() => _showLive = live);
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_tabPref, live ? 'live' : 'videos');
-    } catch (_) {}
-    if (!live) _fetchProjects(); // pick up anything new
+  void _openView(_HomeView v) {
+    if (v == _view) return;
+    setState(() => _view = v);
+    if (v == _HomeView.videos) _fetchProjects(); // pick up anything new
+    if (v == _HomeView.hub) _loadLiveCount();
   }
 
-  Widget _buildTabSwitcher(Responsive r) {
-    return ViewSwitcher(
-      options: const [
-        ViewSwitcherOption(
+  Future<void> _newLiveSession() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const LiveAsrScreen()),
+    );
+    if (!mounted) return;
+    _loadLiveCount();
+    setState(() => _liveReload++);
+  }
+
+  Widget _buildHub(Responsive r) {
+    final videoStats = <String>[
+      if (!_isLoading) '${_projects.length} video${_projects.length == 1 ? '' : 's'}',
+      if (!_isLoading && _folders.isNotEmpty)
+        '${_folders.length} folder${_folders.length == 1 ? '' : 's'}',
+    ];
+    final liveStats = <String>[
+      if (_liveCount != null)
+        '$_liveCount session${_liveCount == 1 ? '' : 's'}'
+      else
+        'Connect to see your sessions',
+    ];
+    return HomeHub(
+      entries: [
+        HubEntry(
           icon: Icons.video_library_outlined,
-          label: 'Video list',
-          shortLabel: 'Videos',
+          title: 'Videos',
+          description: 'Uploaded videos with their subtitles, translations, '
+              'spoken translations and exports.',
+          stats: videoStats,
+          accent: Colors.indigo.shade600,
+          onOpen: () => _openView(_HomeView.videos),
+          actionIcon: Icons.upload,
+          actionLabel: 'Upload a video',
+          onAction: () async {
+            _openView(_HomeView.videos);
+            await _uploadVideo();
+          },
         ),
-        ViewSwitcherOption(
+        HubEntry(
           icon: Icons.mic_none,
-          label: 'Live transcripts',
-          shortLabel: 'Live',
+          title: 'Live sessions',
+          description: 'Live transcription and translation from your '
+              'microphone, with spoken translations and a QR link.',
+          stats: liveStats,
+          accent: Colors.teal.shade600,
+          onOpen: () => _openView(_HomeView.live),
+          actionIcon: Icons.mic,
+          actionLabel: 'New live session',
+          onAction: _newLiveSession,
         ),
       ],
-      selected: _showLive ? 1 : 0,
-      onChanged: (i) => _setTab(i == 1),
+      footer: UiMode.isExpert ? _buildStorageBar(r) : null,
+    );
+  }
+
+  Widget _buildStorageBar(Responsive r) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Storage used (input videos): '
+          '${_storageUsed.toStringAsFixed(2)} GB / '
+          '${_storageLimit.toStringAsFixed(0)} GB',
+          style: TextStyle(fontSize: r.fontBodySmall, color: Colors.grey[600]),
+        ),
+        SizedBox(height: r.spaceXS),
+        LinearProgressIndicator(
+          value: _storageLimit > 0 ? _storageUsed / _storageLimit : 0,
+          backgroundColor: Colors.grey[300],
+          valueColor: const AlwaysStoppedAnimation(Colors.blue),
+          minHeight: 4,
+        ),
+      ],
     );
   }
 
@@ -1878,13 +1943,33 @@ class _WorkingScreenState extends State<WorkingScreen>
   Widget build(BuildContext context) {
     final r = Responsive.of(context);
 
-    return Scaffold(
+    final onHub = _view == _HomeView.hub;
+    final sectionTitle = switch (_view) {
+      _HomeView.hub => appTitle,
+      _HomeView.videos => 'Videos',
+      _HomeView.live => 'Live sessions',
+    };
+
+    // Back (browser / Android) inside a list returns to the overview.
+    return PopScope(
+      canPop: onHub,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _openView(_HomeView.hub);
+      },
+      child: Scaffold(
       appBar: AppBar(
+        leading: onHub
+            ? null
+            : IconButton(
+                tooltip: 'Overview',
+                icon: const Icon(Icons.arrow_back),
+                onPressed: () => _openView(_HomeView.hub),
+              ),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(appTitle),
+            Text(sectionTitle),
             FutureBuilder<String>(
               future: _currentUserEmail(),
               builder: (_, snap) {
@@ -1906,9 +1991,14 @@ class _WorkingScreenState extends State<WorkingScreen>
           const UiModeToggle(),
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: _showLive
-                ? () => setState(() => _liveReload++)
-                : _fetchProjects,
+            onPressed: switch (_view) {
+              _HomeView.live => () => setState(() => _liveReload++),
+              _HomeView.hub => () {
+                  _fetchProjects();
+                  _loadLiveCount();
+                },
+              _HomeView.videos => _fetchProjects,
+            },
             tooltip: 'Refresh list',
           ),
           IconButton(
@@ -1918,10 +2008,24 @@ class _WorkingScreenState extends State<WorkingScreen>
           ),
         ],
       ),
-      body: _withDropZone(_showLive
+      body: _withDropZone(_view == _HomeView.hub
+          ? CustomScrollView(
+              slivers: [
+                SliverPadding(
+                  padding: EdgeInsets.fromLTRB(_pagePad(context),
+                      _pagePad(context), _pagePad(context), 0),
+                  sliver: const SliverToBoxAdapter(
+                      child: ServerConnectionPanel()),
+                ),
+                SliverPadding(
+                  padding: EdgeInsets.all(_pagePad(context) + 8),
+                  sliver: SliverToBoxAdapter(child: _buildHub(r)),
+                ),
+              ],
+            )
+          : _view == _HomeView.live
           ? LiveSessionsScreen(
               embedded: true,
-              top: _buildTabSwitcher(r),
               reloadToken: _liveReload,
             )
           : CustomScrollView(
@@ -1938,15 +2042,6 @@ class _WorkingScreenState extends State<WorkingScreen>
                         _pagePad(context), _pagePad(context),
                         _pagePad(context), 0),
                     child: const ServerConnectionPanel(),
-                  ),
-                ),
-                // ─── Videos / Live transcripts ────────────────────
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: EdgeInsets.fromLTRB(
-                        _pagePad(context), _pagePad(context),
-                        _pagePad(context), 0),
-                    child: _buildTabSwitcher(r),
                   ),
                 ),
                 if (_isLoading)
@@ -2035,8 +2130,10 @@ class _WorkingScreenState extends State<WorkingScreen>
                 ],
               ],
             )),
+      ),
     );
   }
+
   /// Search field, sort dropdown and upload button. Wraps to two lines
   /// on compact viewports so nothing gets crushed.
   Widget _buildHeaderRow(Responsive r) {

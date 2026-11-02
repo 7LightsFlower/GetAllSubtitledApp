@@ -4,7 +4,7 @@ import 'package:asr_live_translator/screens/login_screen.dart';
 import 'package:asr_live_translator/screens/register_screen.dart';
 import 'package:asr_live_translator/screens/forgot_password_screen.dart';
 import 'package:asr_live_translator/screens/session_detail_screen.dart';
-import 'package:asr_live_translator/screens/working_screen.dart';
+import 'package:asr_live_translator/screens/video_sessions_screen.dart';
 import 'package:asr_live_translator/screens/splash_screen.dart';
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/models/language_config.dart';
@@ -64,7 +64,7 @@ class MyApp extends StatelessWidget {
         if (name == '/working' || name.startsWith('/working/')) {
           return MaterialPageRoute(
             settings: settings,
-            builder: (_) => const WorkingScreen(),
+            builder: (_) => const VideoSessionsScreen(),
           );
         }
 
@@ -120,7 +120,7 @@ class MyApp extends StatelessWidget {
           case '/working':
             return MaterialPageRoute(
               settings: settings,
-              builder: (_) => const WorkingScreen(),
+              builder: (_) => const VideoSessionsScreen(),
             );
         }
 

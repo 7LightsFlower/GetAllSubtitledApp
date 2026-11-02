@@ -200,7 +200,7 @@ class Responsive {
   double get iconLarge => _fontScale(24).clamp(20.0, 32.0);
   double get iconExtraLarge => _fontScale(64).clamp(48.0, 96.0);
 
-  // ─── Grid helpers (used by working_screen and friends) ─────────
+  // ─── Grid helpers (used by video_sessions_screen and friends) ─────────
   /// How many columns a project grid should use at this viewport.
   ///
   /// Chosen so cards stay close to 260–320 px wide on any display:

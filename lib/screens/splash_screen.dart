@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 // ignore: avoid_web_libraries_in_flutter, deprecated_member_use
 import 'package:asr_live_translator/services/internal_auth_service.dart';
 import 'package:asr_live_translator/screens/login_screen.dart';
-import 'package:asr_live_translator/screens/working_screen.dart';
+import 'package:asr_live_translator/screens/video_sessions_screen.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -25,7 +25,7 @@ class _SplashScreenState extends State<SplashScreen> {
     if (token != null && mounted) {
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (_) => const WorkingScreen()),
+        MaterialPageRoute(builder: (_) => const VideoSessionsScreen()),
       );
     } else if (mounted) {
       // If no token, go to login screen where user can click "Connect"
