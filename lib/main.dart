@@ -5,6 +5,7 @@ import 'package:asr_live_translator/screens/register_screen.dart';
 import 'package:asr_live_translator/screens/forgot_password_screen.dart';
 import 'package:asr_live_translator/screens/session_detail_screen.dart';
 import 'package:asr_live_translator/screens/video_sessions_screen.dart';
+import 'package:asr_live_translator/services/app_url.dart';
 import 'package:asr_live_translator/screens/splash_screen.dart';
 import 'package:asr_live_translator/constants.dart';
 import 'package:asr_live_translator/models/language_config.dart';
@@ -62,13 +63,17 @@ class MyApp extends StatelessWidget {
         // refresh on `/video-sessions/testuser%40example.com` land
         // back on the screen instead of falling through.
         // The old `/working…` addresses still work (bookmarks).
-        if (name == '/video-sessions' ||
-            name.startsWith('/video-sessions/') ||
-            name == '/working' ||
-            name.startsWith('/working/')) {
+        // /overview, /video-sessions, /live-sessions (+ /<email>[/<id>]),
+        // and the old /working: all on the same screen, opened on the
+        // matching view (see services/app_url.dart).
+        final section = AppUrl.parse(name);
+        if (section != null) {
           return MaterialPageRoute(
             settings: settings,
-            builder: (_) => const VideoSessionsScreen(),
+            builder: (_) => VideoSessionsScreen(
+              initialSection: section.$1,
+              initialId: section.$2,
+            ),
           );
         }
 

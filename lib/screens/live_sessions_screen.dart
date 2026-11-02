@@ -18,6 +18,7 @@ import 'package:asr_live_translator/screens/live_asr_screen.dart';
 import 'package:asr_live_translator/screens/live_session_view_screen.dart';
 import 'package:asr_live_translator/screens/session_output_screen.dart';
 import 'package:asr_live_translator/services/live_sessions_api.dart';
+import 'package:asr_live_translator/services/app_url.dart';
 import 'package:asr_live_translator/services/server_config_service.dart';
 import 'package:asr_live_translator/services/ui_mode.dart';
 import 'package:flutter/material.dart';
@@ -32,7 +33,12 @@ class LiveSessionsScreen extends StatefulWidget {
     this.embedded = false,
     this.top,
     this.reloadToken = 0,
+    this.openId,
   });
+
+  /// Open this session after the first load (deep link
+  /// /live-sessions/<email>/<id>); "new" starts a new recording.
+  final String? openId;
 
   /// Shown inside another page (the working screen's "Live sessions"
   /// tab): no Scaffold / AppBar of its own.
@@ -112,6 +118,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
         _needsConnect = false;
         _loading = false;
       });
+      _handleOpenId();
     } on LiveSessionsException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -130,16 +137,49 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
 
   // ─── navigation ──────────────────────────────────────────────────
   Future<void> _newSession() async {
+    await AppUrl.set(AppUrl.live, 'new');
+    if (!mounted) return;
     await Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => const LiveAsrScreen()),
     );
+    await AppUrl.set(AppUrl.live);
     if (mounted) _load();
+  }
+
+  /// Deep link: open the session named in the address once the list is in.
+  bool _openIdHandled = false;
+  void _handleOpenId() {
+    final id = widget.openId;
+    if (_openIdHandled || id == null || id.isEmpty) return;
+    _openIdHandled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (id == 'new') {
+        _newSession();
+        return;
+      }
+      final s = _sessions
+          .where((x) => x.outputSessionId == id || x.id == id)
+          .firstOrNull;
+      if (s != null) {
+        _open(s);
+      } else {
+        AppUrl.set(AppUrl.live);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('That live session was not found.')),
+        );
+      }
+    });
   }
 
   Future<void> _open(LiveSessionSummary s) async {
     // Sessions recorded with the current relay have full output files:
     // open them in the same Session Output screen as uploaded videos.
+    // The address shows this live session while it is open.
+    await AppUrl.set(
+        AppUrl.live, s.outputSessionId.isNotEmpty ? s.outputSessionId : s.id);
+    if (!mounted) return;
     if (s.outputSessionId.isNotEmpty) {
       await Navigator.push(
         context,
@@ -150,6 +190,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
           ),
         ),
       );
+      await AppUrl.set(AppUrl.live);
       return;
     }
     // Older live sessions only have the saved text.
@@ -157,6 +198,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
       context,
       MaterialPageRoute(builder: (_) => LiveSessionViewScreen(sessionId: s.id)),
     );
+    await AppUrl.set(AppUrl.live);
     if (deleted == true && mounted) _load();
   }
 

@@ -14,6 +14,7 @@ import 'package:asr_live_translator/widgets/server_connection_panel.dart';
 import 'package:asr_live_translator/widgets/home_hub.dart';
 import 'package:asr_live_translator/screens/live_asr_screen.dart';
 import 'package:asr_live_translator/services/live_sessions_api.dart';
+import 'package:asr_live_translator/services/app_url.dart';
 import 'package:asr_live_translator/theme/responsive.dart';
 import 'package:asr_live_translator/widgets/job_progress_panel.dart';
 import 'package:flutter/foundation.dart';
@@ -148,7 +149,15 @@ class ImportVideoStatus {
 enum _HomeView { hub, videos, live }
 
 class VideoSessionsScreen extends StatefulWidget {
-  const VideoSessionsScreen({super.key});
+  const VideoSessionsScreen({super.key, this.initialSection, this.initialId});
+
+  /// Which view to open: AppUrl.overview / .videos / .live (from the
+  /// browser address). Null = overview.
+  final String? initialSection;
+
+  /// Live session to open right away (`/live-sessions/<email>/<id>`),
+  /// or "new" to start recording.
+  final String? initialId;
 
   @override
   State<VideoSessionsScreen> createState() => _VideoSessionsScreenState();
@@ -382,7 +391,13 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
   String? _dropHover;    // folder chip currently under a dragged card
 
   // ─── Start page: overview → Video list / Live sessions ─────────
-  _HomeView _view = _HomeView.hub;
+  late _HomeView _view = switch (widget.initialSection) {
+    AppUrl.videos => _HomeView.videos,
+    AppUrl.live => _HomeView.live,
+    _ => _HomeView.hub,
+  };
+  // Consumed by the live list on its first load (deep link).
+  late String? _pendingLiveId = widget.initialId;
   int _liveReload = 0;
   int? _liveCount; // null = unknown (loading / not connected)
 
@@ -398,16 +413,20 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
   void _openView(_HomeView v) {
     if (v == _view) return;
     setState(() => _view = v);
+    _updateWorkingScreenUrl();
     if (v == _HomeView.videos) _fetchProjects(); // pick up anything new
     if (v == _HomeView.hub) _loadLiveCount();
   }
 
   Future<void> _newLiveSession() async {
+    await AppUrl.set(AppUrl.live, 'new');
+    if (!mounted) return;
     await Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => const LiveAsrScreen()),
     );
     if (!mounted) return;
+    _updateWorkingScreenUrl();
     _loadLiveCount();
     setState(() => _liveReload++);
   }
@@ -966,21 +985,17 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
   /// videos are listed here, instead of leaving the last-opened video's
   /// key in the bar.
   Future<void> _updateWorkingScreenUrl() async {
-    try {
-      final email = await _currentUserEmail();
-      final path = email.isNotEmpty
-          ? '/video-sessions/${Uri.encodeComponent(email)}'
-          : '/video-sessions';
-      if (web.window.location.pathname != path) {
-        web.window.history.replaceState(
-          null,
-          'Video Sessions',
-          path,
-        );
-      }
-    } catch (e) {
-      debugPrint('working-screen url update failed: $e');
-    }
+    await AppUrl.set(switch (_view) {
+      _HomeView.hub => AppUrl.overview,
+      _HomeView.videos => AppUrl.videos,
+      _HomeView.live => AppUrl.live,
+    });
+  }
+
+  String? _takePendingLiveId() {
+    final id = _pendingLiveId;
+    _pendingLiveId = null;
+    return id;
   }
 
   /// Email the backend reports for the current request.
@@ -2028,6 +2043,7 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
           ? LiveSessionsScreen(
               embedded: true,
               reloadToken: _liveReload,
+              openId: _takePendingLiveId(),
             )
           : CustomScrollView(
               // Connection panel, header, storage bar and grid all live

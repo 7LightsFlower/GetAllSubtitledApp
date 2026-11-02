@@ -40,6 +40,7 @@ import 'package:asr_live_translator/services/ui_mode.dart';
 import 'package:asr_live_translator/widgets/server_connection_panel.dart';
 import 'package:asr_live_translator/widgets/language_picker.dart';
 import 'package:asr_live_translator/widgets/session_share_card.dart';
+import 'package:asr_live_translator/services/app_url.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -1475,15 +1476,18 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
     return 'Translation ($key)';
   }
 
-  void _openFullOutput() {
+  Future<void> _openFullOutput() async {
     final id = _outputSessionId;
     if (id == null || id.isEmpty) return;
-    Navigator.push(
+    await AppUrl.set(AppUrl.live, id);
+    if (!mounted) return;
+    await Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => SessionOutputScreen(sessionId: id, sessionUrl: ''),
       ),
     );
+    await AppUrl.set(AppUrl.live, 'new');
   }
 
   /// Maps a KIT sender ("asr:…", "mt:…_de", …) to one of our panels.
