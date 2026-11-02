@@ -234,10 +234,27 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
   String? _ttsLane;
   final LiveTtsPlayer _tts = LiveTtsPlayer();
 
-  // Link + QR for the audience: <server>/shorten/webapi/<permanent name>.
-  // The name is the "Permanent Name" from the settings (like for videos);
-  // left empty, KIT picks a random one and the relay reports it.
+  // Link + QR for the audience: <server>/webapi/shorten/<permanent name>.
+  // The name is the "Permanent Name" from the settings (like for videos).
+  // Left empty: the email in the login token without "@", dots and other
+  // non-alphanumerics (marcus.s@gmx.de → marcussgmxde); random only if
+  // the token carries no email.
   String? _shareUrl;
+
+  static String _defaultPermanentName(String token) {
+    final parts = token.split('|');
+    final email = parts.length >= 3 && parts.last.contains('@')
+        ? parts.last.trim().toLowerCase()
+        : '';
+    final name = email.replaceAll(RegExp(r'[^a-z0-9]'), '');
+    return name.isNotEmpty ? name : _randomPermanentName();
+  }
+
+  static String _randomPermanentName() {
+    const chars = 'abcdefghijkmnpqrstuvwxyz23456789'; // no look-alikes
+    final r = math.Random.secure();
+    return List.generate(8, (_) => chars[r.nextInt(chars.length)]).join();
+  }
 
   // Every TTS part as it arrives, per language (listed in the live screen,
   // each playable / downloadable right away).
@@ -722,6 +739,9 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
     }
     _token = token;
     final sessionServer = internalServerUrl.replaceAll(RegExp(r'/+$'), '');
+    final typedName = _shortenController.text.trim();
+    final permanentName =
+        typedName.isNotEmpty ? typedName : _defaultPermanentName(token);
     _saveLiveSettings(); // next live session opens with these settings
 
     _settingsTileController.collapse();
@@ -755,7 +775,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
           'targetServer': internalServerUrl,
           'language': _inputLanguages,
           'mtLanguage': _outputLanguages,
-          'settings': _settingsPayload(),
+          'settings': {..._settingsPayload(), 'shorten': permanentName},
         }),
       );
       final body = _tryJson(resp.body);
@@ -766,15 +786,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
       _liveId = body!['live_id'] as String;
       _savedId = _liveId;
       _outputSessionId = body['session_id']?.toString();
-      final typed = _shortenController.text.trim();
-      final kitName = body['shorten']?.toString().trim() ?? '';
-      final permanentName = kitName.isNotEmpty ? kitName : typed;
-      _shareUrl = permanentName.isNotEmpty
-          ? '$sessionServer/shorten/webapi/$permanentName'
-          // KIT's random name couldn't be read: its own session page.
-          : (_outputSessionId != null
-              ? '$sessionServer/present/$_outputSessionId'
-              : null);
+      _shareUrl = '$sessionServer/webapi/shorten/$permanentName';
       _startedAt = DateTime.now();
       _saveStatus = _SaveStatus.none;
       _saveError = null;
@@ -2149,7 +2161,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
           decoration: const InputDecoration(
             labelText: 'Permanent Name (alphanumeric only)',
             border: OutlineInputBorder(),
-            hintText: 'Leave empty for random',
+            hintText: 'Leave empty: your email without @ and dots',
           ),
           validator: (val) {
             if (val != null &&

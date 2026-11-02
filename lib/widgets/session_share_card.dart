@@ -1,12 +1,12 @@
 // session_share_card.dart
 //
 // QR code + link for a running live session, so the audience can follow
-// it on their phones:  <server>/shorten/webapi/<permanent name>
+// it on their phones:  <server>/webapi/shorten/<permanent name>
 //
 //   ┌──────────────────────────────────────────────────────────┐
 //   │ ▓▓▓▓▓▓  Follow this session                              │
-//   │ ▓ QR ▓  https://lt2srv…/shorten/webapi/abc123            │
-//   │ ▓▓▓▓▓▓  [view2] [Copy link] [Share] [QR as PNG]          │
+//   │ ▓ QR ▓  https://lt2srv…/webapi/shorten/abc123            │
+//   │ ▓▓▓▓▓▓  [Copy link] [Share] [QR as PNG]                  │
 //   └──────────────────────────────────────────────────────────┘
 //
 // Tap the QR code for a full-screen version (for a projector).
@@ -37,8 +37,6 @@ class SessionShareCard extends StatelessWidget {
       ScaffoldMessenger.of(c).showSnackBar(
         SnackBar(content: Text(text), duration: const Duration(seconds: 2)),
       );
-
-  void _open() => web.window.open(url, '_blank');
 
   Future<void> _copy(BuildContext c) async {
     await Clipboard.setData(ClipboardData(text: url));
@@ -162,11 +160,6 @@ class SessionShareCard extends StatelessWidget {
       spacing: 8,
       runSpacing: 6,
       children: [
-        FilledButton.icon(
-          onPressed: _open,
-          icon: const Icon(Icons.open_in_new, size: 18),
-          label: const Text('view2'),
-        ),
         OutlinedButton.icon(
           onPressed: () => _copy(context),
           icon: const Icon(Icons.copy, size: 18),
