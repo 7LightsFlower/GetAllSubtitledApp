@@ -1,4 +1,4 @@
-// working_screen.dart
+// video_sessions_screen.dart  (formerly working_screen.dart; app route /working)
 import 'dart:async';
 
 import 'dart:js_interop';
@@ -146,15 +146,15 @@ class ImportVideoStatus {
 /// What the working screen shows: the overview, or one of the two lists.
 enum _HomeView { hub, videos, live }
 
-class WorkingScreen extends StatefulWidget {
-  const WorkingScreen({super.key});
+class VideoSessionsScreen extends StatefulWidget {
+  const VideoSessionsScreen({super.key});
 
   @override
-  State<WorkingScreen> createState() => _WorkingScreenState();
+  State<VideoSessionsScreen> createState() => _VideoSessionsScreenState();
 }
 
-class _WorkingScreenState extends State<WorkingScreen>
-    with UiModeListener<WorkingScreen> {
+class _VideoSessionsScreenState extends State<VideoSessionsScreen>
+    with UiModeListener<VideoSessionsScreen> {
   List<VideoProject> _projects = [];
   bool _isLoading = true;
   String _searchQuery = '';
