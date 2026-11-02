@@ -50,6 +50,8 @@ class LiveSessionSummary {
     this.outputSessionId = '',
     this.folder,
     this.title = '',
+    this.permanentName = '',
+    this.ttsLanguages = const [],
   });
 
   final String id;
@@ -74,6 +76,12 @@ class LiveSessionSummary {
   /// live_<date>-<time> name.
   String title;
 
+  /// Permanent name of the <server>/webapi/shorten/<name> link ('' = none).
+  final String permanentName;
+
+  /// Spoken-translation (TTS) languages chosen for the session.
+  final List<String> ttsLanguages;
+
   /// What the list shows first.
   String get displayName => title.isNotEmpty ? title : name;
 
@@ -94,6 +102,8 @@ class LiveSessionSummary {
             ? null
             : j['folder'].toString(),
         title: j['title']?.toString() ?? '',
+        permanentName: j['permanent_name']?.toString() ?? '',
+        ttsLanguages: _strings(j['tts_languages']),
       );
 }
 

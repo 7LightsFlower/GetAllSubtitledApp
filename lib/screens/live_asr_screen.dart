@@ -240,6 +240,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
   // non-alphanumerics (marcus.s@gmx.de → marcussgmxde); random only if
   // the token carries no email.
   String? _shareUrl;
+  String _permanentName = ''; // the name actually sent to KIT
 
   static String _defaultPermanentName(String token) {
     final parts = token.split('|');
@@ -787,6 +788,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
       _savedId = _liveId;
       _outputSessionId = body['session_id']?.toString();
       _shareUrl = '$sessionServer/webapi/shorten/$permanentName';
+      _permanentName = permanentName;
       _startedAt = DateTime.now();
       _saveStatus = _SaveStatus.none;
       _saveError = null;
@@ -891,7 +893,12 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
         server: internalServerUrl,
         inputLanguages: List.of(_inputLanguages),
         outputLanguages: List.of(_outputLanguages),
-        settings: _settingsPayload(),
+        // Store the permanent name actually used (also when it was the
+        // default from the email), so the list can show it.
+        settings: {
+          ..._settingsPayload(),
+          if (_permanentName.isNotEmpty) 'shorten': _permanentName,
+        },
         lanes: lanes,
         outputSessionId: _outputSessionId,
       );

@@ -276,7 +276,7 @@ class KitLiveAdapter:
             except requests.RequestException as e:
                 log.info("live: addstreamlog failed (ignored): %s", e)
 
-    _SHORTEN_RE = re.compile(r"/shorten/(?:webapi/|view2?/)?([A-Za-z0-9]{3,64})")
+    _SHORTEN_RE = re.compile(r"/(?:webapi/)?shorten/(?:webapi/|view2?/)?([A-Za-z0-9]{3,64})")
 
     def _find_shorten(self, create_resp) -> str:
         """KIT's random permanent name for this session ('' if not found).
@@ -1170,6 +1170,13 @@ def _summary(rec: dict) -> dict:
         # Free name chosen by the user, shown next to the structured
         # `name` (live_<date>-<time>). Empty = not set.
         "title": rec.get("title") or "",
+        # From the session's settings: the permanent name of the
+        # <server>/webapi/shorten/<name> link and the spoken (TTS) languages.
+        "permanent_name": str((rec.get("settings") or {}).get("shorten") or ""),
+        "tts_languages": [
+            str(x) for x in ((rec.get("settings") or {}).get("audioLanguage") or [])
+            if isinstance(x, str)
+        ] if isinstance((rec.get("settings") or {}).get("audioLanguage"), list) else [],
     }
 
 
@@ -1498,7 +1505,7 @@ def create_live_blueprint(
                     "sample_rate": SAMPLE_RATE,
                     # Id the finished session gets in Session Output.
                     "session_id": adapter.session_id,
-                    # Permanent name → <server>/shorten/webapi/<name>.
+                    # Permanent name → <server>/webapi/shorten/<name>.
                     "shorten": getattr(adapter, "shorten", "") or "",
                 }
             ),

@@ -21,6 +21,7 @@ import 'package:asr_live_translator/services/live_sessions_api.dart';
 import 'package:asr_live_translator/services/server_config_service.dart';
 import 'package:asr_live_translator/services/ui_mode.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:asr_live_translator/widgets/server_connection_panel.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -894,23 +895,30 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
                         _meta(Icons.timer_outlined, formatDuration(s.duration)),
                         if (UiMode.isExpert)
                           _meta(Icons.notes, '${s.wordCount} words'),
-                        _meta(
-                          Icons.translate,
-                          outs.isEmpty ? langs : '$langs → $outs',
-                        ),
+                        // Spoken language(s) of the talk.
+                        if (langs.isNotEmpty) _meta(Icons.mic_none, langs),
                       ],
                     ),
-                    if (s.preview.isNotEmpty) ...[
-                      const SizedBox(height: 6),
-                      Text(
-                        s.preview,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: Colors.grey.shade800,
-                          height: 1.3,
-                        ),
+                    // Everything the session produced: link, translations,
+                    // spoken translations.
+                    if (s.permanentName.isNotEmpty ||
+                        outs.isNotEmpty ||
+                        s.ttsLanguages.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 12,
+                        runSpacing: 2,
+                        children: [
+                          if (s.permanentName.isNotEmpty)
+                            _permanentNameChip(s),
+                          if (outs.isNotEmpty)
+                            _meta(Icons.translate, outs),
+                          if (s.ttsLanguages.isNotEmpty)
+                            _meta(
+                              Icons.record_voice_over_outlined,
+                              'TTS: ${s.ttsLanguages.map(LanguageConfig.getDisplayName).join(', ')}',
+                            ),
+                        ],
                       ),
                     ],
                   ],
@@ -934,6 +942,27 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  /// Permanent name; tap copies the <server>/webapi/shorten/<name> link.
+  Widget _permanentNameChip(LiveSessionSummary s) {
+    final server = (s.server.isNotEmpty ? s.server : internalServerUrl)
+        .replaceAll(RegExp(r'/+$'), '');
+    final link = '$server/webapi/shorten/${s.permanentName}';
+    return Tooltip(
+      message: '$link\nClick to copy',
+      child: InkWell(
+        borderRadius: BorderRadius.circular(4),
+        onTap: () async {
+          await Clipboard.setData(ClipboardData(text: link));
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Link copied: $link')),
+          );
+        },
+        child: _meta(Icons.link, s.permanentName),
       ),
     );
   }
