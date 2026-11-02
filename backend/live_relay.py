@@ -262,6 +262,9 @@ class KitLiveAdapter:
         self.stream_id = self.STREAM_ID
         self.t0 = time.time()
         self.seq = 0
+        # Permanent (shorten) name: the one asked for, or — when the field
+        # was left empty — the random one KIT picked (read from /present).
+        self.shorten = str(payload.get("shorten") or "").strip() or self._find_shorten(r)
 
         if str(payload.get("logging", "0")) == "1":
             try:
@@ -272,6 +275,28 @@ class KitLiveAdapter:
                 ).raise_for_status()
             except requests.RequestException as e:
                 log.info("live: addstreamlog failed (ignored): %s", e)
+
+    _SHORTEN_RE = re.compile(r"/shorten/(?:webapi/|view2?/)?([A-Za-z0-9]{3,64})")
+
+    def _find_shorten(self, create_resp) -> str:
+        """KIT's random permanent name for this session ('' if not found).
+        Looks in the /create answer, then in the session's /present page."""
+        texts = [create_resp.headers.get("Location", ""), create_resp.text or ""]
+        for t in texts:
+            m = self._SHORTEN_RE.search(t)
+            if m:
+                return m.group(1)
+        try:
+            page = self._http.get(
+                f"{self.server}/present/{self.session_id}", timeout=(5, 15)
+            )
+            m = self._SHORTEN_RE.search(page.text or "")
+            if m:
+                return m.group(1)
+            log.info("live: no permanent name found on /present/%s", self.session_id)
+        except requests.RequestException as e:
+            log.info("live: reading /present for the permanent name failed: %s", e)
+        return ""
 
     def append_audio(self, pcm: bytes, start_s: float, end_s: float) -> None:
         self._post_append(
@@ -1473,6 +1498,8 @@ def create_live_blueprint(
                     "sample_rate": SAMPLE_RATE,
                     # Id the finished session gets in Session Output.
                     "session_id": adapter.session_id,
+                    # Permanent name → <server>/shorten/webapi/<name>.
+                    "shorten": getattr(adapter, "shorten", "") or "",
                 }
             ),
             200,

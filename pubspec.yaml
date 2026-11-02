@@ -1,7 +1,7 @@
 name: asr_live_translator
 description: Get all automatically translated and subtitled in 25 languages, editing and downloading the video with subtitles.
 publish_to: 'none'
-version: 1.0.1+1
+version: 1.0.0+1
 
 environment:
   sdk: '>=3.4.0 <4.0.0'
@@ -28,6 +28,7 @@ dependencies:
   flutter_tts: ^4.2.5
   audioplayers: ^6.8.1
   share_plus: ^13.2.1             # <-- upgrade
+  qr_flutter: ^4.1.0              # QR code for sharing live sessions
   path_provider: ^2.1.6
   html: ^0.15.6
   pdf: ^3.13.0

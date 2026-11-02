@@ -39,6 +39,7 @@ import 'package:asr_live_translator/services/server_config_service.dart';
 import 'package:asr_live_translator/services/ui_mode.dart';
 import 'package:asr_live_translator/widgets/server_connection_panel.dart';
 import 'package:asr_live_translator/widgets/language_picker.dart';
+import 'package:asr_live_translator/widgets/session_share_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -232,6 +233,11 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
   // Live spoken translation (TTS): which language is heard, and the player.
   String? _ttsLane;
   final LiveTtsPlayer _tts = LiveTtsPlayer();
+
+  // Link + QR for the audience: <server>/shorten/webapi/<permanent name>.
+  // The name is the "Permanent Name" from the settings (like for videos);
+  // left empty, KIT picks a random one and the relay reports it.
+  String? _shareUrl;
 
   // Every TTS part as it arrives, per language (listed in the live screen,
   // each playable / downloadable right away).
@@ -715,6 +721,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
       return;
     }
     _token = token;
+    final sessionServer = internalServerUrl.replaceAll(RegExp(r'/+$'), '');
     _saveLiveSettings(); // next live session opens with these settings
 
     _settingsTileController.collapse();
@@ -759,6 +766,15 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
       _liveId = body!['live_id'] as String;
       _savedId = _liveId;
       _outputSessionId = body['session_id']?.toString();
+      final typed = _shortenController.text.trim();
+      final kitName = body['shorten']?.toString().trim() ?? '';
+      final permanentName = kitName.isNotEmpty ? kitName : typed;
+      _shareUrl = permanentName.isNotEmpty
+          ? '$sessionServer/shorten/webapi/$permanentName'
+          // KIT's random name couldn't be read: its own session page.
+          : (_outputSessionId != null
+              ? '$sessionServer/present/$_outputSessionId'
+              : null);
       _startedAt = DateTime.now();
       _saveStatus = _SaveStatus.none;
       _saveError = null;
@@ -1153,6 +1169,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
       _saveError = null;
       _savedId = null;
       _outputSessionId = null;
+      _shareUrl = null;
       _startedAt = null;
       _sessionNameController.text = _defaultSessionName();
     });
@@ -1615,6 +1632,15 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
                 // ─── 1. Server + connection (top of every page) ───
                 ServerConnectionPanel(enabled: !_isActive),
                 SizedBox(height: gap),
+
+                // ─── QR code + link for the audience ───
+                if (_shareUrl != null && _state != _LiveState.idle) ...[
+                  SessionShareCard(
+                    url: _shareUrl!,
+                    fileBaseName: _fileBase,
+                  ),
+                  SizedBox(height: gap),
+                ],
 
                 // ─── 2. Microphone ───
                 _buildControlBar(context),
