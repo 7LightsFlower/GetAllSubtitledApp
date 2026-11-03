@@ -136,6 +136,13 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
   // In memory only — nothing here is persisted.
   final _formKey = GlobalKey<FormState>();
   final ExpansibleController _settingsTileController = ExpansibleController();
+  // Mirrors the settings panel, so the language summary next to the mic
+  // is only shown while the panel (with the same lists) is closed.
+  bool _settingsOpen = false;
+  void _onSettingsToggled() {
+    final open = _settingsTileController.isExpanded;
+    if (mounted && open != _settingsOpen) setState(() => _settingsOpen = open);
+  }
   late final TextEditingController _sessionNameController;
   final TextEditingController _topicNameController =
       TextEditingController(text: publicServerUrl);
@@ -364,6 +371,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
     _sessionNameController = TextEditingController(text: _defaultSessionName());
     ServerConnection.tokenChanged.addListener(_checkConnection);
     ServerConnection.serverChanged.addListener(_checkConnection);
+    _settingsTileController.addListener(_onSettingsToggled);
     // Tab closed / reloaded / navigated away while recording: Flutter's
     // dispose() never runs then, so tell the backend with a beacon (the
     // only request a closing page is guaranteed to get out).
@@ -418,6 +426,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
 
   @override
   void dispose() {
+    _settingsTileController.removeListener(_onSettingsToggled);
     web.window.removeEventListener('pagehide', _pageHideJs);
     _partPlayer.stop();
     ServerConnection.tokenChanged.removeListener(_checkConnection);
@@ -1515,6 +1524,49 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
     return mtLanes.length == 1 ? mtLanes.first : null;
   }
 
+  bool get _hasOutput =>
+      _lanes.values.any((l) => !l.isEmpty) || _ttsParts.isNotEmpty;
+
+  /// Empties the panels and the TTS parts list (the session keeps running).
+  Future<void> _clearOutput() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Clear the output?'),
+        content: Text(_state == _LiveState.recording
+            ? 'The text and spoken-translation parts shown so far are removed '
+                'from this screen. The session keeps running; new text appears '
+                'as usual. The transcript saved at the end will only contain '
+                'what comes after this.'
+            : 'The text and spoken-translation parts are removed from this '
+                'screen.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Clear')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    await _partPlayer.stop();
+    setState(() {
+      for (final l in _lanes.values) {
+        l.finals.clear();
+        l.starts.clear();
+        l.ends.clear();
+        l.pending = '';
+      }
+      _ttsParts.clear();
+      _playingPart = null;
+      _hlLane = null;
+      _hlStart = _hlEnd = null;
+      _hlPinned = false;
+    });
+  }
+
   void _resetLanes() {
     // The old ListViews still hold these until the next frame.
     final old = _lanes.values.map((l) => l.scroll).toList();
@@ -1701,6 +1753,42 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
   }
 
   // ─── 1. Microphone control bar ───────────────────────────────────
+  /// "German, English → English, Russian" and "TTS: English, Russian".
+  Widget _languageSummary(BuildContext c) {
+    String names(List<String> codes) =>
+        codes.map(LanguageConfig.getDisplayName).join(', ');
+    final style =
+        TextStyle(fontSize: _bodySize(c) - 1, color: Colors.grey.shade700);
+    Widget item(IconData icon, String text) => Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 1),
+              child: Icon(icon, size: 14, color: Colors.grey.shade600),
+            ),
+            const SizedBox(width: 4),
+            Flexible(child: Text(text, style: style)),
+          ],
+        );
+    return Wrap(
+      spacing: 14,
+      runSpacing: 2,
+      children: [
+        if (_inputLanguages.isNotEmpty)
+          item(
+            Icons.translate,
+            _outputLanguages.isEmpty
+                ? names(_inputLanguages)
+                : '${names(_inputLanguages)}  →  ${names(_outputLanguages)}',
+          ),
+        if (_audioLanguages.isNotEmpty)
+          item(Icons.record_voice_over_outlined,
+              'TTS: ${names(_audioLanguages)}'),
+      ],
+    );
+  }
+
   Widget _buildControlBar(BuildContext c) {
     final scheme = Theme.of(c).colorScheme;
     final recording = _state == _LiveState.recording;
@@ -1796,31 +1884,47 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
                         ),
                     ],
                   ),
-                  const SizedBox(height: 10),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
-                    child: LinearProgressIndicator(
-                      value: recording ? _level : 0,
-                      minHeight: 6,
-                      backgroundColor: Colors.grey.shade300,
-                      valueColor: AlwaysStoppedAnimation(
-                        _level > 0.8 ? Colors.orange : Colors.green,
+                  // Microphone level — only while there is a microphone.
+                  if (_state != _LiveState.idle) ...[
+                    const SizedBox(height: 10),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(
+                        value: recording ? _level : 0,
+                        minHeight: 6,
+                        backgroundColor: Colors.grey.shade300,
+                        valueColor: AlwaysStoppedAnimation(
+                          _level > 0.8 ? Colors.orange : Colors.green,
+                        ),
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    '${_inputLanguages.map(LanguageConfig.getDisplayName).join(', ')}'
-                    '${_outputLanguages.isEmpty ? '' : '  →  ${_outputLanguages.map(LanguageConfig.getDisplayName).join(', ')}'}',
-                    style: TextStyle(
-                      fontSize: _bodySize(c) - 1,
-                      color: Colors.grey.shade700,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                  ],
+                  // Languages at a glance — not while the open settings
+                  // panel below already shows the same lists.
+                  if (!_settingsOpen || _isActive) ...[
+                    const SizedBox(height: 6),
+                    _languageSummary(c),
+                  ],
                 ],
               ),
             ),
+            if (_state != _LiveState.idle && _hasOutput) ...[
+              const SizedBox(width: 12),
+              Tooltip(
+                message: 'Remove the text and spoken-translation parts '
+                    'shown so far',
+                child: _isNarrow(c)
+                    ? IconButton.outlined(
+                        onPressed: _clearOutput,
+                        icon: const Icon(Icons.delete_sweep_outlined, size: 20),
+                      )
+                    : OutlinedButton.icon(
+                        onPressed: _clearOutput,
+                        icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+                        label: const Text('Clear output'),
+                      ),
+              ),
+            ],
             if (_state == _LiveState.finished &&
                 _saveStatus == _SaveStatus.failed) ...[
               const SizedBox(width: 12),
