@@ -92,10 +92,23 @@ class _ExportDialogState extends State<ExportDialog> {
         String filename = 'transcript_${widget.sessionId}.$_selectedFormat';
         String? extractedFilename;
 
+        // Pattern 0: filename*=UTF-8''<encoded> — the full (non-ASCII)
+        // name Flask sends for e.g. Cyrillic or accented video names.
+        final starMatch = RegExp(r"filename\*=UTF-8''([^;]+)", caseSensitive: false)
+            .firstMatch(contentDisposition);
+        if (starMatch != null) {
+          extractedFilename = Uri.decodeComponent(starMatch.group(1)!.trim());
+        }
         // Pattern 1: filename="name.ext"
         final filenameMatch1 = RegExp(r'filename="([^"]+)"').firstMatch(contentDisposition);
-        if (filenameMatch1 != null) {
+        if (extractedFilename == null && filenameMatch1 != null) {
           extractedFilename = filenameMatch1.group(1);
+        }
+        // Pattern 1b: filename=name.ext (no quotes — what Flask sends for
+        // plain ASCII names)
+        if (extractedFilename == null) {
+          final plain = RegExp(r'filename=([^";]+)').firstMatch(contentDisposition);
+          if (plain != null) extractedFilename = plain.group(1)!.trim();
         }
         // Pattern 2: filename*=UTF-8''name.ext
         if (extractedFilename == null) {
