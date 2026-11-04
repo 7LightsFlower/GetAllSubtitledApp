@@ -15,7 +15,7 @@ Output screen shows:
 
 Only the chosen language is included — its own summaries, headings and
 notes come with it (KIT sends those per language). The file is named
-"<name> - <Language>.<ext>".
+after the language ("Russian.docx"; the original: "Transcript.docx").
 """
 
 import datetime
@@ -172,10 +172,15 @@ def _meta_line(transcript: dict, session_id: str) -> str:
 
 
 def file_name(title: str, transcript: dict | None, ext: str) -> str:
+    """Just the language: "Russian.docx"; the original is "Transcript.docx".
+    (The video / session name is inside the file, as its title.)"""
     lang = str((transcript or {}).get("language") or "").strip()
-    base = f"{title} - {lang}" if lang else title
-    base = re.sub(r'[\\/:*?"<>|\r\n\t]+', " ", base)
-    base = re.sub(r"\s+", " ", base).strip()[:120] or "transcript"
+    low = lang.lower()
+    if not lang or "original" in low or "asr" in low or low.startswith("transcript"):
+        base = "Transcript"
+    else:
+        base = re.sub(r'[\\/:*?"<>|\r\n\t]+', " ", lang)
+        base = re.sub(r"\s+", " ", base).strip()[:80] or "Transcript"
     return f"{base}.{ext}"
 
 

@@ -30,7 +30,7 @@ from .exports import (
 @app.route("/session-export-docx/<path:session_id>", methods=["GET"])
 def session_export_docx(session_id):
     """DOCX export of one language, laid out like Session Output
-    (see transcript_export.py). File: "<video/session name> - <Language>.docx"."""
+    (see transcript_export.py). File: "<Language>.docx" ("Transcript.docx" for the original)."""
     from .transcript_export import build_export
 
     session_dir = _session_dir(session_id)
@@ -53,7 +53,7 @@ def session_export_docx(session_id):
 @app.route("/session-export-rtf/<path:session_id>", methods=["GET"])
 def session_export_rtf(session_id):
     """RTF export of one language, laid out like Session Output
-    (see transcript_export.py). File: "<video/session name> - <Language>.rtf"."""
+    (see transcript_export.py). File: "<Language>.rtf" ("Transcript.rtf" for the original)."""
     from .transcript_export import build_export
 
     session_dir = _session_dir(session_id)

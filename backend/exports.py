@@ -1067,7 +1067,7 @@ def _resolve_export_language_name(session_dir, language):
 @app.route("/session-export-txt/<path:session_id>", methods=["GET"])
 def session_export_txt(session_id):
     """TXT export of one language, laid out like Session Output
-    (see transcript_export.py). File: "<video/session name> - <Language>.txt"."""
+    (see transcript_export.py). File: "<Language>.txt" ("Transcript.txt" for the original)."""
     from .transcript_export import build_export
 
     session_dir = _session_dir(session_id)
