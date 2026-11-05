@@ -749,6 +749,39 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
 
   /// Explorer-style folders: tiles at the top level, a path bar inside a
   /// folder. While searching, the results come from all folders.
+  /// Wide windows: the folder column floats at the left of the list.
+  bool get _folderSidebar => MediaQuery.sizeOf(context).width >= 1000;
+
+  /// All folders in one card, the open one in the middle (see
+  /// widgets/folder_browser.dart → FolderColumn).
+  Widget _buildFolderColumn({required double height}) {
+    VideoProject? byKey(String key) =>
+        _projects.where((p) => p.key == key).firstOrNull;
+    final open = _folderFilter != null && _folderFilter != _unsortedFilter
+        ? _folderFilter
+        : null;
+    return FolderColumn(
+      height: height,
+      folders: [
+        for (final f in _folders)
+          FolderInfo(f, _projects.where((p) => p.folder == f).length),
+      ],
+      current: open,
+      rootLabel: 'Not in a folder',
+      rootCount: _projects.where((p) => p.folder == null).length,
+      onSelect: _setFolderFilter,
+      onCreate: _createFolder,
+      onRename: _renameFolder,
+      onDelete: _deleteFolder,
+      onDropItem: (folder, key) {
+        final p = byKey(key);
+        if (p != null) _moveToFolder(p, folder);
+      },
+    );
+  }
+
+  /// Above the grid: where you are (folder name with Rename / Delete, or
+  /// "Not in a folder"). On narrow screens the folder column comes first.
   Widget _buildFolderArea(Responsive r) {
     final open = _folderFilter != null && _folderFilter != _unsortedFilter
         ? _folderFilter
@@ -756,8 +789,11 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
     VideoProject? byKey(String key) =>
         _projects.where((p) => p.key == key).firstOrNull;
 
-    if (open != null) {
-      return FolderPathBar(
+    final Widget where;
+    if (_searchQuery.trim().isNotEmpty && open == null) {
+      where = const FolderSectionTitle(text: 'Search results in all folders');
+    } else if (open != null) {
+      where = FolderPathBar(
         rootLabel: 'Videos',
         folder: open,
         count: _projects.where((p) => p.folder == open).length,
@@ -769,34 +805,19 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
           if (p != null) _moveToFolder(p, null);
         },
       );
+    } else {
+      where = FolderSectionTitle(
+        text: 'Not in a folder',
+        count: _projects.where((p) => p.folder == null).length,
+      );
     }
-    if (_searchQuery.trim().isNotEmpty) {
-      return const FolderSectionTitle(text: 'Search results in all folders');
-    }
+    if (_folderSidebar) return where;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        FolderGrid(
-          folders: [
-            for (final f in _folders)
-              FolderInfo(f, _projects.where((p) => p.folder == f).length),
-          ],
-          itemSingular: 'video',
-          itemPlural: 'videos',
-          onOpen: (f) => _setFolderFilter(f),
-          onCreate: _createFolder,
-          onRename: _renameFolder,
-          onDelete: _deleteFolder,
-          onDropItem: (folder, key) {
-            final p = byKey(key);
-            if (p != null) _moveToFolder(p, folder);
-          },
-        ),
-        const SizedBox(height: 18),
-        FolderSectionTitle(
-          text: 'Not in a folder',
-          count: _projects.where((p) => p.folder == null).length,
-        ),
+        _buildFolderColumn(height: 160),
+        const SizedBox(height: 12),
+        where,
       ],
     );
   }
@@ -2004,7 +2025,7 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
               reloadToken: _liveReload,
               openId: _takePendingLiveId(),
             )
-          : CustomScrollView(
+          : _withFolderSidebar(CustomScrollView(
               // Connection panel, header, storage bar and grid all live
               // in one scroll view. On a tall window everything fits and
               // no scrollbar appears; on a short window the top parts
@@ -2105,8 +2126,30 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
                 ),
                 ],
               ],
-            )),
+            ))),
       ),
+    );
+  }
+
+  /// Wide windows: the folder column floats at the left, next to the
+  /// scrolling list; narrow windows: just the list (the column is inline).
+  Widget _withFolderSidebar(Widget list) {
+    if (!_folderSidebar) return list;
+    final pad = _pagePad(context);
+    final h = MediaQuery.sizeOf(context).height;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(pad, pad, 0, pad),
+          child: SizedBox(
+            width: 250,
+            child: _buildFolderColumn(
+                height: (h * 0.45).clamp(200.0, 440.0).toDouble()),
+          ),
+        ),
+        Expanded(child: list),
+      ],
     );
   }
 
@@ -2372,8 +2415,10 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
     }
 
     // ── Card height ──────────────────────────────────────────────
-    final columns = r.gridColumns();
-    final cardWidth = (r.width - r.spaceL * 2) / columns;
+    // The folder sidebar (wide windows) takes part of the width.
+    final sidebar = _folderSidebar ? 250 + _pagePad(context) : 0.0;
+    final columns = r.gridColumns(horizontalPadding: 32 + sidebar);
+    final cardWidth = (r.width - sidebar - r.spaceL * 2) / columns;
 
     // Fixed thumbnail height for this column width (16:9).
     final thumbnailHeight = cardWidth * 9 / 16;
