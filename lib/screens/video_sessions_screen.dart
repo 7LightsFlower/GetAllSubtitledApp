@@ -12,6 +12,7 @@ import 'package:asr_live_translator/screens/live_sessions_screen.dart';
 import 'package:asr_live_translator/services/ui_mode.dart';
 import 'package:asr_live_translator/widgets/server_connection_panel.dart';
 import 'package:asr_live_translator/widgets/home_hub.dart';
+import 'package:asr_live_translator/widgets/folder_browser.dart';
 import 'package:asr_live_translator/screens/live_asr_screen.dart';
 import 'package:asr_live_translator/services/live_sessions_api.dart';
 import 'package:asr_live_translator/services/app_url.dart';
@@ -387,8 +388,7 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
   static const String _unsortedFilter = '\u0000unsorted';
   static const String _folderFilterPref = 'working_folder_filter';
   List<String> _folders = [];
-  String? _folderFilter; // null = all videos, _unsortedFilter, or a name
-  String? _dropHover;    // folder chip currently under a dragged card
+  String? _folderFilter; // null = top level (folder tiles), or a folder name
 
   // ─── Start page: overview → Video list / Live sessions ─────────
   late _HomeView _view = switch (widget.initialSection) {
@@ -517,7 +517,10 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
           .toList();
       setState(() {
         _folders = list;
-        if (_folderFilter == null && saved != null && saved.isNotEmpty) {
+        if (_folderFilter == null &&
+            saved != null &&
+            saved.isNotEmpty &&
+            saved != _unsortedFilter) {
           _folderFilter = saved;
         }
         if (_folderFilter != null &&
@@ -637,7 +640,7 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
         content: Text(count == 0
             ? 'The folder "$name" is empty.'
             : 'The $count video(s) in "$name" are not deleted — they move '
-                'to "Unsorted".'),
+                'out of the folder.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -744,100 +747,56 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
     await _moveToFolder(project, choice == _unsortedFilter ? null : choice);
   }
 
-  /// "All videos · Unsorted · folders…" bar. Folder chips accept dragged
-  /// video cards.
-  Widget _buildFolderBar(Responsive r) {
-    final unsortedCount = _projects.where((p) => p.folder == null).length;
-
-    Widget chip({
-      required String label,
-      required int count,
-      required bool selected,
-      required IconData icon,
-      required VoidCallback onTap,
-      String? dropKey, // folder name, _unsortedFilter, or null = no drop
-    }) {
-      Widget c(bool hover) => ChoiceChip(
-            avatar: Icon(icon,
-                size: 18,
-                color: hover ? Colors.white : Colors.amber.shade800),
-            label: Text('$label · $count'),
-            selected: selected || hover,
-            selectedColor: hover ? Colors.blue : null,
-            labelStyle: hover ? const TextStyle(color: Colors.white) : null,
-            onSelected: (_) => onTap(),
-            visualDensity: VisualDensity.compact,
-          );
-      if (dropKey == null) return c(false);
-      return DragTarget<String>(
-        onWillAcceptWithDetails: (_) {
-          setState(() => _dropHover = dropKey);
-          return true;
-        },
-        onLeave: (_) => setState(() => _dropHover = null),
-        onAcceptWithDetails: (d) {
-          setState(() => _dropHover = null);
-          final project = _projects.where((p) => p.key == d.data).firstOrNull;
-          if (project != null) {
-            _moveToFolder(project, dropKey == _unsortedFilter ? null : dropKey);
-          }
-        },
-        builder: (_, __, ___) => c(_dropHover == dropKey),
-      );
-    }
-
-    final selectedFolder = (_folderFilter != null && _folderFilter != _unsortedFilter)
+  /// Explorer-style folders: tiles at the top level, a path bar inside a
+  /// folder. While searching, the results come from all folders.
+  Widget _buildFolderArea(Responsive r) {
+    final open = _folderFilter != null && _folderFilter != _unsortedFilter
         ? _folderFilter
         : null;
+    VideoProject? byKey(String key) =>
+        _projects.where((p) => p.key == key).firstOrNull;
 
-    return Wrap(
-      spacing: r.spaceS,
-      runSpacing: r.spaceXS,
-      crossAxisAlignment: WrapCrossAlignment.center,
+    if (open != null) {
+      return FolderPathBar(
+        rootLabel: 'Videos',
+        folder: open,
+        count: _projects.where((p) => p.folder == open).length,
+        onBack: () => _setFolderFilter(null),
+        onRename: () => _renameFolder(open),
+        onDelete: () => _deleteFolder(open),
+        onDropToRoot: (key) {
+          final p = byKey(key);
+          if (p != null) _moveToFolder(p, null);
+        },
+      );
+    }
+    if (_searchQuery.trim().isNotEmpty) {
+      return const FolderSectionTitle(text: 'Search results in all folders');
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        chip(
-          label: 'All videos',
-          count: _projects.length,
-          selected: _folderFilter == null,
-          icon: Icons.video_library_outlined,
-          onTap: () => _setFolderFilter(null),
+        FolderGrid(
+          folders: [
+            for (final f in _folders)
+              FolderInfo(f, _projects.where((p) => p.folder == f).length),
+          ],
+          itemSingular: 'video',
+          itemPlural: 'videos',
+          onOpen: (f) => _setFolderFilter(f),
+          onCreate: _createFolder,
+          onRename: _renameFolder,
+          onDelete: _deleteFolder,
+          onDropItem: (folder, key) {
+            final p = byKey(key);
+            if (p != null) _moveToFolder(p, folder);
+          },
         ),
-        chip(
-          label: 'Unsorted',
-          count: unsortedCount,
-          selected: _folderFilter == _unsortedFilter,
-          icon: Icons.inbox_outlined,
-          onTap: () => _setFolderFilter(_unsortedFilter),
-          dropKey: _unsortedFilter,
+        const SizedBox(height: 18),
+        FolderSectionTitle(
+          text: 'Not in a folder',
+          count: _projects.where((p) => p.folder == null).length,
         ),
-        for (final f in _folders)
-          chip(
-            label: f,
-            count: _projects.where((p) => p.folder == f).length,
-            selected: _folderFilter == f,
-            icon: _folderFilter == f ? Icons.folder : Icons.folder_outlined,
-            onTap: () => _setFolderFilter(f),
-            dropKey: f,
-          ),
-        ActionChip(
-          avatar: const Icon(Icons.create_new_folder_outlined, size: 18),
-          label: const Text('New folder'),
-          onPressed: _createFolder,
-          visualDensity: VisualDensity.compact,
-        ),
-        if (selectedFolder != null) ...[
-          TextButton.icon(
-            onPressed: () => _renameFolder(selectedFolder),
-            icon: const Icon(Icons.edit_outlined, size: 16),
-            label: const Text('Rename'),
-          ),
-          TextButton.icon(
-            onPressed: () => _deleteFolder(selectedFolder),
-            icon: const Icon(Icons.delete_outline, size: 16),
-            label: const Text('Delete folder'),
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-          ),
-        ],
       ],
     );
   }
@@ -2082,7 +2041,7 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
                   child: Padding(
                     padding: EdgeInsets.fromLTRB(
                         _pagePad(context), 0, _pagePad(context), 12),
-                    child: _buildFolderBar(r),
+                    child: _buildFolderArea(r),
                   ),
                 ),
 
@@ -2335,11 +2294,17 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
     }
 
     // ── Filter + sort ────────────────────────────────────────────
+    final searching = _searchQuery.trim().isNotEmpty;
+    final openFolder = _folderFilter != null && _folderFilter != _unsortedFilter
+        ? _folderFilter
+        : null;
     final filtered = _projects.where((p) {
-      if (_folderFilter == _unsortedFilter && p.folder != null) return false;
-      if (_folderFilter != null &&
-          _folderFilter != _unsortedFilter &&
-          p.folder != _folderFilter) {
+      // Inside a folder: its videos. Top level: only videos in no folder
+      // (the others are behind their folder tiles). Searching at the top
+      // level looks in all folders.
+      if (openFolder != null) {
+        if (p.folder != openFolder) return false;
+      } else if (!searching && p.folder != null) {
         return false;
       }
       final q = _searchQuery.toLowerCase();
@@ -2367,6 +2332,21 @@ class _VideoSessionsScreenState extends State<VideoSessionsScreen>
     });
 
     // ── Empty state ─────────────────────────────────────────────
+    if (filtered.isEmpty && !searching && _projects.isNotEmpty) {
+      // Nothing loose at the top level / an empty folder: say so briefly.
+      return SliverToBoxAdapter(
+        child: Padding(
+          padding: EdgeInsets.symmetric(vertical: r.spaceL),
+          child: Text(
+            openFolder != null
+                ? 'This folder is empty — drag videos onto it, or use the '
+                    'folder button on a video.'
+                : 'All videos are in folders.',
+            style: TextStyle(fontSize: r.fontBody, color: Colors.grey.shade600),
+          ),
+        ),
+      );
+    }
     if (filtered.isEmpty) {
       return SliverToBoxAdapter(
         child: Padding(

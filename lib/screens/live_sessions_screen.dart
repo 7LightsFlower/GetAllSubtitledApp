@@ -19,6 +19,7 @@ import 'package:asr_live_translator/screens/live_session_view_screen.dart';
 import 'package:asr_live_translator/screens/session_output_screen.dart';
 import 'package:asr_live_translator/services/live_sessions_api.dart';
 import 'package:asr_live_translator/services/app_url.dart';
+import 'package:asr_live_translator/widgets/folder_browser.dart';
 import 'package:asr_live_translator/services/server_config_service.dart';
 import 'package:asr_live_translator/services/ui_mode.dart';
 import 'package:flutter/material.dart';
@@ -69,8 +70,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
   static const String _unsortedFilter = '\u0000unsorted';
   static const String _folderFilterPref = 'live_folder_filter';
   List<String> _folders = [];
-  String? _folderFilter; // null = all, _unsortedFilter, or a folder name
-  String? _dropHover;
+  String? _folderFilter; // null = top level (folder tiles), or a folder name
 
   @override
   void initState() {
@@ -330,7 +330,10 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
           .toList();
       setState(() {
         _folders = list;
-        if (_folderFilter == null && saved != null && saved.isNotEmpty) {
+        if (_folderFilter == null &&
+            saved != null &&
+            saved.isNotEmpty &&
+            saved != _unsortedFilter) {
           _folderFilter = saved;
         }
         if (_folderFilter != null &&
@@ -446,7 +449,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
       builder: (ctx) => AlertDialog(
         title: const Text('Delete folder?'),
         content: Text('Nothing inside "$name" is deleted — its live sessions '
-            'and videos move to "Unsorted".'),
+            'and videos just move out of the folder.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -545,99 +548,53 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
     await _moveToFolder(s, choice == _unsortedFilter ? null : choice);
   }
 
-  /// "All · Unsorted · folders…" chips. Folder chips accept dragged
-  /// session cards (wide screens).
-  Widget _buildFolderBar() {
-    Widget chip({
-      required String label,
-      required int count,
-      required bool selected,
-      required IconData icon,
-      required VoidCallback onTap,
-      String? dropKey,
-    }) {
-      Widget c(bool hover) => ChoiceChip(
-            avatar: Icon(icon,
-                size: 18,
-                color: hover ? Colors.white : Colors.amber.shade800),
-            label: Text('$label · $count'),
-            selected: selected || hover,
-            selectedColor: hover ? Colors.blue : null,
-            labelStyle: hover ? const TextStyle(color: Colors.white) : null,
-            onSelected: (_) => onTap(),
-            visualDensity: VisualDensity.compact,
-          );
-      if (dropKey == null) return c(false);
-      return DragTarget<String>(
-        onWillAcceptWithDetails: (_) {
-          setState(() => _dropHover = dropKey);
-          return true;
+  /// Explorer-style folders: tiles at the top level, a path bar inside a
+  /// folder (see widgets/folder_browser.dart).
+  Widget _buildFolderArea(String q) {
+    final open = _folderFilter;
+    LiveSessionSummary? byId(String id) =>
+        _sessions.where((x) => x.id == id).firstOrNull;
+    if (open != null) {
+      return FolderPathBar(
+        rootLabel: 'Live sessions',
+        folder: open,
+        count: _sessions.where((x) => x.folder == open).length,
+        onBack: () => _setFolderFilter(null),
+        onRename: () => _renameFolder(open),
+        onDelete: () => _deleteFolder(open),
+        onDropToRoot: (id) {
+          final x = byId(id);
+          if (x != null) _moveToFolder(x, null);
         },
-        onLeave: (_) => setState(() => _dropHover = null),
-        onAcceptWithDetails: (d) {
-          setState(() => _dropHover = null);
-          final s = _sessions.where((x) => x.id == d.data).firstOrNull;
-          if (s != null) {
-            _moveToFolder(s, dropKey == _unsortedFilter ? null : dropKey);
-          }
-        },
-        builder: (_, __, ___) => c(_dropHover == dropKey),
       );
     }
-
-    final selectedFolder =
-        (_folderFilter != null && _folderFilter != _unsortedFilter)
-            ? _folderFilter
-            : null;
-
-    return Wrap(
-      spacing: 8,
-      runSpacing: 4,
-      crossAxisAlignment: WrapCrossAlignment.center,
+    if (q.isNotEmpty) {
+      return const FolderSectionTitle(text: 'Search results in all folders');
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        chip(
-          label: 'All sessions',
-          count: _sessions.length,
-          selected: _folderFilter == null,
-          icon: Icons.mic_none,
-          onTap: () => _setFolderFilter(null),
+        FolderGrid(
+          folders: [
+            for (final f in _folders)
+              FolderInfo(f, _sessions.where((x) => x.folder == f).length),
+          ],
+          itemSingular: 'session',
+          itemPlural: 'sessions',
+          onOpen: (f) => _setFolderFilter(f),
+          onCreate: _createFolder,
+          onRename: _renameFolder,
+          onDelete: _deleteFolder,
+          onDropItem: (folder, id) {
+            final x = byId(id);
+            if (x != null) _moveToFolder(x, folder);
+          },
         ),
-        chip(
-          label: 'Unsorted',
-          count: _sessions.where((s) => s.folder == null).length,
-          selected: _folderFilter == _unsortedFilter,
-          icon: Icons.inbox_outlined,
-          onTap: () => _setFolderFilter(_unsortedFilter),
-          dropKey: _unsortedFilter,
+        const SizedBox(height: 18),
+        FolderSectionTitle(
+          text: 'Not in a folder',
+          count: _sessions.where((x) => x.folder == null).length,
         ),
-        for (final f in _folders)
-          chip(
-            label: f,
-            count: _sessions.where((s) => s.folder == f).length,
-            selected: _folderFilter == f,
-            icon: _folderFilter == f ? Icons.folder : Icons.folder_outlined,
-            onTap: () => _setFolderFilter(f),
-            dropKey: f,
-          ),
-        ActionChip(
-          avatar: const Icon(Icons.create_new_folder_outlined, size: 18),
-          label: const Text('New folder'),
-          onPressed: _createFolder,
-          visualDensity: VisualDensity.compact,
-        ),
-        if (selectedFolder != null) ...[
-          TextButton.icon(
-            onPressed: () => _renameFolder(selectedFolder),
-            icon: const Icon(Icons.edit_outlined, size: 16),
-            label: const Text('Rename'),
-          ),
-          TextButton.icon(
-            onPressed: () => _deleteFolder(selectedFolder),
-            icon: const Icon(Icons.delete_outline, size: 16),
-            label: const Text('Delete folder'),
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-          ),
-        ],
       ],
     );
   }
@@ -649,13 +606,13 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
   Widget build(BuildContext context) {
     final pad = _pad(context);
     final q = _search.trim().toLowerCase();
-    final inFolder = _folderFilter == null
-        ? _sessions
-        : _sessions
-            .where((s) => _folderFilter == _unsortedFilter
-                ? s.folder == null
-                : s.folder == _folderFilter)
-            .toList();
+    // Inside a folder: its sessions. Top level: only sessions in no folder
+    // (the rest are behind the folder tiles). Searching looks everywhere.
+    final inFolder = _sessions
+        .where((s) => _folderFilter != null
+            ? s.folder == _folderFilter
+            : (q.isNotEmpty || s.folder == null))
+        .toList();
     final visible = q.isEmpty
         ? inFolder
         : inFolder
@@ -714,7 +671,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
             if (!_loading && !_needsConnect && _error == null)
               SliverPadding(
                 padding: EdgeInsets.fromLTRB(pad, 0, pad, 12),
-                sliver: SliverToBoxAdapter(child: _buildFolderBar()),
+                sliver: SliverToBoxAdapter(child: _buildFolderArea(q)),
               ),
             if (_loading)
               const SliverFillRemaining(
@@ -754,12 +711,19 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
               SliverFillRemaining(
                 hasScrollBody: false,
                 child: q.isEmpty
-                    ? _buildMessage(
-                        icon: Icons.folder_open,
-                        title: 'This folder is empty',
-                        text: 'Move live sessions here with the folder button '
-                            'on a session, or drag a session onto the folder.',
-                      )
+                    ? (_folderFilter == null
+                        ? Padding(
+                            padding: EdgeInsets.fromLTRB(pad, 8, pad, 24),
+                            child: Text('All live sessions are in folders.',
+                                style: TextStyle(color: Colors.grey.shade600)),
+                          )
+                        : _buildMessage(
+                            icon: Icons.folder_open,
+                            title: 'This folder is empty',
+                            text: 'Move live sessions here with the folder '
+                                'button on a session, or drag a session onto '
+                                'the folder.',
+                          ))
                     : _buildMessage(
                         icon: Icons.search_off,
                         title: 'No matches',
@@ -931,7 +895,9 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
                       spacing: 12,
                       runSpacing: 2,
                       children: [
-                        if (s.folder != null && _folderFilter == null)
+                        if (s.folder != null &&
+                            _folderFilter == null &&
+                            _search.trim().isNotEmpty)
                           _meta(Icons.folder_outlined, s.folder!),
                         _meta(Icons.event, formatDateTime(s.createdAt)),
                         _meta(Icons.timer_outlined, formatDuration(s.duration)),
