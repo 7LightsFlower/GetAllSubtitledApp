@@ -6,6 +6,7 @@ Split mechanically from the former lib/backend.py — code unchanged.
 import datetime
 import io
 import json
+import logging
 import os
 import re
 from flask import jsonify, request, send_file
@@ -1065,29 +1066,23 @@ def _resolve_export_language_name(session_dir, language):
 
 @app.route("/session-export-txt/<path:session_id>", methods=["GET"])
 def session_export_txt(session_id):
-    """Export all session data as structured plain text matching the window view."""
+    """TXT export of one language, laid out like Session Output
+    (see transcript_export.py). File: "<Language>.txt" ("Transcript.txt" for the original)."""
+    from .transcript_export import build_export
+
     session_dir = _session_dir(session_id)
     if not os.path.exists(session_dir):
         return jsonify({"error": "Session not found"}), 404
-
-    language = request.args.get("language")
-    actual_lang_name = _resolve_export_language_name(session_dir, language)
-
-    # Clean the language name for filename
-    clean_name = actual_lang_name.replace(" ", "_").replace("(", "").replace(")", "")
-    clean_name = clean_name.replace("/", "_").replace("\\", "_").replace(":", "_")
-    clean_name = re.sub(r"[^a-zA-Z0-9_-]", "", clean_name)
-    if len(clean_name) > 50:
-        clean_name = clean_name[:50]
-
-    # Use the language name as filename (no session_id)
-    filename = f"{clean_name}.txt"
-
-    txt_buffer = export_structured_txt(session_id, session_dir, language)
-
+    try:
+        data, filename, mimetype = build_export(
+            session_id, session_dir, request.args.get("language"), "txt"
+        )
+    except ImportError:
+        return jsonify({"error": "python-docx not installed"}), 500
+    except (OSError, ValueError, TypeError, KeyError) as e:
+        logging.exception("TXT export failed for %s: %s", session_id, e)
+        return jsonify({"error": f"Export failed: {type(e).__name__}: {e}"}), 500
     return send_file(
-        txt_buffer,
-        mimetype="text/plain",
-        as_attachment=True,
-        download_name=filename,
+        data, mimetype=mimetype, as_attachment=True, download_name=filename
     )
+

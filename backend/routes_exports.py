@@ -29,83 +29,47 @@ from .exports import (
 
 @app.route("/session-export-docx/<path:session_id>", methods=["GET"])
 def session_export_docx(session_id):
-    """Export session as a structured DOCX file matching the window view."""
+    """DOCX export of one language, laid out like Session Output
+    (see transcript_export.py). File: "<Language>.docx" ("Transcript.docx" for the original)."""
+    from .transcript_export import build_export
+
     session_dir = _session_dir(session_id)
     if not os.path.exists(session_dir):
         return jsonify({"error": "Session not found"}), 404
-
-    language = request.args.get("language")
-    actual_lang_name = _resolve_export_language_name(session_dir, language)
-
-    # Clean the language name for filename
-    clean_name = actual_lang_name.replace(" ", "_").replace("(", "").replace(")", "")
-    clean_name = clean_name.replace("/", "_").replace("\\", "_").replace(":", "_")
-    clean_name = re.sub(r"[^a-zA-Z0-9_-]", "", clean_name)
-    if len(clean_name) > 50:
-        clean_name = clean_name[:50]
-
-    # Use the language name as filename (no session_id)
-    filename = f"{clean_name}.docx"
-
     try:
-        doc_buffer = export_structured_docx(session_id, session_dir, language)
-    except ImportError:
-        return (
-            jsonify(
-                {
-                    "error": "python-docx not installed",
-                    "hint": "pip install python-docx",
-                }
-            ),
-            500,
+        data, filename, mimetype = build_export(
+            session_id, session_dir, request.args.get("language"), "docx"
         )
-    except (
-        OSError,
-        ValueError,
-        TypeError,
-        RuntimeError,
-        KeyError,
-        AttributeError,
-    ) as e:
+    except ImportError:
+        return jsonify({"error": "python-docx not installed"}), 500
+    except (OSError, ValueError, TypeError, KeyError) as e:
         logging.exception("DOCX export failed for %s: %s", session_id, e)
         return jsonify({"error": f"Export failed: {type(e).__name__}: {e}"}), 500
-
     return send_file(
-        doc_buffer,
-        mimetype="application/vnd.openxmlformats-officedocument"
-        ".wordprocessingml.document",
-        as_attachment=True,
-        download_name=filename,
+        data, mimetype=mimetype, as_attachment=True, download_name=filename
     )
 
 
 @app.route("/session-export-rtf/<path:session_id>", methods=["GET"])
 def session_export_rtf(session_id):
-    """Export all session data as a structured RTF document."""
+    """RTF export of one language, laid out like Session Output
+    (see transcript_export.py). File: "<Language>.rtf" ("Transcript.rtf" for the original)."""
+    from .transcript_export import build_export
+
     session_dir = _session_dir(session_id)
     if not os.path.exists(session_dir):
         return jsonify({"error": "Session not found"}), 404
-
-    language = request.args.get("language")
-    actual_lang_name = _resolve_export_language_name(session_dir, language)
-
-    # Clean the language name for filename
-    clean_name = actual_lang_name.replace(" ", "_").replace("(", "").replace(")", "")
-    clean_name = clean_name.replace("/", "_").replace("\\", "_").replace(":", "_")
-    clean_name = re.sub(r"[^a-zA-Z0-9_-]", "", clean_name)
-    if len(clean_name) > 50:
-        clean_name = clean_name[:50]
-
-    # Use the language name as filename (no session_id)
-    filename = f"{clean_name}.rtf"
-
-    rtf_buffer = export_structured_rtf(session_id, session_dir, language)
-
+    try:
+        data, filename, mimetype = build_export(
+            session_id, session_dir, request.args.get("language"), "rtf"
+        )
+    except ImportError:
+        return jsonify({"error": "python-docx not installed"}), 500
+    except (OSError, ValueError, TypeError, KeyError) as e:
+        logging.exception("RTF export failed for %s: %s", session_id, e)
+        return jsonify({"error": f"Export failed: {type(e).__name__}: {e}"}), 500
     return send_file(
-        rtf_buffer,
-        mimetype="text/rtf",
-        as_attachment=True,
-        download_name=filename,
+        data, mimetype=mimetype, as_attachment=True, download_name=filename
     )
 
 

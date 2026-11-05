@@ -1140,6 +1140,29 @@ def _rewrite_folders(change) -> int:
     return changed
 
 
+def saved_title_for_output(output_session_id: str) -> str:
+    """The name the user gave a live session (Live Sessions list), looked
+    up by its Session Output id. '' when none was given."""
+    store = _store_ref
+    if not output_session_id or store is None or not os.path.isdir(store.root):
+        return ""
+    for user in os.listdir(store.root):
+        d = os.path.join(store.root, user)
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(d, name), "r", encoding="utf-8") as f:
+                    rec = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if rec.get("output_session_id") == output_session_id:
+                return str(rec.get("title") or "").strip()
+    return ""
+
+
 def rename_folder(old: str, new: str) -> int:
     """Folder renamed on the video list → live sessions follow."""
     return _rewrite_folders(lambda f: new if f.lower() == old.lower() else f)
