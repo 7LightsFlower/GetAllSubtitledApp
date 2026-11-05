@@ -7,8 +7,8 @@
 //                                         └──► finished session (read-only)
 //
 // Lists the user's finished live sessions saved on the backend
-// (/api/live/saved), newest first. Sessions can be sorted into the same
-// folders as the videos on the working screen (/api/folders).
+// (/api/live/saved), newest first. Sessions are sorted into their own
+// folders (/api/live/folders) — separate from the video folders.
 
 import 'dart:convert';
 
@@ -322,7 +322,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
       final prefs = await SharedPreferences.getInstance();
       final saved = prefs.getString(_folderFilterPref);
       final resp = await http
-          .get(Uri.parse('$authBaseUrl/api/folders'))
+          .get(Uri.parse('$authBaseUrl/api/live/folders'))
           .timeout(const Duration(seconds: 10));
       if (resp.statusCode != 200 || !mounted) return;
       final list = ((jsonDecode(resp.body) as Map)['folders'] as List? ?? [])
@@ -396,7 +396,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
     if (_folders.contains(name)) return true;
     try {
       final r = await http.post(
-        Uri.parse('$authBaseUrl/api/folders'),
+        Uri.parse('$authBaseUrl/api/live/folders'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'name': name}),
       );
@@ -423,7 +423,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
     if (name == null || name.isEmpty || name == oldName) return;
     try {
       final r = await http.put(
-        Uri.parse('$authBaseUrl/api/folders'),
+        Uri.parse('$authBaseUrl/api/live/folders'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'old': oldName, 'new': name}),
       );
@@ -449,7 +449,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
       builder: (ctx) => AlertDialog(
         title: const Text('Delete folder?'),
         content: Text('Nothing inside "$name" is deleted — its live sessions '
-            'and videos just move out of the folder.'),
+            'just move out of the folder.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -465,7 +465,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
     if (ok != true) return;
     try {
       final r = await http.delete(Uri.parse(
-          '$authBaseUrl/api/folders?name=${Uri.encodeQueryComponent(name)}'));
+          '$authBaseUrl/api/live/folders?name=${Uri.encodeQueryComponent(name)}'));
       if (r.statusCode != 200) {
         _snack(_apiError(r), error: true);
         return;
@@ -548,14 +548,67 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
     await _moveToFolder(s, choice == _unsortedFilter ? null : choice);
   }
 
-  /// Explorer-style folders: tiles at the top level, a path bar inside a
-  /// folder (see widgets/folder_browser.dart).
+  /// Wide windows: the folder column floats at the left of the list.
+  bool get _folderSidebar => MediaQuery.sizeOf(context).width >= 1000;
+
+  /// All folders in one card, the open one in the middle (see
+  /// widgets/folder_browser.dart → FolderColumn).
+  Widget _buildFolderColumn({required double height}) {
+    LiveSessionSummary? byId(String id) =>
+        _sessions.where((x) => x.id == id).firstOrNull;
+    return FolderColumn(
+      height: height,
+      folders: [
+        for (final f in _folders)
+          FolderInfo(f, _sessions.where((x) => x.folder == f).length),
+      ],
+      current: _folderFilter,
+      rootLabel: 'Not in a folder',
+      rootCount: _sessions.where((x) => x.folder == null).length,
+      onSelect: _setFolderFilter,
+      onCreate: _createFolder,
+      onRename: _renameFolder,
+      onDelete: _deleteFolder,
+      onDropItem: (folder, id) {
+        final x = byId(id);
+        if (x != null) _moveToFolder(x, folder);
+      },
+    );
+  }
+
+  Widget _withFolderSidebar(Widget list) {
+    if (!_folderSidebar || _loading || _needsConnect || _error != null) {
+      return list;
+    }
+    final pad = _pad(context);
+    final h = MediaQuery.sizeOf(context).height;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(pad, pad, 0, pad),
+          child: SizedBox(
+            width: 250,
+            child: _buildFolderColumn(
+                height: (h * 0.45).clamp(200.0, 440.0).toDouble()),
+          ),
+        ),
+        Expanded(child: list),
+      ],
+    );
+  }
+
+  /// Above the list: where you are (folder with Rename / Delete, or
+  /// "Not in a folder"). On narrow screens the folder column comes first.
   Widget _buildFolderArea(String q) {
     final open = _folderFilter;
     LiveSessionSummary? byId(String id) =>
         _sessions.where((x) => x.id == id).firstOrNull;
-    if (open != null) {
-      return FolderPathBar(
+    final Widget where;
+    if (q.isNotEmpty && open == null) {
+      where = const FolderSectionTitle(text: 'Search results in all folders');
+    } else if (open != null) {
+      where = FolderPathBar(
         rootLabel: 'Live sessions',
         folder: open,
         count: _sessions.where((x) => x.folder == open).length,
@@ -567,34 +620,19 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
           if (x != null) _moveToFolder(x, null);
         },
       );
+    } else {
+      where = FolderSectionTitle(
+        text: 'Not in a folder',
+        count: _sessions.where((x) => x.folder == null).length,
+      );
     }
-    if (q.isNotEmpty) {
-      return const FolderSectionTitle(text: 'Search results in all folders');
-    }
+    if (_folderSidebar) return where;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        FolderGrid(
-          folders: [
-            for (final f in _folders)
-              FolderInfo(f, _sessions.where((x) => x.folder == f).length),
-          ],
-          itemSingular: 'session',
-          itemPlural: 'sessions',
-          onOpen: (f) => _setFolderFilter(f),
-          onCreate: _createFolder,
-          onRename: _renameFolder,
-          onDelete: _deleteFolder,
-          onDropItem: (folder, id) {
-            final x = byId(id);
-            if (x != null) _moveToFolder(x, folder);
-          },
-        ),
-        const SizedBox(height: 18),
-        FolderSectionTitle(
-          text: 'Not in a folder',
-          count: _sessions.where((x) => x.folder == null).length,
-        ),
+        _buildFolderColumn(height: 160),
+        const SizedBox(height: 12),
+        where,
       ],
     );
   }
@@ -622,7 +660,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
                 s.preview.toLowerCase().contains(q))
             .toList();
 
-    final body = RefreshIndicator(
+    final body = _withFolderSidebar(RefreshIndicator(
         onRefresh: _load,
         child: CustomScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
@@ -640,7 +678,7 @@ class _LiveSessionsScreenState extends State<LiveSessionsScreen>
             ..._listSlivers(pad, q, visible),
           ],
         ),
-      );
+      ));
     if (widget.embedded) return body;
 
     return Scaffold(

@@ -644,6 +644,28 @@ def _write_folders(names: list) -> None:
     os.replace(tmp, _FOLDERS_FILE)
 
 
+_SPLIT_MARKER = os.path.join(os.path.dirname(STATE_FILE), ".folders_split_done")
+
+
+def _split_off_live_folders() -> None:
+    """Once: video and live folders used to be shared. Folders that only
+    live sessions use move to the live list (they keep their sessions);
+    they leave the video list. Empty folders stay video folders."""
+    if os.path.exists(_SPLIT_MARKER):
+        return
+    try:
+        live_names = {n.lower() for n in _live_relay_mod.live_folder_names_in_use()}
+        video_used = {(v.get("folder") or "").lower() for v in videos}
+        keep = [n for n in _read_folders()
+                if n.lower() not in live_names or n.lower() in video_used]
+        _write_folders(keep)
+        _live_relay_mod._read_live_folders()  # creates the live folder file
+        with open(_SPLIT_MARKER, "w", encoding="utf-8") as f:
+            f.write("done\n")
+    except Exception as e:  # never block the video list over this
+        logging.warning("splitting live folders off failed: %s", e)
+
+
 def _all_folders() -> list:
     """Saved folder names plus any a video still points to, A→Z."""
     names = {n.lower(): n for n in _read_folders()}
@@ -669,6 +691,7 @@ def video_folders():
         return ("", 204)
     with _folders_lock:
         if request.method == "GET":
+            _split_off_live_folders()
             return jsonify({"folders": _all_folders()}), 200
 
         if request.method == "DELETE":
@@ -682,7 +705,6 @@ def video_folders():
                     moved += 1
             _write_folders([n for n in _all_folders() if n.lower() != name.lower()])
             save_state(force=True)
-            moved += _live_relay_mod.clear_folder(name)  # live sessions too
             return jsonify({"success": True, "unsorted": moved}), 200
 
         data = request.get_json(silent=True) or {}
@@ -712,7 +734,6 @@ def video_folders():
             [new if n.lower() == old.lower() else n for n in _all_folders()]
         )
         save_state(force=True)
-        _live_relay_mod.rename_folder(old, new)  # live sessions too
         return jsonify({"success": True, "folders": _all_folders()}), 200
 
 

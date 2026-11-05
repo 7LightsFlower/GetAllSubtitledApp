@@ -1140,6 +1140,83 @@ def _rewrite_folders(change) -> int:
     return changed
 
 
+def _iter_saved_records():
+    """Every saved live session of every user (for folder bookkeeping)."""
+    store = _store_ref
+    if store is None or not os.path.isdir(store.root):
+        return
+    for user in os.listdir(store.root):
+        d = os.path.join(store.root, user)
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(d, name), "r", encoding="utf-8") as f:
+                    yield json.load(f)
+            except (OSError, ValueError):
+                continue
+
+
+def live_folder_names_in_use() -> list[str]:
+    """Folder names that live sessions are in (case-insensitively unique)."""
+    seen = {}
+    for rec in _iter_saved_records():
+        f = str(rec.get("folder") or "").strip()
+        if f and f.lower() not in seen:
+            seen[f.lower()] = f
+    return list(seen.values())
+
+
+# Live sessions have their OWN folders, separate from the video folders.
+_live_folders_lock = threading.Lock()
+
+
+def _live_folders_path() -> Optional[str]:
+    store = _store_ref
+    return os.path.join(store.root, "_folders.json") if store else None
+
+
+def _read_live_folders() -> list[str]:
+    """Saved live folders + any folder a live session is in. The first
+    call creates the file from the folders live sessions already use
+    (they used to share the video folders)."""
+    path = _live_folders_path()
+    names: list[str] = []
+    if path and os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            names = [str(n) for n in data if str(n).strip()] if isinstance(data, list) else []
+        except (OSError, ValueError):
+            names = []
+    elif path:
+        names = live_folder_names_in_use()
+        _write_live_folders(names)
+    lower = {n.lower() for n in names}
+    for n in live_folder_names_in_use():
+        if n.lower() not in lower:
+            names.append(n)
+            lower.add(n.lower())
+    return sorted(names, key=str.lower)
+
+
+def _write_live_folders(names: list[str]) -> None:
+    path = _live_folders_path()
+    if not path:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(sorted(set(names), key=str.lower), f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _clean_folder(name) -> str:
+    return re.sub(r"\s+", " ", str(name or "")).strip()[:80]
+
+
 def saved_title_for_output(output_session_id: str) -> str:
     """The name the user gave a live session (Live Sessions list), looked
     up by its Session Output id. '' when none was given."""
@@ -1343,6 +1420,45 @@ def create_live_blueprint(
             rec.pop("title", None)
         store.save(email, rec)
         return jsonify({"success": True, "title": rec.get("title") or ""}), 200
+
+    @bp.route("/folders", methods=["GET", "POST", "PUT", "DELETE"])
+    def live_folders():
+        """Folders of the Live sessions list (separate from video folders).
+        GET → {"folders"} · POST {"name"} · PUT {"old","new"} · DELETE ?name="""
+        with _live_folders_lock:
+            names = _read_live_folders()
+            find = lambda n: next((x for x in names if x.lower() == n.lower()), None)
+            if request.method == "GET":
+                return jsonify({"folders": names}), 200
+            if request.method == "DELETE":
+                name = find(_clean_folder(request.args.get("name")))
+                if not name:
+                    return jsonify({"error": "Folder not found"}), 404
+                moved = clear_folder(name)
+                _write_live_folders([n for n in names if n.lower() != name.lower()])
+                return jsonify({"success": True, "unsorted": moved}), 200
+            data = request.get_json(silent=True) or {}
+            if request.method == "POST":
+                name = _clean_folder(data.get("name"))
+                if not name:
+                    return jsonify({"error": "name is required"}), 400
+                if find(name):
+                    return jsonify({"error": f'A folder "{name}" already exists'}), 409
+                _write_live_folders(names + [name])
+                return jsonify({"success": True, "folders": _read_live_folders()}), 201
+            old = find(_clean_folder(data.get("old")))
+            new = _clean_folder(data.get("new"))
+            if not old:
+                return jsonify({"error": "Folder not found"}), 404
+            if not new:
+                return jsonify({"error": "new name is required"}), 400
+            clash = find(new)
+            if clash and clash.lower() != old.lower():
+                return jsonify({"error": f'A folder "{new}" already exists'}), 409
+            rename_folder(old, new)
+            _write_live_folders(
+                [new if n.lower() == old.lower() else n for n in names])
+            return jsonify({"success": True, "folders": _read_live_folders()}), 200
 
     @bp.route("/saved/<sid>/folder", methods=["POST"])
     def saved_move(sid):
