@@ -1,23 +1,19 @@
 // folder_browser.dart
 //
-// Explorer-style folders for the Videos and Live sessions lists.
+// Folders for the Videos and Live sessions lists — compact.
 //
-// Top level:
-//   Folders
-//   ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐
-//   │ 📁 Prof. Lennox ⋮│ │ 📁 Uzbek ASR    ⋮│ │ ＋ New folder     │
-//   │    2 videos      │ │    2 videos      │ │                  │
-//   └──────────────────┘ └──────────────────┘ └──────────────────┘
-//   ▸ 3 folders without videos
-//
+// Top level: one strip of small folder chips (wraps only when needed):
+//   📁 FeG Karlsruhe… 1   📁 Human Translations 1   📁 NASA Astronaut… 2
+//   📁 Uzbek ASR Tests 2   +2 empty   ＋ New folder
 //   Not in a folder · 8
 //   [cards…]
 //
 // Inside a folder:
-//   ← Videos  ›  📁 Prof. John Lennox · 2          [Rename] [Delete]
-//   [cards…]
+//   ← Videos  ›  📂 Prof. John Lennox · 2          [Rename] [Delete]
 //
-// Folder tiles (and "Videos" in the path bar) accept dragged cards.
+// Click a chip to open the folder; right-click / long-press it for
+// Rename / Delete. Chips (and "← Videos" in the path bar) accept dragged
+// cards.
 
 import 'package:flutter/material.dart';
 
@@ -27,7 +23,7 @@ class FolderInfo {
   final int count; // items of *this* list in the folder
 }
 
-/// Grid of folder tiles for the top level of a list.
+/// Compact folder chips for the top level of a list.
 class FolderGrid extends StatefulWidget {
   const FolderGrid({
     super.key,
@@ -42,7 +38,7 @@ class FolderGrid extends StatefulWidget {
   });
 
   final List<FolderInfo> folders;
-  final String itemSingular; // "video" / "session"
+  final String itemSingular; // "video" / "session" (tooltips only)
   final String itemPlural; // "videos" / "sessions"
   final ValueChanged<String> onOpen;
   final VoidCallback onCreate;
@@ -63,64 +59,43 @@ class _FolderGridState extends State<FolderGrid> {
   Widget build(BuildContext context) {
     final used = widget.folders.where((f) => f.count > 0).toList();
     final empty = widget.folders.where((f) => f.count == 0).toList();
-    final narrow = MediaQuery.sizeOf(context).width < 600;
-    final tileWidth = narrow ? double.infinity : 230.0;
 
-    Widget tiles(List<FolderInfo> list, {bool withNew = false}) => Wrap(
-          spacing: 10,
-          runSpacing: 10,
-          children: [
-            for (final f in list)
-              SizedBox(
-                width: tileWidth,
-                child: _FolderTile(
-                  info: f,
-                  countText: f.count == 0
-                      ? 'empty'
-                      : '${f.count} ${f.count == 1 ? widget.itemSingular : widget.itemPlural}',
-                  onOpen: () => widget.onOpen(f.name),
-                  onRename: () => widget.onRename(f.name),
-                  onDelete: () => widget.onDelete(f.name),
-                  onDrop: (id) => widget.onDropItem(f.name, id),
-                ),
-              ),
-            if (withNew)
-              SizedBox(
-                width: tileWidth,
-                child: _NewFolderTile(onTap: widget.onCreate),
-              ),
-          ],
+    _FolderChip chip(FolderInfo f, {bool dim = false}) => _FolderChip(
+          info: f,
+          dim: dim,
+          tooltip: '${f.name}\n${f.count} '
+              '${f.count == 1 ? widget.itemSingular : widget.itemPlural}'
+              ' · right-click for Rename / Delete',
+          onOpen: () => widget.onOpen(f.name),
+          onRename: () => widget.onRename(f.name),
+          onDelete: () => widget.onDelete(f.name),
+          onDrop: (id) => widget.onDropItem(f.name, id),
         );
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      crossAxisAlignment: WrapCrossAlignment.center,
       children: [
-        _sectionTitle('Folders', used.length),
-        const SizedBox(height: 8),
-        tiles(used, withNew: true),
-        if (empty.isNotEmpty) ...[
-          const SizedBox(height: 6),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton.icon(
-              onPressed: () => setState(() => _showEmpty = !_showEmpty),
-              icon: Icon(_showEmpty ? Icons.expand_less : Icons.expand_more,
-                  size: 18),
-              label: Text(
-                '${empty.length} folder${empty.length == 1 ? '' : 's'} '
-                'without ${widget.itemPlural}',
-              ),
-              style: TextButton.styleFrom(
-                foregroundColor: Colors.blueGrey.shade600,
-                visualDensity: VisualDensity.compact,
-              ),
-            ),
+        for (final f in used) chip(f),
+        if (_showEmpty)
+          for (final f in empty) chip(f, dim: true),
+        if (empty.isNotEmpty)
+          _SmallAction(
+            icon: _showEmpty ? Icons.expand_less : Icons.more_horiz,
+            label: _showEmpty ? 'Hide empty' : '+${empty.length} empty',
+            tooltip: _showEmpty
+                ? 'Hide folders without ${widget.itemPlural}'
+                : 'Show ${empty.length} folder${empty.length == 1 ? '' : 's'} '
+                    'without ${widget.itemPlural}',
+            onTap: () => setState(() => _showEmpty = !_showEmpty),
           ),
-          if (_showEmpty) ...[
-            const SizedBox(height: 4),
-            Opacity(opacity: 0.75, child: tiles(empty)),
-          ],
-        ],
+        _SmallAction(
+          icon: Icons.create_new_folder_outlined,
+          label: 'New folder',
+          tooltip: 'New folder',
+          onTap: widget.onCreate,
+        ),
       ],
     );
   }
@@ -131,7 +106,7 @@ Widget _sectionTitle(String text, int? count) => Row(
         Text(
           text,
           style: TextStyle(
-            fontSize: 15,
+            fontSize: 14,
             fontWeight: FontWeight.w700,
             color: Colors.blueGrey.shade800,
           ),
@@ -139,7 +114,7 @@ Widget _sectionTitle(String text, int? count) => Row(
         if (count != null) ...[
           const SizedBox(width: 6),
           Text('· $count',
-              style: TextStyle(fontSize: 14, color: Colors.blueGrey.shade400)),
+              style: TextStyle(fontSize: 13, color: Colors.blueGrey.shade400)),
         ],
       ],
     );
@@ -154,137 +129,111 @@ class FolderSectionTitle extends StatelessWidget {
   Widget build(BuildContext context) => _sectionTitle(text, count);
 }
 
-class _FolderTile extends StatefulWidget {
-  const _FolderTile({
+class _FolderChip extends StatelessWidget {
+  const _FolderChip({
     required this.info,
-    required this.countText,
+    required this.tooltip,
     required this.onOpen,
     required this.onRename,
     required this.onDelete,
     required this.onDrop,
+    this.dim = false,
   });
 
   final FolderInfo info;
-  final String countText;
+  final String tooltip;
+  final bool dim;
   final VoidCallback onOpen;
   final VoidCallback onRename;
   final VoidCallback onDelete;
   final ValueChanged<String> onDrop;
 
-  @override
-  State<_FolderTile> createState() => _FolderTileState();
-}
-
-class _FolderTileState extends State<_FolderTile> {
-  bool _hover = false;
+  Future<void> _menu(BuildContext context, Offset at) async {
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox;
+    final v = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+          at & const Size(1, 1), Offset.zero & overlay.size),
+      items: const [
+        PopupMenuItem(value: 'open', child: Text('Open')),
+        PopupMenuItem(value: 'rename', child: Text('Rename')),
+        PopupMenuItem(
+            value: 'delete',
+            child: Text('Delete folder', style: TextStyle(color: Colors.red))),
+      ],
+    );
+    if (v == 'open') onOpen();
+    if (v == 'rename') onRename();
+    if (v == 'delete') onDelete();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final amber = Colors.amber.shade800;
     return DragTarget<String>(
       onWillAcceptWithDetails: (_) => true,
-      onAcceptWithDetails: (d) => widget.onDrop(d.data),
+      onAcceptWithDetails: (d) => onDrop(d.data),
       builder: (context, candidates, _) {
         final dropping = candidates.isNotEmpty;
-        return MouseRegion(
-          onEnter: (_) => setState(() => _hover = true),
-          onExit: (_) => setState(() => _hover = false),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 140),
-            decoration: BoxDecoration(
-              color: dropping ? Colors.blue.shade50 : Colors.white,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: dropping
-                    ? Colors.blue.shade400
-                    : (_hover ? Colors.amber.shade400 : Colors.grey.shade300),
-                width: dropping ? 2 : 1,
-              ),
-              boxShadow: _hover
-                  ? [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.06),
-                        blurRadius: 10,
-                        offset: const Offset(0, 3),
-                      ),
-                    ]
-                  : const [],
-            ),
-            child: Material(
-              type: MaterialType.transparency,
-              child: InkWell(
-                borderRadius: BorderRadius.circular(12),
-                onTap: widget.onOpen,
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 10, 2, 10),
-                  child: Row(
-                    children: [
-                      Icon(dropping ? Icons.folder_open : Icons.folder,
-                          color: amber, size: 30),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              widget.info.name,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.w600, fontSize: 14),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              dropping ? 'Drop to move here' : widget.countText,
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: dropping
-                                    ? Colors.blue.shade700
-                                    : Colors.grey.shade600,
-                              ),
-                            ),
-                          ],
+        return Tooltip(
+          message: dropping ? 'Drop to move into "${info.name}"' : tooltip,
+          waitDuration: const Duration(milliseconds: 500),
+          child: Opacity(
+            opacity: dim && !dropping ? 0.6 : 1,
+            child: GestureDetector(
+              onSecondaryTapDown: (d) => _menu(context, d.globalPosition),
+              onLongPressStart: (d) => _menu(context, d.globalPosition),
+              child: Material(
+                color: dropping ? Colors.blue.shade50 : Colors.white,
+                shape: StadiumBorder(
+                  side: BorderSide(
+                    color: dropping ? Colors.blue.shade400 : Colors.grey.shade300,
+                    width: dropping ? 2 : 1,
+                  ),
+                ),
+                child: InkWell(
+                  customBorder: const StadiumBorder(),
+                  onTap: onOpen,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(10, 5, 6, 5),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(dropping ? Icons.folder_open : Icons.folder,
+                            size: 18, color: Colors.amber.shade800),
+                        const SizedBox(width: 6),
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 190),
+                          child: Text(
+                            info.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                fontSize: 13, fontWeight: FontWeight.w500),
+                          ),
                         ),
-                      ),
-                      PopupMenuButton<String>(
-                        tooltip: 'Folder actions',
-                        icon: Icon(Icons.more_vert,
-                            size: 18, color: Colors.grey.shade600),
-                        onSelected: (v) {
-                          if (v == 'open') widget.onOpen();
-                          if (v == 'rename') widget.onRename();
-                          if (v == 'delete') widget.onDelete();
-                        },
-                        itemBuilder: (_) => const [
-                          PopupMenuItem(
-                            value: 'open',
-                            child: ListTile(
-                              dense: true,
-                              leading: Icon(Icons.folder_open),
-                              title: Text('Open'),
+                        const SizedBox(width: 6),
+                        // Just the number.
+                        Container(
+                          constraints: const BoxConstraints(minWidth: 20),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: Colors.amber.shade100,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(
+                            '${info.count}',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.amber.shade900,
                             ),
                           ),
-                          PopupMenuItem(
-                            value: 'rename',
-                            child: ListTile(
-                              dense: true,
-                              leading: Icon(Icons.edit_outlined),
-                              title: Text('Rename'),
-                            ),
-                          ),
-                          PopupMenuItem(
-                            value: 'delete',
-                            child: ListTile(
-                              dense: true,
-                              leading:
-                                  Icon(Icons.delete_outline, color: Colors.red),
-                              title: Text('Delete folder'),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -296,32 +245,30 @@ class _FolderTileState extends State<_FolderTile> {
   }
 }
 
-class _NewFolderTile extends StatelessWidget {
-  const _NewFolderTile({required this.onTap});
+class _SmallAction extends StatelessWidget {
+  const _SmallAction({
+    required this.icon,
+    required this.label,
+    required this.tooltip,
+    required this.onTap,
+  });
+  final IconData icon;
+  final String label;
+  final String tooltip;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      borderRadius: BorderRadius.circular(12),
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Colors.blueGrey.shade200),
-          color: Colors.blueGrey.shade50.withValues(alpha: 0.5),
-        ),
-        child: Row(
-          children: [
-            Icon(Icons.create_new_folder_outlined,
-                color: Colors.blueGrey.shade600, size: 26),
-            const SizedBox(width: 10),
-            Text('New folder',
-                style: TextStyle(
-                    color: Colors.blueGrey.shade700,
-                    fontWeight: FontWeight.w600)),
-          ],
+    return Tooltip(
+      message: tooltip,
+      child: TextButton.icon(
+        onPressed: onTap,
+        icon: Icon(icon, size: 18),
+        label: Text(label, style: const TextStyle(fontSize: 13)),
+        style: TextButton.styleFrom(
+          foregroundColor: Colors.blueGrey.shade700,
+          visualDensity: VisualDensity.compact,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
         ),
       ),
     );
@@ -428,6 +375,254 @@ class FolderPathBar extends StatelessWidget {
               style: TextButton.styleFrom(foregroundColor: Colors.red),
             ),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════
+//  FolderColumn — all folders in one card: sorted A–Z, the open one
+//  scrolled to the middle (as far as the list allows), "+" for a new
+//  folder. The card is only as tall as its rows (up to [height]).
+//
+//   ┌────────────────────────────┐
+//   │ 📥 Not in a folder    8 ⊕ │
+//   │ 📁 Human Translations   1 │
+//   │ 📂 Oktober 2026         1 │  ← open (highlighted)
+//   │ 📁 Prof. John Lennox …  2 │
+//   └────────────────────────────┘
+//
+//  Tap a row to open it. Right-click / long-press for Rename / Delete.
+//  Rows accept dragged cards; "Not in a folder" takes them out.
+// ═════════════════════════════════════════════════════════════════════
+class FolderColumn extends StatefulWidget {
+  const FolderColumn({
+    super.key,
+    required this.folders,
+    required this.current,
+    required this.rootLabel,
+    required this.rootCount,
+    required this.onSelect,
+    required this.onCreate,
+    required this.onRename,
+    required this.onDelete,
+    required this.onDropItem,
+    this.height = 260,
+  });
+
+  final List<FolderInfo> folders;
+
+  /// Open folder, or null for the top level ("Not in a folder").
+  final String? current;
+  final String rootLabel;
+  final int rootCount;
+  final ValueChanged<String?> onSelect;
+  final VoidCallback onCreate;
+  final ValueChanged<String> onRename;
+  final ValueChanged<String> onDelete;
+
+  /// A card (its id) dropped on a folder (null = take it out of its folder).
+  final void Function(String? folder, String itemId) onDropItem;
+  /// Maximum height of the list; it shrinks to fit when there are
+  /// fewer folders (no empty space).
+  final double height;
+
+  @override
+  State<FolderColumn> createState() => _FolderColumnState();
+}
+
+class _FolderColumnState extends State<FolderColumn> {
+  static const double _rowH = 38;
+  final ScrollController _ctrl = ScrollController();
+
+  List<FolderInfo> get _sorted => [...widget.folders]
+    ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+
+  int _indexOf(String? folder, List<FolderInfo> sorted) {
+    if (folder == null) return 0;
+    final i = sorted.indexWhere((f) => f.name == folder);
+    return i < 0 ? 0 : i + 1; // row 0 = top level
+  }
+
+  /// Scroll so the open row sits in the middle — clamped at both ends,
+  /// so the list never shows empty space above or below.
+  void _center({bool animate = true}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_ctrl.hasClients) return;
+      final pos = _ctrl.position;
+      final idx = _indexOf(widget.current, _sorted);
+      final target = (idx * _rowH - (pos.viewportDimension - _rowH) / 2)
+          .clamp(0.0, pos.maxScrollExtent);
+      if ((pos.pixels - target).abs() < 1) return;
+      if (animate) {
+        _ctrl.animateTo(target,
+            duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
+      } else {
+        _ctrl.jumpTo(target);
+      }
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _center(animate: false);
+  }
+
+  @override
+  void didUpdateWidget(FolderColumn old) {
+    super.didUpdateWidget(old);
+    if (old.current != widget.current ||
+        old.folders.length != widget.folders.length) {
+      _center();
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _menu(BuildContext context, Offset at, String name) async {
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final v = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+          at & const Size(1, 1), Offset.zero & overlay.size),
+      items: const [
+        PopupMenuItem(value: 'open', child: Text('Open')),
+        PopupMenuItem(value: 'rename', child: Text('Rename')),
+        PopupMenuItem(
+            value: 'delete',
+            child: Text('Delete folder', style: TextStyle(color: Colors.red))),
+      ],
+    );
+    if (v == 'open') widget.onSelect(name);
+    if (v == 'rename') widget.onRename(name);
+    if (v == 'delete') widget.onDelete(name);
+  }
+
+  // One text style for every folder name (as for the open one).
+  static const _nameStyle = TextStyle(
+    fontSize: 13.5,
+    fontWeight: FontWeight.w700,
+    color: Color(0xFF263238), // blueGrey 900
+  );
+
+  Widget _row(BuildContext context, String? folder, String label, int count,
+      bool active) {
+    return DragTarget<String>(
+      onWillAcceptWithDetails: (_) => true,
+      onAcceptWithDetails: (d) => widget.onDropItem(folder, d.data),
+      builder: (context, candidates, _) {
+        final dropping = candidates.isNotEmpty;
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => widget.onSelect(folder),
+          onSecondaryTapDown: folder == null
+              ? null
+              : (d) => _menu(context, d.globalPosition, folder),
+          onLongPressStart: folder == null
+              ? null
+              : (d) => _menu(context, d.globalPosition, folder),
+          child: Container(
+            height: _rowH,
+            margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            decoration: BoxDecoration(
+              color: dropping
+                  ? Colors.blue.shade50
+                  : (active ? Colors.amber.shade50 : null),
+              borderRadius: BorderRadius.circular(8),
+              border: dropping
+                  ? Border.all(color: Colors.blue.shade400)
+                  : (active ? Border.all(color: Colors.amber.shade300) : null),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  folder == null
+                      ? Icons.inbox_outlined
+                      : (active || dropping ? Icons.folder_open : Icons.folder),
+                  size: 18,
+                  color: folder == null
+                      ? Colors.blueGrey.shade600
+                      : Colors.amber.shade800,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: _nameStyle,
+                  ),
+                ),
+                Text(
+                  '$count',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: active ? Colors.amber.shade900 : Colors.blueGrey.shade600,
+                  ),
+                ),
+                // "+" for a new folder sits in the first row (no title line).
+                if (folder == null) ...[
+                  const SizedBox(width: 4),
+                  SizedBox.square(
+                    dimension: 28,
+                    child: IconButton(
+                      tooltip: 'New folder',
+                      padding: EdgeInsets.zero,
+                      iconSize: 20,
+                      icon: Icon(Icons.add_circle_outline,
+                          color: Colors.blue.shade700),
+                      onPressed: widget.onCreate,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final sorted = _sorted;
+    final rows = <Widget>[
+      _row(context, null, widget.rootLabel, widget.rootCount,
+          widget.current == null),
+      for (final f in sorted)
+        _row(context, f.name, f.name, f.count, widget.current == f.name),
+    ];
+    // Exactly as tall as the rows (2 px margin each), up to the maximum.
+    final listHeight =
+        (rows.length * (_rowH + 2)).toDouble().clamp(0.0, widget.height);
+
+    return Card(
+      margin: EdgeInsets.zero,
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const SizedBox(height: 4),
+          SizedBox(
+            height: listHeight,
+            child: ListView(
+              controller: _ctrl,
+              padding: EdgeInsets.zero,
+              itemExtent: _rowH + 2,
+              children: rows,
+            ),
+          ),
+          const SizedBox(height: 4),
         ],
       ),
     );
