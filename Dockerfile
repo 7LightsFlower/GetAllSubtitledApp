@@ -52,6 +52,13 @@ RUN flutter build web --release --no-wasm-dry-run \
     --no-tree-shake-icons \
     --dart-define=API_BASE_URL=${API_BASE_URL}
 
+# Give this build its own asset address (see web/flutter_bootstrap.js and
+# the /v/ rule in nginx.conf): assets of a new build are never taken from
+# a browser's cache of an older one.
+RUN BUILD_ID=$(date +%Y%m%d%H%M%S) \
+    && sed -i "s/__BUILD_ID__/${BUILD_ID}/" build/web/flutter_bootstrap.js \
+    && grep -q "/v/${BUILD_ID}/" build/web/flutter_bootstrap.js
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2: Flask API backend (only reachable via the Nginx proxy)
 # ─────────────────────────────────────────────────────────────────────────────
