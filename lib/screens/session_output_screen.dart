@@ -2882,12 +2882,12 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         color: _expertAccent,
         borderRadius: BorderRadius.circular(20),
       ),
-      child: Row(
+      child: const Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.edit, size: 14, color: Colors.white),
-          const SizedBox(width: 6),
-          const Text(
+          Icon(Icons.edit, size: 14, color: Colors.white),
+          SizedBox(width: 6),
+          Text(
               'Editing',
               style: TextStyle(
                 color: Colors.white,
