@@ -557,13 +557,14 @@ class ViewToggleButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final wide = MediaQuery.sizeOf(context).width >= 700;
     final enabled = onTap != null;
-    final fg = enabled ? Colors.blue.shade800 : Colors.grey.shade400;
+    // Disabled stays readable (grey icons), never a blank pill.
+    final fg = enabled ? Colors.blue.shade800 : Colors.blueGrey.shade300;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Tooltip(
         message: tooltip,
         child: Material(
-          color: enabled ? Colors.blueGrey.shade50 : Colors.grey.shade100,
+          color: enabled ? Colors.blueGrey.shade50 : Colors.grey.shade200,
           borderRadius: BorderRadius.circular(10),
           child: InkWell(
             borderRadius: BorderRadius.circular(10),
@@ -574,7 +575,7 @@ class ViewToggleButton extends StatelessWidget {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(icon, size: 17, color: fg),
+                  Icon(icon, size: wide ? 17 : 19, color: fg),
                   if (wide) ...[
                     const SizedBox(width: 6),
                     Text(
@@ -587,8 +588,8 @@ class ViewToggleButton extends StatelessWidget {
                     ),
                   ],
                   const SizedBox(width: 4),
-                  Icon(Icons.swap_horiz, size: 14,
-                      color: fg.withValues(alpha: 0.6)),
+                  Icon(Icons.swap_horiz, size: wide ? 14 : 15,
+                      color: fg.withValues(alpha: 0.7)),
                 ],
               ),
             ),

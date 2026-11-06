@@ -2243,7 +2243,10 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                                     ),
                                   ),
                                 if (!_isEditingMode) ...[
-                                  _buildSplitToggle(),
+                                  // Only one language: nothing to put
+                                  // side by side, so no switch.
+                                  if (_transcripts.length >= 2)
+                                    _buildSplitToggle(),
                                   const TranscriptModeToggle(),
                                 ],
                               ],
@@ -2417,10 +2420,71 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     }
   }
 
+  /// File list with a "Download all" (ZIP) bar on top.
   Widget _buildFileList() {
     if (_files.isEmpty) {
       return const Center(child: Text('No files available'));
     }
+    final total = _files.fold<int>(0, (sum, f) => sum + f.size);
+    return Column(
+      children: [
+        Container(
+          padding: const EdgeInsets.fromLTRB(16, 10, 12, 10),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.folder_outlined,
+                  size: 20, color: Colors.blueGrey.shade600),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '${_files.length} ${_files.length == 1 ? 'file' : 'files'}'
+                  ' · ${_formatFileSize(total)}',
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.blueGrey.shade800,
+                  ),
+                ),
+              ),
+              Tooltip(
+                message: 'Download all files of this session as one ZIP',
+                child: FilledButton.tonalIcon(
+                  onPressed: _isDownloadingAll ? null : _downloadAllFiles,
+                  icon: _isDownloadingAll
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.folder_zip_outlined, size: 18),
+                  label: const Text('Download all'),
+                  style: FilledButton.styleFrom(
+                    foregroundColor: Colors.blue.shade700,
+                    backgroundColor:
+                        Colors.blue.shade700.withValues(alpha: 0.12),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 10),
+                    textStyle: const TextStyle(
+                        fontSize: 13.5, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Expanded(child: _buildFileItems()),
+      ],
+    );
+  }
+
+  Widget _buildFileItems() {
 
     final r = Responsive.of(context);
 
@@ -2585,8 +2649,9 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
   // ─── Bottom action bar ─────────────────────────────────────────────
   //
-  //  Simple:  [Export data] [Files] [All files as ZIP]
-  //  Expert:  [Export data] [Files] [All files as ZIP] │ [Subtitles] [Edit] [Video subtitles]
+  //  Simple:  [Export texts] [Files]
+  //  Expert:  [Export texts] [Files] │ [Subtitles] [Edit] [Video subtitles]
+  //  (Download all = ZIP sits at the top of the file list.)
   //  (One language ⇄ Side by side and Running text ⇄ Lines are switch
   //   buttons above the transcript.)
   //  Editing (Expert only):
@@ -2720,11 +2785,12 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     final gap = SizedBox(width: compact ? 2 : 8);
     final filesOpen = _view == SessionView.files;
 
-    // Simple and Expert: Export data · Files · All files as ZIP.
+    // Simple and Expert: Export texts · Files ("Download all" is in the
+    // file list).
     final downloads = <Widget>[
       _barButton(
         icon: Icons.ios_share,
-        label: 'Export data',
+        label: 'Export texts',
         tooltip: 'Export transcript / translation (TXT, DOCX, RTF …)',
         primary: true,
         compact: compact,
@@ -2741,22 +2807,6 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         onPressed: _isSaving
             ? null
             : () => _setView(filesOpen ? _textView : SessionView.files),
-      ),
-      gap,
-      _barButton(
-        icon: Icons.folder_zip_outlined,
-        label: 'All files as ZIP',
-        tooltip: 'Download all files of this session as one ZIP',
-        compact: compact,
-        busyIcon: _isDownloadingAll
-            ? const SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : null,
-        onPressed:
-            (_files.isNotEmpty && !_isDownloadingAll) ? _downloadAllFiles : null,
       ),
     ];
 
