@@ -42,8 +42,14 @@ RUN flutter pub get
 #   docker build --build-arg API_BASE_URL=https://api.example.com
 ARG API_BASE_URL=""
 COPY . .
+# --no-tree-shake-icons: ship the COMPLETE icon font. Trimmed to the
+# icons in use, the font differs in every build under the same name, and
+# a browser holding an older copy shows new icons as empty buttons. The
+# full font is the same file in every build, so a cached copy is always
+# right (≈1.6 MB once, then from the cache).
 RUN flutter build web --release --no-wasm-dry-run \
     --pwa-strategy=none \
+    --no-tree-shake-icons \
     --dart-define=API_BASE_URL=${API_BASE_URL}
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -67,11 +73,9 @@ RUN rm -rf /app/web
 # the named volumes in docker-compose.yaml have a valid mountpoint even
 # on a completely fresh volume, and their ownership matches the process
 # that will write into them.
-RUN mkdir -p /app/lib/sessions /app/lib/uploads /app/lib/state /app/lib/settings
+RUN mkdir -p /app/lib/sessions /app/lib/uploads /app/lib/state
 
-# The backend is the package backend/ (split from the former lib/backend.py).
-# Data stays under /app/lib (uploads, sessions, state, settings) — see backend/paths.py.
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "8", "backend.app:application"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "8", "lib.backend:app"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 3: Nginx serving the built frontend, proxying API requests to Flask
