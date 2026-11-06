@@ -19,6 +19,7 @@ import 'package:asr_live_translator/widgets/transcript_view.dart';
 import 'package:asr_live_translator/widgets/chapter_seekbar.dart';
 import 'package:asr_live_translator/widgets/export_dialog.dart';
 import 'package:asr_live_translator/widgets/language_selector.dart';
+import 'package:asr_live_translator/services/ui_mode.dart';
 
 class SessionOutputScreen extends StatefulWidget {
   final String sessionId;
@@ -103,7 +104,7 @@ class _TTSSelector extends StatelessWidget {
           children: [
             Icon(Icons.volume_up, size: 16),
             SizedBox(width: 6),
-            Text('Original audio'),
+            Text('Original'),
           ],
         ),
       ),
@@ -115,7 +116,7 @@ class _TTSSelector extends StatelessWidget {
             children: [
               const Icon(Icons.graphic_eq, size: 16),
               const SizedBox(width: 6),
-              Text(t.label),
+              Text(_shortAudioLabel(t.label)),
             ],
           ),
         ),
@@ -151,6 +152,13 @@ class _TTSSelector extends StatelessWidget {
   }
 }
 
+/// "English Audio" → "English" (the menu already shows a speaker icon).
+String _shortAudioLabel(String label) {
+  final short = label.replaceFirst(RegExp(r'\s*\(?\b(audio|tts)\)?\s*$',
+      caseSensitive: false), '').trim();
+  return short.isEmpty ? label : short;
+}
+
 class _SessionOutputScreenState extends State<SessionOutputScreen> {
   VideoPlayerController? _videoController;
   List<TranscriptData> _transcripts = [];
@@ -158,7 +166,9 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   List<SessionFile> _files = [];
   bool _isLoading = true;
   SessionView _view = SessionView.transcript;
-  SessionView _lastNonFilesView = SessionView.transcript;
+
+  /// Transcript or split view to go back to when the file list closes.
+  SessionView _textView = SessionView.transcript;
   bool _isEditingMode = false;
   bool _isSaving = false;
   String _selectedLanguage = '';
@@ -202,6 +212,9 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   List<TextEditingController> _editTextControllers = [];
   List<FocusNode> _editFocusNodes = [];
   List<SegmentData> _editSegments = [];
+
+  /// Texts when the editor opened, to tell whether anything changed.
+  List<String> _editOriginalTexts = [];
   
   // Used by _downloadAllFiles to prevent double-tap.
   bool _isDownloadingAll = false;
@@ -209,6 +222,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   @override
   void initState() {
     super.initState();
+    UiMode.expert.addListener(_onUiModeChanged);
     _ttsSubs.addAll([
       _ttsPlayer.onPositionChanged.listen((p) {
         if (!mounted || _ttsDragging) return;
@@ -231,6 +245,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
   @override
   void dispose() {
+    UiMode.expert.removeListener(_onUiModeChanged);
     for (final sub in _ttsSubs) {
       sub.cancel();
     }
@@ -1160,9 +1175,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
   void _setView(SessionView view) {
     setState(() {
-      if (view != SessionView.files) {
-        _lastNonFilesView = view;
-      }
+      if (view != SessionView.files) _textView = view;
       _view = view;
     });
   }
@@ -1173,6 +1186,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
     _disposeEditControllers();
 
     _editSegments = List.from(transcript.segments);
+    _editOriginalTexts = [for (final s in transcript.segments) s.text];
     for (int i = 0; i < _editSegments.length; i++) {
       final c = TextEditingController(text: _editSegments[i].text);
       final index = i;
@@ -1186,7 +1200,59 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
 
     setState(() {
       _isEditingMode = true;
+      // The editor works on one transcript: leave split / files view.
+      _view = SessionView.transcript;
     });
+  }
+
+  bool get _hasUnsavedEdits {
+    if (!_isEditingMode) return false;
+    if (_editSegments.length != _editOriginalTexts.length) return true;
+    for (var i = 0; i < _editSegments.length; i++) {
+      if (_editSegments[i].text != _editOriginalTexts[i]) return true;
+    }
+    return false;
+  }
+
+  /// Editing is an Expert feature. Switching to Simple while the editor
+  /// is open closes it — after asking, if there are unsaved changes.
+  Future<void> _onUiModeChanged() async {
+    if (!mounted) return;
+    if (UiMode.isSimple && _isEditingMode) {
+      if (!_hasUnsavedEdits) {
+        _exitEditMode();
+        return;
+      }
+      final discard = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Discard your edits?'),
+          content: const Text(
+              'Editing is only available in Expert mode. Your changes '
+              'to the transcript have not been saved yet.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Keep editing'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                  backgroundColor: Colors.red.shade600),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Discard'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted) return;
+      if (discard == true) {
+        _exitEditMode();
+      } else {
+        UiMode.set(true); // back to Expert, the editor stays open
+      }
+      return;
+    }
+    setState(() {});
   }
 
   void _exitEditMode() {
@@ -1907,42 +1973,13 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
         backgroundColor: Colors.blue.shade700,
         foregroundColor: Colors.white,
         actions: [
-          IconButton(
-            icon: Icon(
-              _view == SessionView.files
-                  ? Icons.description
-                  : Icons.folder,
-            ),
-            onPressed: () => _setView(
-              _view == SessionView.files
-                  ? _lastNonFilesView
-                  : SessionView.files,
-            ),
-            tooltip: _view == SessionView.files
-                ? 'Show Transcript'
-                : 'Show Files',
-          ),
-          IconButton(
-            icon: _isDownloadingAll
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Colors.white,
-                    ),
-                  )
-                : const Icon(Icons.folder_zip),
-            onPressed: (_files.isNotEmpty && !_isDownloadingAll)
-                ? _downloadAllFiles
-                : null,
-            tooltip: 'Download All Files',
-          ),
+          const UiModeToggle(),
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: _loadSessionData,
-            tooltip: 'Refresh',
+            onPressed: _isEditingMode ? null : _loadSessionData,
+            tooltip: 'Reload',
           ),
+          const SizedBox(width: 4),
         ],
       ),
       body: _buildBody(currentTranscript),
@@ -2131,6 +2168,9 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                                 Expanded(
                                   child: Align(
                                     alignment: Alignment.centerLeft,
+                                    child: SingleChildScrollView(
+                                    scrollDirection: Axis.horizontal,
+                                    reverse: false,
                                     child: LanguageSelector(
                                       transcripts: _transcripts,
                                       selectedLanguage: _selectedLanguage,
@@ -2138,11 +2178,17 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                                       enabled:
                                           !_isEditingMode && !_isSaving,
                                     ),
+                                    ),
                                   ),
                                 ),
+                                _buildSplitToggle(),
+                                const TranscriptModeToggle(),
                                 Expanded(
                                   child: Align(
                                     alignment: Alignment.centerRight,
+                                    child: SingleChildScrollView(
+                                    scrollDirection: Axis.horizontal,
+                                    reverse: true,
                                     child: LanguageSelector(
                                       transcripts: _transcripts,
                                       selectedLanguage:
@@ -2152,47 +2198,40 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                                       enabled:
                                           !_isEditingMode && !_isSaving,
                                     ),
+                                    ),
                                   ),
                                 ),
                               ],
                             )
                           : Row(
                               children: [
-                                LanguageSelector(
-                                  transcripts: _transcripts,
-                                  selectedLanguage: _selectedLanguage,
-                                  onLanguageSelected: _selectLanguage,
-                                  enabled: !_isEditingMode && !_isSaving,
+                                // Selectors scroll sideways on narrow
+                                // screens; the switches stay visible.
+                                Expanded(
+                                  child: SingleChildScrollView(
+                                    scrollDirection: Axis.horizontal,
+                                    child: Row(
+                                      children: [
+                                        LanguageSelector(
+                                          transcripts: _transcripts,
+                                          selectedLanguage: _selectedLanguage,
+                                          onLanguageSelected: _selectLanguage,
+                                          enabled:
+                                              !_isEditingMode && !_isSaving,
+                                        ),
+                                        const SizedBox(width: 8),
+                                        if (!_isEditingMode &&
+                                            _ttsTracks.isNotEmpty)
+                                          _TTSSelector(
+                                            tracks: _ttsTracks,
+                                            selected: _selectedTts,
+                                            enabled: !_isSaving,
+                                            onChanged: _applyTTSSource,
+                                          ),
+                                      ],
+                                    ),
+                                  ),
                                 ),
-                                const SizedBox(width: 8),
-                                if (!_isEditingMode && _ttsTracks.isNotEmpty)
-                                  _TTSSelector(
-                                    tracks: _ttsTracks,
-                                    selected: _selectedTts,
-                                    enabled: !_isSaving,
-                                    onChanged: _applyTTSSource,
-                                  ),
-                                const Spacer(),
-                                if (_isEditingMode)
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 8, vertical: 4),
-                                    margin:
-                                        const EdgeInsets.only(right: 8),
-                                    decoration: BoxDecoration(
-                                      color: Colors.orange,
-                                      borderRadius:
-                                          BorderRadius.circular(4),
-                                    ),
-                                    child: const Text(
-                                      'EDITING',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ),
                                 if (_isSaving)
                                   const Padding(
                                     padding: EdgeInsets.only(right: 8),
@@ -2203,6 +2242,10 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                                           strokeWidth: 2),
                                     ),
                                   ),
+                                if (!_isEditingMode) ...[
+                                  _buildSplitToggle(),
+                                  const TranscriptModeToggle(),
+                                ],
                               ],
                             ),
                     ),
@@ -2240,6 +2283,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
       return TranscriptView(
         transcript: transcript,
         highlightedIndex: _currentSegmentIndex,
+        showModeToggle: false,
         scrollController: _scrollController,
       );
     }
@@ -2462,6 +2506,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
             ? _transcripts.first
             : TranscriptData.empty(),
         highlightedIndex: _currentSegmentIndex,
+        showModeToggle: false,
         scrollController: _scrollController,
       );
     }
@@ -2482,6 +2527,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
           child: TranscriptView(
             transcript: left,
             highlightedIndex: _currentSegmentIndex,
+            showModeToggle: false,
             scrollController: _scrollController,
           ),
         ),
@@ -2493,6 +2539,7 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                 child: TranscriptView(
                   transcript: right,
                   highlightedIndex: _currentSegmentIndex,
+                  showModeToggle: false,
                   scrollController: _secondaryScrollController,
                 ),
               ),
@@ -2536,120 +2583,327 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
   }
 
 
+  // ─── Bottom action bar ─────────────────────────────────────────────
+  //
+  //  Simple:  [Export data] [Files] [All files as ZIP]
+  //  Expert:  [Export data] [Files] [All files as ZIP] │ [Subtitles] [Edit] [Video subtitles]
+  //  (One language ⇄ Side by side and Running text ⇄ Lines are switch
+  //   buttons above the transcript.)
+  //  Editing (Expert only):
+  //   [× Cancel]   ✎ Editing · English            [VTT]  [Save to server]
+  //
+  //  Narrow screens show the same buttons as icons with tooltips.
+
+  static const Color _expertAccent = Color(0xFFE65100); // deep orange
+
   Widget _buildToolbar(TranscriptData currentTranscript) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
       decoration: BoxDecoration(
-        color: Colors.grey.shade100,
+        color: _isEditingMode ? const Color(0xFFFFF3E0) : Colors.white,
         border: Border(
-          bottom: BorderSide(color: Colors.grey.shade300),
+          top: BorderSide(
+            color: _isEditingMode
+                ? _expertAccent.withValues(alpha: 0.4)
+                : Colors.grey.shade300,
+          ),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 6,
+            offset: const Offset(0, -2),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        top: false,
+        child: LayoutBuilder(
+          builder: (context, c) {
+            final compact = c.maxWidth < 760;
+            return _isEditingMode
+                ? _buildEditingToolbar(currentTranscript, compact)
+                : _buildNormalToolbar(currentTranscript, compact, c.maxWidth);
+          },
         ),
       ),
-      child: _isEditingMode
-          ? _buildEditingToolbar(currentTranscript)
-          : _buildNormalToolbar(currentTranscript),
     );
   }
 
-  /// Cancel on the left, actions on the right. Only shown while the
-  /// transcript editor is open.
-  Widget _buildEditingToolbar(TranscriptData transcript) {
-    return Row(
-      children: [
-        TextButton.icon(
-          onPressed: _isSaving ? null : _exitEditMode,
-          icon: const Icon(Icons.close, size: 18),
-          label: const Text('Cancel'),
+  /// One action button: icon + label when there is room, icon only
+  /// (with the label as tooltip) on narrow screens.
+  Widget _barButton({
+    required IconData icon,
+    required String label,
+    required VoidCallback? onPressed,
+    String? tooltip,
+    Color? color,
+    bool primary = false,
+    bool compact = false,
+    Widget? busyIcon,
+  }) {
+    final fg = color ?? Colors.blue.shade700;
+    final iconWidget = busyIcon ?? Icon(icon, size: 18);
+    final shape =
+        RoundedRectangleBorder(borderRadius: BorderRadius.circular(10));
+    final Widget button;
+    if (compact) {
+      button = primary
+          ? IconButton.filledTonal(
+              onPressed: onPressed,
+              icon: iconWidget,
+              style: IconButton.styleFrom(
+                foregroundColor: fg,
+                backgroundColor: fg.withValues(alpha: 0.12),
+                shape: shape,
+              ),
+            )
+          : IconButton(
+              onPressed: onPressed,
+              icon: iconWidget,
+              style: IconButton.styleFrom(foregroundColor: fg, shape: shape),
+            );
+    } else if (primary) {
+      button = FilledButton.tonalIcon(
+        onPressed: onPressed,
+        icon: iconWidget,
+        label: Text(label),
+        style: FilledButton.styleFrom(
+          foregroundColor: fg,
+          backgroundColor: fg.withValues(alpha: 0.12),
+          shape: shape,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          textStyle:
+              const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
         ),
-        const Spacer(),
-        OutlinedButton.icon(
-          onPressed: _isSaving ? null : _downloadCurrentVtt,
-          icon: const Icon(Icons.download, size: 18),
-          label: const Text('Download VTT'),
-          style: OutlinedButton.styleFrom(
-            foregroundColor: Colors.blue,
-          ),
+      );
+    } else {
+      button = OutlinedButton.icon(
+        onPressed: onPressed,
+        icon: iconWidget,
+        label: Text(label),
+        style: OutlinedButton.styleFrom(
+          foregroundColor: fg,
+          side: BorderSide(color: fg.withValues(alpha: 0.35)),
+          shape: shape,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          textStyle:
+              const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
         ),
-        const SizedBox(width: 8),
-        ElevatedButton.icon(
-          onPressed: _isSaving
-              ? null
-              : () async {
-                  final updated = TranscriptData(
-                    language: transcript.language,
-                    text: transcript.text,
-                    segments: _editSegments,
-                    sender: transcript.sender,
-                  );
-                  await _saveEditedTranscript(updated);
-                },
-          icon: _isSaving
-              ? const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Colors.white,
-                  ),
-                )
-              : const Icon(Icons.cloud_upload, size: 18),
-          label: Text(_isSaving ? 'Saving…' : 'Save to Server'),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.green,
-            foregroundColor: Colors.white,
-          ),
-        ),
-      ],
+      );
+    }
+    return Tooltip(message: tooltip ?? label, child: button);
+  }
+
+  /// One transcript ⇄ two side by side — one switch button above the
+  /// transcript (in the language bar).
+  Widget _buildSplitToggle() {
+    final canSplit = _transcripts.length >= 2;
+    final split = _view == SessionView.split;
+    return ViewToggleButton(
+      icon: split ? Icons.vertical_split_outlined : Icons.article_outlined,
+      label: split ? 'Side by side' : 'One language',
+      tooltip: !canSplit
+          ? 'Side by side needs at least two languages'
+          : split
+              ? 'Side by side — tap to show one language'
+              : 'One language — tap to show two side by side',
+      onTap: canSplit && !_isEditingMode && !_isSaving
+          ? () => _setView(split ? SessionView.transcript : SessionView.split)
+          : null,
     );
   }
 
-  /// Default toolbar. The old SegmentedButton is replaced by a "+" that
-  /// opens the second panel; the matching "×" lives on the second panel
-  /// itself (see _buildSplitTranscriptView).
-  Widget _buildNormalToolbar(TranscriptData currentTranscript) {
-    final buttons = <Widget>[
-      IconButton(
-        icon: const Icon(Icons.edit),
+  Widget _buildNormalToolbar(
+      TranscriptData currentTranscript, bool compact, double width) {
+    final gap = SizedBox(width: compact ? 2 : 8);
+    final filesOpen = _view == SessionView.files;
+
+    // Simple and Expert: Export data · Files · All files as ZIP.
+    final downloads = <Widget>[
+      _barButton(
+        icon: Icons.ios_share,
+        label: 'Export data',
+        tooltip: 'Export transcript / translation (TXT, DOCX, RTF …)',
+        primary: true,
+        compact: compact,
+        onPressed: _isSaving ? null : _showExportDialog,
+      ),
+      gap,
+      _barButton(
+        icon: filesOpen ? Icons.article_outlined : Icons.folder_outlined,
+        label: filesOpen ? 'Back to transcript' : 'Files',
+        tooltip: filesOpen
+            ? 'Back to the transcript'
+            : 'Show all files of this session',
+        compact: compact,
+        onPressed: _isSaving
+            ? null
+            : () => _setView(filesOpen ? _textView : SessionView.files),
+      ),
+      gap,
+      _barButton(
+        icon: Icons.folder_zip_outlined,
+        label: 'All files as ZIP',
+        tooltip: 'Download all files of this session as one ZIP',
+        compact: compact,
+        busyIcon: _isDownloadingAll
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : null,
+        onPressed:
+            (_files.isNotEmpty && !_isDownloadingAll) ? _downloadAllFiles : null,
+      ),
+    ];
+
+    if (UiMode.isSimple) {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: downloads,
+      );
+    }
+
+    // Expert only (orange).
+    final expert = <Widget>[
+      Container(
+        width: 1,
+        height: 28,
+        margin: EdgeInsets.symmetric(horizontal: compact ? 4 : 10),
+        color: Colors.grey.shade300,
+      ),
+      _barButton(
+        icon: Icons.subtitles_outlined,
+        label: 'Subtitles',
+        tooltip: 'Download subtitles (VTT) of the selected language',
+        color: _expertAccent,
+        compact: compact,
+        onPressed: _isSaving ? null : _downloadCurrentVtt,
+      ),
+      gap,
+      _barButton(
+        icon: Icons.edit_outlined,
+        label: 'Edit',
+        tooltip: 'Edit the transcript of the selected language',
+        color: _expertAccent,
+        compact: compact,
         onPressed: currentTranscript.segments.isNotEmpty && !_isSaving
             ? () => _enterEditMode(currentTranscript)
             : null,
-        tooltip: 'Edit Transcript',
       ),
-      IconButton(
-        icon: const Icon(Icons.download),
-        onPressed: _showExportDialog,
-        tooltip: 'Export Transcript',
-      ),
-      IconButton(
-        icon: const Icon(Icons.subtitles),
-        onPressed: _isSaving ? null : _downloadCurrentVtt,
-        tooltip: 'Download VTT',
-      ),
-      const SizedBox(width: 12),
-      Container(width: 1, height: 28, color: Colors.grey.shade300),
-      const SizedBox(width: 12),
-      if (_view == SessionView.transcript)
-        IconButton(
-          icon: const Icon(Icons.add),
-          onPressed: () => _setView(SessionView.split),
-          tooltip: 'Add second panel',
-        )
-      else
-        const SizedBox(width: 48),
-      const SizedBox(width: 12),
-      Container(width: 1, height: 28, color: Colors.grey.shade300),
-      const SizedBox(width: 12),
-      IconButton(
-        icon: const Icon(Icons.video_settings),
-        onPressed: _updateVideoSubtitles,
-        tooltip: 'Update Video Subtitles',
+      gap,
+      _barButton(
+        icon: Icons.video_settings_outlined,
+        label: 'Video subtitles',
+        tooltip: 'Choose which subtitles are embedded in the video',
+        color: _expertAccent,
+        compact: compact,
+        onPressed: _isSaving ? null : _updateVideoSubtitles,
       ),
     ];
 
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
-      child: Row(children: buttons),
+      child: ConstrainedBox(
+        // Fill the bar so the actions sit on the right; scroll if the
+        // screen is too narrow for everything.
+        constraints: BoxConstraints(minWidth: width),
+        child: IntrinsicWidth(
+          child: Row(
+            children: [
+              const Spacer(),
+              ...downloads,
+              ...expert,
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Only shown while the transcript editor is open (Expert mode).
+  Widget _buildEditingToolbar(TranscriptData transcript, bool compact) {
+    final badge = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: _expertAccent,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.edit, size: 14, color: Colors.white),
+          const SizedBox(width: 6),
+          const Text(
+              'Editing',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+        ],
+      ),
+    );
+
+    final save = FilledButton.icon(
+      onPressed: _isSaving
+          ? null
+          : () async {
+              final updated = TranscriptData(
+                language: transcript.language,
+                text: transcript.text,
+                segments: _editSegments,
+                sender: transcript.sender,
+              );
+              await _saveEditedTranscript(updated);
+            },
+      icon: _isSaving
+          ? const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Colors.white,
+              ),
+            )
+          : const Icon(Icons.cloud_done_outlined, size: 18),
+      label: Text(_isSaving ? 'Saving…' : (compact ? 'Save' : 'Save to server')),
+      style: FilledButton.styleFrom(
+        backgroundColor: Colors.green.shade600,
+        foregroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        textStyle: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
+      ),
+    );
+
+    return Row(
+      children: [
+        _barButton(
+          icon: Icons.close,
+          label: 'Cancel',
+          tooltip: 'Close the editor without saving',
+          color: Colors.blueGrey.shade700,
+          compact: compact,
+          onPressed: _isSaving ? null : _exitEditMode,
+        ),
+        const SizedBox(width: 10),
+        badge,
+        const Spacer(),
+        _barButton(
+          icon: Icons.subtitles_outlined,
+          label: 'Subtitles',
+          tooltip: 'Download the edited subtitles (VTT)',
+          compact: compact,
+          onPressed: _isSaving ? null : _downloadCurrentVtt,
+        ),
+        const SizedBox(width: 8),
+        save,
+      ],
     );
   }
 

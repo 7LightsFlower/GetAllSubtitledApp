@@ -8,12 +8,21 @@ class TranscriptView extends StatefulWidget {
   final ScrollController? scrollController;
   final String? title;
 
+  /// Show the Running text / Lines button inside the panel. Screens that
+  /// put a [TranscriptModeToggle] in their own toolbar pass false.
+  final bool showModeToggle;
+
+  /// Running text (true, default) or one line per segment with
+  /// timestamps. Shared by all transcript panels while the app is open.
+  static final ValueNotifier<bool> fluentMode = ValueNotifier<bool>(true);
+
   const TranscriptView({
     super.key,
     required this.transcript,
     required this.highlightedIndex,
     this.scrollController,
     this.title,
+    this.showModeToggle = true,
   });
 
   @override
@@ -23,9 +32,7 @@ class TranscriptView extends StatefulWidget {
 class _TranscriptViewState extends State<TranscriptView> {
   final GlobalKey _highlightKey = GlobalKey();
 
-  /// Running text (default) or one line per segment with timestamps.
-  /// Shared by all transcript panels and kept while the app is open.
-  static final ValueNotifier<bool> _fluent = ValueNotifier<bool>(true);
+  static ValueNotifier<bool> get _fluent => TranscriptView.fluentMode;
 
   @override
   void initState() {
@@ -89,6 +96,7 @@ class _TranscriptViewState extends State<TranscriptView> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (widget.title != null || widget.showModeToggle)
           Container(
             padding: EdgeInsets.fromLTRB(12, widget.title != null ? 4 : 0, 4,
                 widget.title != null ? 4 : 0),
@@ -115,7 +123,7 @@ class _TranscriptViewState extends State<TranscriptView> {
                           ),
                         ),
                 ),
-                _modeToggle(),
+                if (widget.showModeToggle) _modeToggle(),
               ],
             ),
           ),
@@ -521,6 +529,96 @@ class _TranscriptViewState extends State<TranscriptView> {
       child: Text(
         segment.text,
         softWrap: true, // ✅ Add this
+      ),
+    );
+  }
+}
+
+
+/// One button that flips between two views. It shows the current view
+/// (icon + label on wide screens) with a small ⇄ to say "tap to switch".
+class ViewToggleButton extends StatelessWidget {
+  const ViewToggleButton({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.tooltip,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final String tooltip;
+
+  /// null = disabled.
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final wide = MediaQuery.sizeOf(context).width >= 700;
+    final enabled = onTap != null;
+    final fg = enabled ? Colors.blue.shade800 : Colors.grey.shade400;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Tooltip(
+        message: tooltip,
+        child: Material(
+          color: enabled ? Colors.blueGrey.shade50 : Colors.grey.shade100,
+          borderRadius: BorderRadius.circular(10),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: onTap,
+            child: Padding(
+              padding: EdgeInsets.symmetric(
+                  horizontal: wide ? 10 : 8, vertical: 6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, size: 17, color: fg),
+                  if (wide) ...[
+                    const SizedBox(width: 6),
+                    Text(
+                      label,
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: fg,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(width: 4),
+                  Icon(Icons.swap_horiz, size: 14,
+                      color: fg.withValues(alpha: 0.6)),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Running text ⇄ Lines as one switch button, for a screen's own
+/// toolbar (pair it with `TranscriptView(showModeToggle: false)`).
+class TranscriptModeToggle extends StatelessWidget {
+  const TranscriptModeToggle({super.key, this.enabled = true});
+
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: TranscriptView.fluentMode,
+      builder: (context, fluent, _) => ViewToggleButton(
+        icon: fluent ? Icons.notes : Icons.format_list_bulleted,
+        label: fluent ? 'Running text' : 'Lines',
+        tooltip: fluent
+            ? 'Running text — tap for one line per segment with time'
+            : 'Lines — tap for running text',
+        onTap: enabled
+            ? () => TranscriptView.fluentMode.value = !fluent
+            : null,
       ),
     );
   }

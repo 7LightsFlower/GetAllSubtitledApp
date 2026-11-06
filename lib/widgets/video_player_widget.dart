@@ -173,7 +173,7 @@ class _VideoPlayerWidgetState extends State<VideoPlayerWidget> {
             if (!narrow) ...[
               const Icon(Icons.graphic_eq, color: Colors.white70, size: 18),
               const SizedBox(width: 6),
-              const Text('Original audio',
+              const Text('Original',
                   style: TextStyle(color: Colors.white70, fontSize: 12)),
               const SizedBox(width: 12),
             ],
