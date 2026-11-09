@@ -158,7 +158,11 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
   final List<String> _outputLanguages = <String>['en', 'de'];
   final List<String> _audioLanguages = <String>[];
 
-  String _availability = 'private';
+  /// Live sessions start as "private+qr" (the audience joins via the QR
+  /// code / link). Stored under its own key `live_availability`, so the
+  /// video default ("private") and older saves don't override it.
+  static const String _defaultLiveAvailability = 'private+qr';
+  String _availability = _defaultLiveAvailability;
   bool _profanityFilter = true;
   bool _filterMusic = true;
   bool _enableSummarization = true;
@@ -481,6 +485,7 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
         'output_languages': List<String>.from(_outputLanguages),
         'audio_languages': List<String>.from(_audioLanguages),
         'availability': _availability,
+        'live_availability': _availability,
         'format': _format,
         'smart_chaptering': _smartChaptering,
         'tts_quality_mode': _ttsQualityMode,
@@ -522,7 +527,13 @@ class _LiveAsrScreenState extends State<LiveAsrScreen>
 
     String pick(dynamic v, List<String> options, String current) =>
         (v is String && options.contains(v)) ? v : current;
-    _availability = pick(data['availability'], _availabilityOptions, _availability);
+    // Only a live choice counts here: video settings, global defaults
+    // and older live saves carry "availability" = private, which must
+    // not replace the live default private+qr.
+    if (data['live_availability'] is String) {
+      _availability = pick(
+          data['live_availability'], _availabilityOptions, _availability);
+    }
     _format = pick(data['format'], _formatOptions, _format);
     _smartChaptering =
         pick(data['smart_chaptering'], _chapteringOptions, _smartChaptering);
