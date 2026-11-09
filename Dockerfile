@@ -42,9 +42,22 @@ RUN flutter pub get
 #   docker build --build-arg API_BASE_URL=https://api.example.com
 ARG API_BASE_URL=""
 COPY . .
+# --no-tree-shake-icons: ship the COMPLETE icon font. Trimmed to the
+# icons in use, the font differs in every build under the same name, and
+# a browser holding an older copy shows new icons as empty buttons. The
+# full font is the same file in every build, so a cached copy is always
+# right (≈1.6 MB once, then from the cache).
 RUN flutter build web --release --no-wasm-dry-run \
     --pwa-strategy=none \
+    --no-tree-shake-icons \
     --dart-define=API_BASE_URL=${API_BASE_URL}
+
+# Give this build its own asset address (see web/flutter_bootstrap.js and
+# the /v/ rule in nginx.conf): assets of a new build are never taken from
+# a browser's cache of an older one.
+RUN BUILD_ID=$(date +%Y%m%d%H%M%S) \
+    && sed -i "s/__BUILD_ID__/${BUILD_ID}/" build/web/flutter_bootstrap.js \
+    && grep -q "/v/${BUILD_ID}/" build/web/flutter_bootstrap.js
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2: Flask API backend (only reachable via the Nginx proxy)

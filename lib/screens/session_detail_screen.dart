@@ -3537,6 +3537,95 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen>
   //  WIDGET BUILDERS – OUTPUT CHECK
   // ═══════════════════════════════════════════════════════════════════
 
+  /// Processing is done: just the result and the way to it. The session
+  /// id, status lines and check buttons of the running job are gone
+  /// (the History above still has every detail).
+  Widget _buildFinishedCard(int outputFiles) {
+    void open() {
+      final job = _jobHistory.firstWhere(
+        (j) => j['session_id'] == _savedSessionId,
+        orElse: () => {},
+      );
+      _viewHistoricalOutput(
+        _savedSessionId,
+        job['session_url'] ?? _savedSessionUrl,
+      );
+    }
+
+    final narrow = MediaQuery.sizeOf(context).width < 600;
+    final info = Row(
+      children: [
+        Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: Colors.green.shade50,
+            shape: BoxShape.circle,
+          ),
+          child: Icon(Icons.check_rounded, color: Colors.green.shade700),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Processing finished',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                '$outputFiles files ready',
+                style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+              ),
+              if (UiMode.isExpert)
+                SelectableText(
+                  'Session $_savedSessionId',
+                  maxLines: 1,
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+
+    final button = FilledButton.icon(
+      onPressed: open,
+      icon: const Icon(Icons.folder_open),
+      label: const Text('View output'),
+      style: FilledButton.styleFrom(
+        backgroundColor: Colors.green.shade600,
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+      ),
+    );
+
+    return Container(
+      margin: const EdgeInsets.only(top: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.green.shade200),
+      ),
+      child: narrow
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [info, const SizedBox(height: 12), button],
+            )
+          : Row(
+              children: [
+                Expanded(child: info),
+                const SizedBox(width: 16),
+                button,
+              ],
+            ),
+    );
+  }
+
   Widget _buildOutputCheckSection() {
     if (!_hasSessionId) {
       // No active session on this device, but the user may still have
@@ -3558,7 +3647,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen>
             Expanded(
               child: Text(
                 'No session is active on this device right now. '
-                'Use Job History below to check or view past sessions.',
+                'Open History above to view past sessions.',
                 style: TextStyle(fontSize: 13, color: Colors.grey[700]),
               ),
             ),
@@ -3575,6 +3664,8 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen>
     final int outputFiles = currentJobIndex != -1
         ? (_jobHistory[currentJobIndex]['output_files'] ?? 0)
         : 0;
+
+    if (hasOutput) return _buildFinishedCard(outputFiles);
 
     return Container(
       margin: const EdgeInsets.only(top: 16),
@@ -4107,8 +4198,19 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen>
     );
   }
 
+  /// The job of the current session has finished and its output is
+  /// here — nothing left to monitor.
+  bool get _currentJobDone {
+    if (!_hasSessionId || _savedSessionId.isEmpty) return false;
+    final job = _jobHistory.firstWhere(
+      (j) => j['session_id'] == _savedSessionId,
+      orElse: () => const {},
+    );
+    return job['has_output'] == true;
+  }
+
   Widget _buildLiveProgressPanel() {
-    if (!_hasSessionId || _savedSessionId.isEmpty) {
+    if (!_hasSessionId || _savedSessionId.isEmpty || _currentJobDone) {
       return const SizedBox.shrink();
     }
 
@@ -4191,8 +4293,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen>
               _buildDetailHeader(),
               SizedBox(height: _sectionGap(context)),
 
-              // ─── 1st: Job History (collapsible, Expert only) ─────
-              if (UiMode.isExpert)
+              // ─── 1st: Job History (collapsible, both modes) ──────
               Card(
                 elevation: 2,
                 shape: RoundedRectangleBorder(
@@ -4211,9 +4312,9 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen>
                     ),
                     title: Row(
                       children: [
-                        const Text(
-                          'Job History',
-                          style: TextStyle(
+                        Text(
+                          UiMode.isExpert ? 'Job History' : 'History',
+                          style: const TextStyle(
                             fontWeight: FontWeight.w600,
                             fontSize: 16,
                           ),
@@ -4265,7 +4366,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen>
                   ),
                 ),
               ),
-              if (UiMode.isExpert) SizedBox(height: _sectionGap(context)),
+              SizedBox(height: _sectionGap(context)),
 
               // ─── 2nd: Job Settings (collapsible) ─────────────────
               Card(
