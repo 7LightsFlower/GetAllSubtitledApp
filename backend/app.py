@@ -57,9 +57,11 @@ for _module in _MODULES:
     getattr(_module, "_link_late_names", lambda: None)()
 
 
-users["testuser@example.com"] = {
-    "name": "Test User",
-    "password": "YourSecurePassword123",
+# Test account, prefilled on the login screen (lib/constants.dart:
+# dummyEmail / dummyPassword — keep both in step).
+users["guest@lecture-translator.kit.edu"] = {
+    "name": "Guest",
+    "password": "go in and check",
 }
 
 

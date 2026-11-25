@@ -114,9 +114,10 @@ String get videoApiBaseUrl => internalServerUrl;
 const String internalEmail = 'admin@example.com';
 const String internalPassword = 'YourActualPassword123';
 
-// ─── Dummy credentials for testing ────────────────────────────
-const String dummyEmail = 'testuser@example.com';
-const String dummyPassword = 'YourSecurePassword123';
+// ─── Test account (prefilled on the login screen) ─────────────
+// Easy to read out or type. Must match the account in backend/app.py.
+const String dummyEmail = 'guest@lecture-translator.kit.edu';
+const String dummyPassword = 'go in and check';
 
 // ─── Dex OAuth 2.0 Configuration ──────────────────────────────
 const String dexClientId = 'traefik-forward-auth';

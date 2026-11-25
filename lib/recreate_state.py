@@ -106,9 +106,9 @@ def recreate_state():
     # Create new state
     new_state = {
         "users": {
-            "testuser@example.com": {
-                "name": "Test User", 
-                "password": "YourSecurePassword123"
+            "guest@lecture-translator.kit.edu": {
+                "name": "Guest",
+                "password": "go in and check"
             }
         },
         "videos": [],
