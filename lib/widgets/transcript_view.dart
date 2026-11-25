@@ -16,6 +16,20 @@ class TranscriptView extends StatefulWidget {
   /// timestamps. Shared by all transcript panels while the app is open.
   static final ValueNotifier<bool> fluentMode = ValueNotifier<bool>(true);
 
+  /// Show the Live Notes boxes (markup "notes"). Shared like [fluentMode].
+  static final ValueNotifier<bool> showNotes = ValueNotifier<bool>(true);
+
+  /// Show the summaries (markup "summary" and "global_summary").
+  static final ValueNotifier<bool> showSummaries = ValueNotifier<bool>(true);
+
+  /// Whether [segments] contain notes / summaries — the switches are only
+  /// worth showing when there is something to hide.
+  static bool hasNotes(List<SegmentData> segments) =>
+      segments.any((s) => s.markup == 'notes' && s.text.trim().isNotEmpty);
+  static bool hasSummaries(List<SegmentData> segments) => segments.any((s) =>
+      (s.markup == 'summary' || s.markup == 'global_summary') &&
+      s.text.trim().isNotEmpty);
+
   const TranscriptView({
     super.key,
     required this.transcript,
@@ -38,11 +52,15 @@ class _TranscriptViewState extends State<TranscriptView> {
   void initState() {
     super.initState();
     _fluent.addListener(_onModeChanged);
+    TranscriptView.showNotes.addListener(_onModeChanged);
+    TranscriptView.showSummaries.addListener(_onModeChanged);
   }
 
   @override
   void dispose() {
     _fluent.removeListener(_onModeChanged);
+    TranscriptView.showNotes.removeListener(_onModeChanged);
+    TranscriptView.showSummaries.removeListener(_onModeChanged);
     super.dispose();
   }
 
@@ -205,6 +223,7 @@ class _TranscriptViewState extends State<TranscriptView> {
         continue;
       }
       if (!_isPlainSegment(seg)) {
+        if (_isHidden(seg)) continue;
         flush();
         blocks.add(_buildSpecialMarkup(seg));
         continue;
@@ -309,6 +328,7 @@ class _TranscriptViewState extends State<TranscriptView> {
 
     // If it's a special markup, render differently
     if (isSpecialMarkup) {
+      if (_isHidden(segment)) return const SizedBox.shrink();
       return _buildSpecialMarkup(segment);
     }
 
@@ -383,6 +403,15 @@ class _TranscriptViewState extends State<TranscriptView> {
         ],
       ),
     );
+  }
+
+  /// Notes / summaries switched off in the toolbar.
+  bool _isHidden(SegmentData s) {
+    if (s.markup == 'notes') return !TranscriptView.showNotes.value;
+    if (s.markup == 'summary' || s.markup == 'global_summary') {
+      return !TranscriptView.showSummaries.value;
+    }
+    return false;
   }
 
   Widget _buildSpecialMarkup(SegmentData segment) {
@@ -621,6 +650,108 @@ class TranscriptModeToggle extends StatelessWidget {
             ? () => TranscriptView.fluentMode.value = !fluent
             : null,
       ),
+    );
+  }
+}
+
+
+/// On/off switch for one kind of extra content (notes, summaries).
+/// On: tinted with the content's colour. Off: grey, crossed-out eye.
+class ContentToggleButton extends StatelessWidget {
+  const ContentToggleButton({
+    super.key,
+    required this.notifier,
+    required this.icon,
+    required this.label,
+    required this.color,
+  });
+
+  final ValueNotifier<bool> notifier;
+  final IconData icon;
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final wide = MediaQuery.sizeOf(context).width >= 700;
+    return ValueListenableBuilder<bool>(
+      valueListenable: notifier,
+      builder: (context, on, _) {
+        final fg = on ? color : Colors.blueGrey.shade400;
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: Tooltip(
+            message: on ? '$label shown — tap to hide' : '$label hidden — tap to show',
+            child: Material(
+              color: on ? color.withValues(alpha: 0.10) : Colors.grey.shade100,
+              borderRadius: BorderRadius.circular(10),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(10),
+                onTap: () => notifier.value = !on,
+                child: Padding(
+                  padding: EdgeInsets.symmetric(
+                      horizontal: wide ? 10 : 8, vertical: 6),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(icon, size: wide ? 17 : 19, color: fg),
+                      if (wide) ...[
+                        const SizedBox(width: 6),
+                        Text(
+                          label,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                            color: fg,
+                            decoration: on ? null : TextDecoration.lineThrough,
+                          ),
+                        ),
+                      ],
+                      const SizedBox(width: 4),
+                      Icon(
+                        on ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                        size: wide ? 14 : 15,
+                        color: fg.withValues(alpha: 0.8),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// The Notes and Summaries switches, each only when [segments] have such
+/// content.
+class ContentToggles extends StatelessWidget {
+  const ContentToggles({super.key, required this.segments});
+
+  final List<SegmentData> segments;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (TranscriptView.hasNotes(segments))
+          ContentToggleButton(
+            notifier: TranscriptView.showNotes,
+            icon: Icons.sticky_note_2_outlined,
+            label: 'Notes',
+            color: Colors.blue.shade700,
+          ),
+        if (TranscriptView.hasSummaries(segments))
+          ContentToggleButton(
+            notifier: TranscriptView.showSummaries,
+            icon: Icons.summarize_outlined,
+            label: 'Summaries',
+            color: Colors.green.shade700,
+          ),
+      ],
     );
   }
 }

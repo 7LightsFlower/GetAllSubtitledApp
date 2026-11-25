@@ -2183,6 +2183,12 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                                 ),
                                 _buildSplitToggle(),
                                 const TranscriptModeToggle(),
+                                ContentToggles(segments: [
+                                  for (final t in _transcripts)
+                                    if (t.language == _selectedLanguage ||
+                                        t.language == _secondaryLanguage)
+                                      ...t.segments,
+                                ]),
                                 Expanded(
                                   child: Align(
                                     alignment: Alignment.centerRight,
@@ -2248,6 +2254,8 @@ class _SessionOutputScreenState extends State<SessionOutputScreen> {
                                   if (_transcripts.length >= 2)
                                     _buildSplitToggle(),
                                   const TranscriptModeToggle(),
+                                  ContentToggles(
+                                      segments: currentTranscript.segments),
                                 ],
                               ],
                             ),
