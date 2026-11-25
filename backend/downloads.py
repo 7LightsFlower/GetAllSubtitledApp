@@ -595,6 +595,21 @@ def _download_session_files_locked(session_id, token, server_url):
                 f"Downloaded {len(tts_files)} TTS track(s)",
                 progress=0.97,
             )
+            # KIT joins the TTS pieces back to back; put them at the
+            # times of the original (see tts_sync.py).
+            try:
+                from .tts_sync import sync_session
+
+                for r in sync_session(_session_dir(session_id)):
+                    if r.get("status") == "synced":
+                        _job_log(
+                            session_id,
+                            f"Synchronized {r['file']} with the original "
+                            f"({r['kit_length_s']:.0f} s → {r['length_s']:.0f} s)",
+                        )
+            except Exception as e:  # never fail the job over this
+                logging.warning("TTS sync failed for %s: %s",
+                                _short_sid(session_id), e)
         else:
             logging.info(
                 "No TTS files downloaded for %s "

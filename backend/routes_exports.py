@@ -339,13 +339,26 @@ def session_tts(session_id, label):
                 name,
             )
             continue
+        # Sessions processed before tts_sync existed: sync them now, in
+        # the background (the next load gets the synced file).
+        try:
+            from .tts_sync import needs_sync, sync_session_in_background
+
+            if needs_sync(session_dir) and sync_session_in_background(session_dir):
+                logging.info("session_tts: syncing TTS of %s in the background",
+                             session_id[:12])
+        except Exception as e:
+            logging.warning("session_tts: TTS sync not started: %s", e)
         logging.info("session_tts: serving local %s", name)
-        return send_file(
+        resp = send_file(
             path,
             mimetype="audio/wav",
             conditional=True,
             as_attachment=False,
         )
+        # The file is replaced once synced: browsers must check again.
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
 
     # ── 2. Live proxy (unchanged) ─────────────────────────────────
     server = (sessions.get(session_id, {}).get("server") or INTERNAL_SERVER_URL).rstrip(

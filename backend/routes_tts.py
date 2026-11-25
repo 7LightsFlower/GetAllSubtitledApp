@@ -109,6 +109,25 @@ def session_tts_backfill(session_id):
     )
 
 
+@app.route("/session-tts-sync/<path:session_id>", methods=["GET", "POST", "OPTIONS"])
+def session_tts_sync(session_id):
+    """Put the session's TTS WAVs in time with the original (tts_sync.py).
+
+    ?force=1 redoes it from KIT's original files. Returns per file what
+    was done (pieces, sped-up pieces, KIT length → new length)."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+    from .tts_sync import sync_session
+
+    force = request.args.get("force") in ("1", "true", "yes")
+    try:
+        results = sync_session(_session_dir(session_id), force=force)
+    except Exception as e:
+        logging.exception("TTS sync failed for %s", session_id[:12])
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"session_id": session_id, "results": results})
+
+
 @app.route("/session-tts-backfill-all", methods=["POST", "OPTIONS"])
 def session_tts_backfill_all():
     """Backfill TTS for every session the server currently knows about."""
@@ -304,7 +323,9 @@ def download_session_zip(session_id):
 
     try:
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-            for root, _, files in os.walk(session_dir):
+            for root, dirs, files in os.walk(session_dir):
+                # KIT's unsynced TTS originals (tts_sync.py) stay out.
+                dirs[:] = [d for d in dirs if d != "_kit_tts"]
                 for file in files:
                     file_path = os.path.join(root, file)
                     try:
