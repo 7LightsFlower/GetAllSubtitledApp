@@ -59,10 +59,9 @@ for _module in _MODULES:
 
 # Test account, prefilled on the login screen (lib/constants.dart:
 # dummyEmail / dummyPassword — keep both in step).
-users["guest@lecture-translator.kit.edu"] = {
-    "name": "Guest",
-    "password": "go in and check",
-}
+TEST_ACCOUNT_EMAIL = "guest@lecture-translator.kit.edu"
+TEST_ACCOUNT = {"name": "Guest", "password": "go in and check"}
+users[TEST_ACCOUNT_EMAIL] = dict(TEST_ACCOUNT)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -96,6 +95,10 @@ def _initialise_state_once() -> None:
         )
     except (OSError, ValueError, TypeError, KeyError, RuntimeError):
         logging.exception("startup: load_state() failed; continuing with empty state")
+
+    # load_state() replaces `users` with the saved accounts: add the test
+    # account (again), with its current password.
+    users[TEST_ACCOUNT_EMAIL] = dict(TEST_ACCOUNT)
 
     # Reconciliation: safe to run every startup. Adding missing entries,
     # pruning deleted files, regenerating thumbnails.
